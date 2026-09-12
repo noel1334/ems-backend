@@ -1,20 +1,30 @@
 import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
 
-const SALT_ROUNDS = 12;
+const BCRYPT_SALT_ROUNDS = 12;
 
 export const hashPassword = async (password) => {
-  return bcrypt.hash(password, SALT_ROUNDS);
+    return bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 };
 
-export const comparePassword = async (password, passwordHash) => {
-  return bcrypt.compare(password, passwordHash);
-};
-
-export const generateRandomToken = (bytes = 48) => {
-  return crypto.randomBytes(bytes).toString("hex");
+export const comparePassword = async (
+    password,
+    passwordHash
+) => {
+    return bcrypt.compare(password, passwordHash);
 };
 
 export const hashToken = (token) => {
-  return crypto.createHash("sha256").update(token).digest("hex");
+    return crypto
+        .createHash("sha256")
+        .update(token)
+        .digest("hex");
+};
+
+export const generateRandomToken = (bytes = 32) => {
+    return crypto.randomBytes(bytes).toString("hex");
+};
+
+export const generateTokenId = () => {
+    return crypto.randomUUID();
 };
