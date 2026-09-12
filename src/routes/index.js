@@ -1,29 +1,39 @@
 import { Router } from "express";
-import companyRoutes from "../modules/companies/company.routes.js";
 import authRoutes from "../modules/auth/auth.routes.js";
+import companyRoutes from "../modules/companies/company.routes.js";
+import userRoutes from "../modules/users/user.routes.js";
+import rbacRoutes from "../modules/rbac/rbac.routes.js";
 
 const router = Router();
 
-// ============================================================
-// HEALTH
-// ============================================================
+router.get(
+    "/health",
+    (req, res) => {
+        return res.status(200).json({
+            success: true,
+            message: "EMS API is healthy"
+        });
+    }
+);
 
-router.get("/health", (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "EMS API is running",
-    data: {
-      service: "ems-backend",
-      environment: process.env.NODE_ENV || "development",
-    },
-    requestId: req.requestId,
-  });
-});
+router.use(
+    "/auth",
+    authRoutes
+);
 
-// ============================================================
-// COMPANY
-// ============================================================
+router.use(
+    "/companies",
+    companyRoutes
+);
 
-router.use("/companies", companyRoutes);
-router.use("/auth", authRoutes);
+router.use(
+    "/users",
+    userRoutes
+);
+
+router.use(
+    "/rbac",
+    rbacRoutes
+);
+
 export default router;
