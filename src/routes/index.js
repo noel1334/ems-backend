@@ -7,6 +7,8 @@ import rbacRoutes from "../modules/rbac/rbac.routes.js";
 
 import departmentRoutes from "../modules/departments/department.routes.js";
 import designationRoutes from "../modules/designations/designation.routes.js";
+
+import employeeProfileRoutes from "../modules/employees/employee-profile.routes.js";
 import employeeRoutes from "../modules/employees/employee.routes.js";
 
 const router = Router();
@@ -49,6 +51,11 @@ router.use(
 router.use(
     "/designations",
     designationRoutes
+);
+
+router.use(
+    "/employees",
+    employeeProfileRoutes
 );
 
 router.use(
