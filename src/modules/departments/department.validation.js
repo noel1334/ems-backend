@@ -8,33 +8,27 @@ const optionalText = (max = 255) =>
         .optional()
         .nullable();
 
-export const createDesignationSchema = z.object({
+export const createDepartmentSchema = z.object({
     name: z
         .string()
         .trim()
-        .min(2, "Designation name must contain at least 2 characters")
-        .max(150),
+        .min(2, "Department name must contain at least 2 characters")
+        .max(150, "Department name cannot exceed 150 characters"),
 
     code: z
         .string()
         .trim()
-        .min(2, "Designation code must contain at least 2 characters")
-        .max(30)
+        .min(2, "Department code must contain at least 2 characters")
+        .max(30, "Department code cannot exceed 30 characters")
         .regex(
             /^[A-Za-z0-9_-]+$/,
-            "Designation code may only contain letters, numbers, underscores and hyphens"
+            "Department code may only contain letters, numbers, underscores and hyphens"
         ),
-
-    departmentId: z
-        .string()
-        .uuid("Invalid department ID")
-        .optional()
-        .nullable(),
 
     description: optionalText(500)
 });
 
-export const updateDesignationSchema = z
+export const updateDepartmentSchema = z
     .object({
         name: z
             .string()
@@ -50,15 +44,9 @@ export const updateDesignationSchema = z
             .max(30)
             .regex(
                 /^[A-Za-z0-9_-]+$/,
-                "Designation code may only contain letters, numbers, underscores and hyphens"
+                "Department code may only contain letters, numbers, underscores and hyphens"
             )
             .optional(),
-
-        departmentId: z
-            .string()
-            .uuid("Invalid department ID")
-            .optional()
-            .nullable(),
 
         description: optionalText(500),
 
@@ -69,7 +57,11 @@ export const updateDesignationSchema = z
         "At least one field must be provided"
     );
 
-export const designationListQuerySchema = z.object({
+export const departmentIdSchema = z.object({
+    id: z.string().uuid("Invalid department ID")
+});
+
+export const departmentListQuerySchema = z.object({
     page: z.coerce.number().int().min(1).default(1),
 
     limit: z.coerce
@@ -83,11 +75,6 @@ export const designationListQuerySchema = z.object({
         .string()
         .trim()
         .max(100)
-        .optional(),
-
-    departmentId: z
-        .string()
-        .uuid("Invalid department ID")
         .optional(),
 
     isActive: z
