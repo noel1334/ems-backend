@@ -11,22 +11,38 @@ import designationRoutes from "../modules/designations/designation.routes.js";
 import employeeProfileRoutes from "../modules/employees/employee-profile.routes.js";
 import employeeRoutes from "../modules/employees/employee.routes.js";
 
+import shiftRoutes from "../modules/shifts/shift.routes.js";
+import scheduleRoutes from "../modules/schedules/schedule.routes.js";
+import holidayRoutes from "../modules/holidays/holiday.routes.js";
+
 const router = Router();
 
-router.get(
-    "/health",
-    (req, res) => {
-        return res.status(200).json({
-            success: true,
-            message: "EMS API is healthy"
-        });
-    }
-);
+/*
+|--------------------------------------------------------------------------
+| HEALTH
+|--------------------------------------------------------------------------
+*/
 
-router.use(
-    "/auth",
-    authRoutes
-);
+router.get("/health", (req, res) => {
+    return res.status(200).json({
+        success: true,
+        message: "EMS API is healthy",
+    });
+});
+
+/*
+|--------------------------------------------------------------------------
+| AUTH
+|--------------------------------------------------------------------------
+*/
+
+router.use("/auth", authRoutes);
+
+/*
+|--------------------------------------------------------------------------
+| COMPANY / USER / RBAC
+|--------------------------------------------------------------------------
+*/
 
 router.use(
     "/companies",
@@ -43,6 +59,12 @@ router.use(
     rbacRoutes
 );
 
+/*
+|--------------------------------------------------------------------------
+| ORGANIZATION
+|--------------------------------------------------------------------------
+*/
+
 router.use(
     "/departments",
     departmentRoutes
@@ -53,6 +75,12 @@ router.use(
     designationRoutes
 );
 
+/*
+|--------------------------------------------------------------------------
+| EMPLOYEES
+|--------------------------------------------------------------------------
+*/
+
 router.use(
     "/employees",
     employeeProfileRoutes
@@ -61,6 +89,27 @@ router.use(
 router.use(
     "/employees",
     employeeRoutes
+);
+
+/*
+|--------------------------------------------------------------------------
+| STAGE 9
+|--------------------------------------------------------------------------
+*/
+
+router.use(
+    "/shifts",
+    shiftRoutes
+);
+
+router.use(
+    "/schedules",
+    scheduleRoutes
+);
+
+router.use(
+    "/holidays",
+    holidayRoutes
 );
 
 export default router;

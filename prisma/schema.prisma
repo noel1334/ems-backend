@@ -7,9 +7,11 @@ datasource db {
         url      = env("DATABASE_URL")
 }
 
-// ============================================================
-// ENUMS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| ENUMS
+|--------------------------------------------------------------------------
+*/
 
 enum UserStatus {
       ACTIVE
@@ -22,17 +24,30 @@ enum Gender {
       MALE
         FEMALE
           OTHER
-            PREFER_NOT_TO_SAY
 }
 
 enum EmploymentStatus {
       ACTIVE
         INACTIVE
-          ON_LEAVE
-            SUSPENDED
-              TERMINATED
-                RESIGNED
-                  RETIRED
+          SUSPENDED
+            TERMINATED
+              ON_LEAVE
+}
+
+enum EmployeeType {
+      FULL_TIME
+        PART_TIME
+          CONTRACT
+            INTERN
+              TEMPORARY
+}
+
+enum MaritalStatus {
+      SINGLE
+        MARRIED
+          DIVORCED
+            WIDOWED
+              SEPARATED
 }
 
 enum RoleScope {
@@ -51,22 +66,22 @@ enum PermissionAction {
 }
 
 enum AuditAction {
-      CREATE
-        UPDATE
-          DELETE
-            LOGIN
-              LOGOUT
-                LOGIN_FAILED
-                  PASSWORD_CHANGED
-                    PASSWORD_RESET
-                      TOKEN_REFRESH
-                        ACCOUNT_LOCKED
-                          ACCOUNT_UNLOCKED
-                            APPROVE
-                              REJECT
-                                EXPORT
-                                  PAYMENT
-                                    OTHER
+      LOGIN
+        LOGOUT
+          TOKEN_REFRESH
+            TOKEN_REUSE_DETECTED
+              PASSWORD_CHANGE
+                PASSWORD_RESET_REQUEST
+                  PASSWORD_RESET
+                    CREATE
+                      UPDATE
+                        DELETE
+                          APPROVE
+                            REJECT
+                              EXPORT
+                                LOGIN_FAILED
+                                  ACCOUNT_LOCKED
+                                    ACCOUNT_UNLOCKED
 }
 
 enum SessionStatus {
@@ -81,97 +96,161 @@ enum CompanyStatus {
           INACTIVE
 }
 
-enum EmployeeType {
-      FULL_TIME
-        PART_TIME
-          CONTRACT
-            INTERN
-              TEMPORARY
+enum PlanType {
+      FREE
+        STARTER
+          PROFESSIONAL
+            ENTERPRISE
 }
 
-enum MaritalStatus {
-      SINGLE
-        MARRIED
-          DIVORCED
-            WIDOWED
-              SEPARATED
-                OTHER
+enum DocumentType {
+      PASSPORT
+        NATIONAL_ID
+          DRIVERS_LICENSE
+            VOTERS_CARD
+              CERTIFICATE
+                CONTRACT
+                  OFFER_LETTER
+                    RESUME
+                      OTHER
 }
 
-// ============================================================
-// COMPANY / TENANT
-// ============================================================
+enum WalletEntryType {
+      CREDIT
+        DEBIT
+          REFUND
+            ADJUSTMENT
+}
+
+enum WalletEntryStatus {
+      PENDING
+        COMPLETED
+          FAILED
+            REVERSED
+}
+
+/*
+|--------------------------------------------------------------------------
+| COMPANY / TENANT
+|--------------------------------------------------------------------------
+*/
 
 model Company {
-      id                String        @id @default(uuid())
-        name              String
-          legalName         String?
-            slug              String        @unique
-              email             String
-                phone             String?
-                  address           String?
-                    city              String?
-                      state             String?
-                        country           String        @default("Nigeria")
-                          timezone          String        @default("Africa/Lagos")
-                            currency          String        @default("NGN")
-                              status            CompanyStatus @default(ACTIVE)
+      id String @id @default(uuid())
 
-                                createdAt         DateTime      @default(now())
-                                  updatedAt         DateTime      @updatedAt
+        name      String
+          legalName String?
 
-                                    users             User[]
-                                      departments       Department[]
-                                        designations      Designation[]
-                                          employees         Employee[]
-                                            roles             Role[]
-                                              wallets           Wallet[]
-                                                auditLogs         AuditLog[]
-                                                  sessions          UserSession[]
-                                                    systemSettings    SystemSetting[]
+            /*
+               * Used for EMS tenant identification.
+                  *
+                     * Example:
+                        * akanjilmt
+                           * shawama
+                              *
+                                 * Future domain resolver can map:
+                                    * akanjilmt.ems.com
+                                       * shawama.ems.com
+                                          */
+                                            slug String @unique
 
-                                                      @@index([status])
-                                                        @@index([slug])
-                                                          @@map("companies")
+                                              email String?
+                                                phone String?
+
+                                                  address String?
+                                                    city    String?
+                                                      state   String?
+
+                                                        country  String @default("Nigeria")
+                                                          timezone String @default("Africa/Lagos")
+                                                            currency String @default("NGN")
+
+                                                              status CompanyStatus @default(ACTIVE)
+
+                                                                plan                PlanType @default(FREE)
+                                                                  isSubscriptionActive Boolean  @default(false)
+
+                                                                    /*
+                                                                       * Payment / wallet configuration.
+                                                                          *
+                                                                             * Actual payment integration will be implemented
+                                                                                * in the payment stages.
+                                                                                   */
+                                                                                     paystackSubaccountId   String?
+                                                                                       flutterwaveSubaccountId String?
+
+                                                                                         walletBalance Decimal @default(0) @db.Decimal(18, 2)
+
+                                                                                           createdAt DateTime @default(now())
+                                                                                             updatedAt DateTime @updatedAt
+
+                                                                                               users        User[]
+                                                                                                 departments  Department[]
+                                                                                                   designations Designation[]
+                                                                                                     employees    Employee[]
+
+                                                                                                       roles Role[]
+
+                                                                                                         sessions UserSession[]
+
+                                                                                                           auditLogs AuditLog[]
+
+                                                                                                             systemSettings SystemSetting[]
+
+                                                                                                               wallets Wallet[]
+
+                                                                                                                 @@index([status])
+                                                                                                                   @@index([slug])
+                                                                                                                     @@map("companies")
 }
 
-// ============================================================
-// USERS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| USERS
+|--------------------------------------------------------------------------
+*/
 
 model User {
-      id                String       @id @default(uuid())
+      id String @id @default(uuid())
 
-        companyId         String?
-          company           Company?     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+        companyId String?
 
-            email             String
-              passwordHash      String
+          email      String
+            passwordHash String
 
-                firstName         String
-                  lastName          String
-                    middleName        String?
+              firstName  String
+                lastName   String
+                  middleName String?
 
-                      phone             String?
-                        avatarUrl         String?
+                    phone     String?
+                      avatarUrl String?
 
-                          status            UserStatus   @default(ACTIVE)
+                        status UserStatus @default(ACTIVE)
 
-                            emailVerified     Boolean      @default(false)
-                              emailVerifiedAt   DateTime?
+                          emailVerified   Boolean   @default(false)
+                            emailVerifiedAt DateTime?
 
-                                failedLoginCount  Int          @default(0)
-                                  lockedUntil       DateTime?
+                              failedLoginCount Int       @default(0)
+                                lockedUntil      DateTime?
 
-                                    lastLoginAt       DateTime?
+                                  lastLoginAt DateTime?
 
-                                      createdAt         DateTime     @default(now())
-                                        updatedAt         DateTime     @updatedAt
+                                    createdAt DateTime @default(now())
+                                      updatedAt DateTime @updatedAt
 
-                                          employee          Employee?
-                                            roles             UserRole[]
-                                              sessions          UserSession[]
-                                                auditLogs         AuditLog[]
+                                        company Company? @relation(
+                                                fields: [companyId],
+                                                    references: [id],
+                                                        onDelete: Cascade
+                                        )
+
+                                          employee Employee?
+
+                                            roles UserRole[]
+
+                                              sessions UserSession[]
+
+                                                auditLogs AuditLog[]
 
                                                   @@unique([companyId, email])
                                                     @@index([email])
@@ -180,376 +259,725 @@ model User {
                                                           @@map("users")
 }
 
-// ============================================================
-// ROLES
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| RBAC
+|--------------------------------------------------------------------------
+*/
 
 model Role {
-      id                String       @id @default(uuid())
+      id String @id @default(uuid())
 
-        companyId         String?
-          company           Company?     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+        companyId String?
 
-            name              String
-              description       String?
-                scope             RoleScope    @default(COMPANY)
+          name        String
+            description String?
 
-                  isSystem          Boolean      @default(false)
-                    isActive          Boolean      @default(true)
+              scope RoleScope @default(COMPANY)
 
-                      createdAt         DateTime     @default(now())
-                        updatedAt         DateTime     @updatedAt
+                isSystem Boolean @default(false)
+                  isActive Boolean @default(true)
 
-                          users             UserRole[]
-                            permissions       RolePermission[]
+                    createdAt DateTime @default(now())
+                      updatedAt DateTime @updatedAt
+
+                        company Company? @relation(
+                                fields: [companyId],
+                                    references: [id],
+                                        onDelete: Cascade
+                        )
+
+                          users UserRole[]
+
+                            permissions RolePermission[]
 
                               @@unique([companyId, name])
                                 @@index([companyId])
                                   @@index([scope])
-                                    @@map("roles")
+                                    @@index([isActive])
+                                      @@map("roles")
 }
 
-// ============================================================
-// PERMISSIONS
-// ============================================================
-
 model Permission {
-      id                String            @id @default(uuid())
+      id String @id @default(uuid())
 
-        module            String
-          resource          String
-            action            PermissionAction
+        module   String
+          resource String
+            action   PermissionAction
 
-              description       String?
-                isActive          Boolean           @default(true)
+              description String?
 
-                  createdAt         DateTime          @default(now())
-                    updatedAt         DateTime          @updatedAt
+                isActive Boolean @default(true)
 
-                      roles             RolePermission[]
+                  createdAt DateTime @default(now())
+                    updatedAt DateTime @updatedAt
+
+                      roles RolePermission[]
 
                         @@unique([module, resource, action])
                           @@index([module])
                             @@index([resource])
-                              @@map("permissions")
+                              @@index([action])
+                                @@map("permissions")
 }
-
-// ============================================================
-// USER ↔ ROLE
-// ============================================================
 
 model UserRole {
-      id                String       @id @default(uuid())
+      userId String
+        roleId String
 
-        userId            String
-          roleId            String
+          assignedAt DateTime @default(now())
 
-            user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-              role              Role         @relation(fields: [roleId], references: [id], onDelete: Cascade)
+            user User @relation(
+                    fields: [userId],
+                        references: [id],
+                            onDelete: Cascade
+            )
 
-                assignedAt        DateTime     @default(now())
+              role Role @relation(
+                    fields: [roleId],
+                        references: [id],
+                            onDelete: Cascade
+              )
 
-                  @@unique([userId, roleId])
-                    @@index([userId])
-                      @@index([roleId])
-                        @@map("user_roles")
+                @@id([userId, roleId])
+                  @@index([roleId])
+                    @@map("user_roles")
 }
-
-// ============================================================
-// ROLE ↔ PERMISSION
-// ============================================================
 
 model RolePermission {
-      id                String       @id @default(uuid())
+      roleId       String
+        permissionId String
 
-        roleId            String
-          permissionId      String
+          assignedAt DateTime @default(now())
 
-            role              Role         @relation(fields: [roleId], references: [id], onDelete: Cascade)
-              permission        Permission   @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+            role Role @relation(
+                    fields: [roleId],
+                        references: [id],
+                            onDelete: Cascade
+            )
 
-                createdAt         DateTime     @default(now())
+              permission Permission @relation(
+                    fields: [permissionId],
+                        references: [id],
+                            onDelete: Cascade
+              )
 
-                  @@unique([roleId, permissionId])
-                    @@index([roleId])
-                      @@index([permissionId])
-                        @@map("role_permissions")
+                @@id([roleId, permissionId])
+                  @@index([permissionId])
+                    @@map("role_permissions")
 }
 
-// ============================================================
-// USER SESSIONS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| AUTHENTICATION SESSIONS
+|--------------------------------------------------------------------------
+*/
 
 model UserSession {
-      id                String        @id @default(uuid())
+      id String @id @default(uuid())
 
-        userId            String
-          companyId         String?
+        userId    String
+          companyId String?
 
-            user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-              company           Company?      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+            /*
+               * Only the hash is stored.
+                  * Raw refresh tokens are never persisted.
+                     */
+                       refreshTokenHash String
 
-                refreshTokenHash  String
+                         ipAddress String?
+                           userAgent String?
+                             deviceName String?
 
-                  ipAddress         String?
-                    userAgent         String?
-                      deviceName        String?
+                               status SessionStatus @default(ACTIVE)
 
-                        status            SessionStatus @default(ACTIVE)
+                                 expiresAt DateTime
+                                   lastUsedAt DateTime?
 
-                          expiresAt         DateTime
-                            lastUsedAt        DateTime?
-                              revokedAt         DateTime?
+                                     revokedAt DateTime?
 
-                                createdAt         DateTime      @default(now())
-                                  updatedAt         DateTime      @updatedAt
+                                       createdAt DateTime @default(now())
+                                         updatedAt DateTime @updatedAt
 
-                                    @@index([userId])
-                                      @@index([companyId])
-                                        @@index([status])
-                                          @@index([expiresAt])
-                                            @@map("user_sessions")
+                                           user User @relation(
+                                                fields: [userId],
+                                                    references: [id],
+                                                        onDelete: Cascade
+                                           )
+
+                                             company Company? @relation(
+                                                    fields: [companyId],
+                                                        references: [id],
+                                                            onDelete: Cascade
+                                             )
+
+                                               @@index([userId])
+                                                 @@index([companyId])
+                                                   @@index([status])
+                                                     @@index([expiresAt])
+                                                       @@map("user_sessions")
 }
 
-// ============================================================
-// DEPARTMENTS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| DEPARTMENTS
+|--------------------------------------------------------------------------
+*/
 
 model Department {
-      id                String        @id @default(uuid())
+      id String @id @default(uuid())
 
-        companyId         String
-          company           Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+        companyId String
 
-            name              String
-              code              String?
-                description       String?
-                  isActive          Boolean       @default(true)
+          name String
+            code String
 
-                    createdAt         DateTime      @default(now())
-                      updatedAt         DateTime      @updatedAt
+              description String?
 
-                        designations      Designation[]
-                          employees         Employee[]
+                isActive Boolean @default(true)
+
+                  createdAt DateTime @default(now())
+                    updatedAt DateTime @updatedAt
+
+                      company Company @relation(
+                            fields: [companyId],
+                                references: [id],
+                                    onDelete: Cascade
+                      )
+
+                        designations Designation[]
+
+                          employees Employee[]
 
                             @@unique([companyId, name])
                               @@unique([companyId, code])
+
                                 @@index([companyId])
-                                  @@map("departments")
+                                  @@index([companyId, isActive])
+
+                                    @@map("departments")
 }
 
-// ============================================================
-// DESIGNATIONS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| DESIGNATIONS
+|--------------------------------------------------------------------------
+*/
 
 model Designation {
-      id                String       @id @default(uuid())
+      id String @id @default(uuid())
 
-        companyId         String
-          departmentId      String?
+        companyId String
 
-            company           Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
-              department        Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+          departmentId String?
 
-                name              String
-                  code              String?
-                    description       String?
-                      isActive          Boolean      @default(true)
+            name String
+              code String
 
-                        createdAt         DateTime     @default(now())
-                          updatedAt         DateTime     @updatedAt
+                description String?
 
-                            employees         Employee[]
+                  isActive Boolean @default(true)
+
+                    createdAt DateTime @default(now())
+                      updatedAt DateTime @updatedAt
+
+                        company Company @relation(
+                                fields: [companyId],
+                                    references: [id],
+                                        onDelete: Cascade
+                        )
+
+                          department Department? @relation(
+                                fields: [departmentId],
+                                    references: [id],
+                                        onDelete: SetNull
+                          )
+
+                            employees Employee[]
 
                               @@unique([companyId, name])
                                 @@unique([companyId, code])
+
                                   @@index([companyId])
-                                    @@index([departmentId])
-                                      @@map("designations")
+                                    @@index([companyId, departmentId])
+                                      @@index([companyId, isActive])
+
+                                        @@map("designations")
 }
 
-// ============================================================
-// EMPLOYEES
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| EMPLOYEES
+|--------------------------------------------------------------------------
+*/
 
 model Employee {
-      id                  String           @id @default(uuid())
+      id String @id @default(uuid())
 
-        companyId           String
-          userId              String?          @unique
+        companyId String
 
-            departmentId        String?
-              designationId       String?
+          /*
+             * Company-scoped employee number.
+                *
+                   * Example:
+                      * EMP-000001
+                         * EMP-000002
+                            */
+                              employeeNumber String
 
-                company             Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-                  user                User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
-                    department          Department?      @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-                      designation         Designation?     @relation(fields: [designationId], references: [id], onDelete: SetNull)
+                                firstName  String
+                                  middleName String?
+                                    lastName   String
 
-                        employeeNumber      String
+                                      email String?
+                                        phone String?
 
-                          firstName           String
-                            lastName            String
-                              middleName          String?
+                                          gender Gender?
 
-                                email               String?
-                                  phone               String?
+                                            dateOfBirth DateTime?
 
-                                    gender              Gender?
-                                      dateOfBirth         DateTime?
-                                        maritalStatus       MaritalStatus?
+                                              maritalStatus MaritalStatus?
 
-                                          employeeType        EmployeeType     @default(FULL_TIME)
-                                            employmentStatus    EmploymentStatus @default(ACTIVE)
+                                                address String?
+                                                  city    String?
+                                                    state   String?
+                                                      country String @default("Nigeria")
 
-                                              dateOfJoining       DateTime
-                                                dateOfLeaving       DateTime?
+                                                        jobTitle String?
 
-                                                  address             String?
-                                                    city                String?
-                                                      state               String?
-                                                        country             String           @default("Nigeria")
+                                                          employeeType EmployeeType @default(FULL_TIME)
 
-                                                          emergencyName       String?
-                                                            emergencyPhone      String?
-                                                              emergencyRelation   String?
+                                                            employmentStatus EmploymentStatus @default(ACTIVE)
 
-                                                                createdAt           DateTime         @default(now())
-                                                                  updatedAt           DateTime         @updatedAt
+                                                              hireDate        DateTime
+                                                                terminationDate DateTime?
 
-                                                                    @@unique([companyId, employeeNumber])
-                                                                      @@index([companyId])
-                                                                        @@index([departmentId])
-                                                                          @@index([designationId])
-                                                                            @@index([employmentStatus])
-                                                                              @@index([employeeType])
-                                                                                @@map("employees")
+                                                                  departmentId  String?
+                                                                    designationId String?
+                                                                      managerId     String?
+
+                                                                        /*
+                                                                           * Employee profile photo.
+                                                                              *
+                                                                                 * The storage provider is abstracted from the
+                                                                                    * employee module.
+                                                                                       */
+                                                                                         profilePhotoUrl String?
+                                                                                           profilePhotoKey String?
+
+                                                                                             createdAt DateTime @default(now())
+                                                                                               updatedAt DateTime @updatedAt
+
+                                                                                                 company Company @relation(
+                                                                                                        fields: [companyId],
+                                                                                                            references: [id],
+                                                                                                                onDelete: Cascade
+                                                                                                 )
+
+                                                                                                   department Department? @relation(
+                                                                                                        fields: [departmentId],
+                                                                                                            references: [id],
+                                                                                                                onDelete: SetNull
+                                                                                                   )
+
+                                                                                                     designation Designation? @relation(
+                                                                                                            fields: [designationId],
+                                                                                                                references: [id],
+                                                                                                                    onDelete: SetNull
+                                                                                                     )
+
+                                                                                                       manager Employee? @relation(
+                                                                                                            "EmployeeManager",
+                                                                                                                fields: [managerId],
+                                                                                                                    references: [id],
+                                                                                                                        onDelete: SetNull
+                                                                                                       )
+
+                                                                                                         subordinates Employee[] @relation(
+                                                                                                                "EmployeeManager"
+                                                                                                         )
+
+                                                                                                           /*
+                                                                                                              * Optional application account.
+                                                                                                                 *
+                                                                                                                    * An employee does not automatically need
+                                                                                                                       * a login account.
+                                                                                                                          */
+                                                                                                                            user User?
+
+                                                                                                                              bankAccounts EmployeeBankAccount[]
+
+                                                                                                                                education EmployeeEducation[]
+
+                                                                                                                                  experiences EmployeeExperience[]
+
+                                                                                                                                    documents EmployeeDocument[]
+
+                                                                                                                                      @@unique([companyId, employeeNumber])
+
+                                                                                                                                        @@index([companyId])
+                                                                                                                                          @@index([companyId, employmentStatus])
+                                                                                                                                            @@index([companyId, employeeType])
+                                                                                                                                              @@index([companyId, departmentId])
+                                                                                                                                                @@index([companyId, designationId])
+                                                                                                                                                  @@index([companyId, managerId])
+                                                                                                                                                    @@index([companyId, email])
+
+                                                                                                                                                      @@map("employees")
 }
 
-// ============================================================
-// AUDIT LOG
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| EMPLOYEE BANK ACCOUNTS
+|--------------------------------------------------------------------------
+*/
+
+model EmployeeBankAccount {
+      id String @id @default(uuid())
+
+        employeeId String
+
+          bankName      String
+            accountName   String
+              accountNumber String
+
+                accountType String?
+
+                  isPrimary Boolean @default(true)
+                    isActive  Boolean @default(true)
+
+                      createdAt DateTime @default(now())
+                        updatedAt DateTime @updatedAt
+
+                          employee Employee @relation(
+                                fields: [employeeId],
+                                    references: [id],
+                                        onDelete: Cascade
+                          )
+
+                            @@index([employeeId])
+                              @@index([employeeId, isPrimary])
+                                @@index([employeeId, isActive])
+
+                                  @@map("employee_bank_accounts")
+}
+
+/*
+|--------------------------------------------------------------------------
+| EMPLOYEE EDUCATION
+|--------------------------------------------------------------------------
+*/
+
+model EmployeeEducation {
+      id String @id @default(uuid())
+
+        employeeId String
+
+          institution  String
+            qualification String
+
+              fieldOfStudy String?
+
+                startDate DateTime?
+                  endDate   DateTime?
+
+                    grade String?
+
+                      description String?
+
+                        createdAt DateTime @default(now())
+                          updatedAt DateTime @updatedAt
+
+                            employee Employee @relation(
+                                    fields: [employeeId],
+                                        references: [id],
+                                            onDelete: Cascade
+                            )
+
+                              @@index([employeeId])
+                                @@map("employee_education")
+}
+
+/*
+|--------------------------------------------------------------------------
+| EMPLOYEE PREVIOUS EXPERIENCE
+|--------------------------------------------------------------------------
+*/
+
+model EmployeeExperience {
+      id String @id @default(uuid())
+
+        employeeId String
+
+          companyName String
+
+            jobTitle String?
+
+              employmentType String?
+
+                startDate DateTime?
+                  endDate   DateTime?
+
+                    responsibilities String?
+
+                      reasonForLeaving String?
+
+                        createdAt DateTime @default(now())
+                          updatedAt DateTime @updatedAt
+
+                            employee Employee @relation(
+                                    fields: [employeeId],
+                                        references: [id],
+                                            onDelete: Cascade
+                            )
+
+                              @@index([employeeId])
+                                @@map("employee_experience")
+}
+
+/*
+|--------------------------------------------------------------------------
+| EMPLOYEE DOCUMENTS
+|--------------------------------------------------------------------------
+*/
+
+model EmployeeDocument {
+      id String @id @default(uuid())
+
+        employeeId String
+
+          documentType DocumentType
+
+            title String
+
+              fileName String
+                fileUrl  String
+
+                  /*
+                     * Provider-specific storage identifier.
+                        */
+                          storageKey String?
+
+                            mimeType String?
+                              fileSize Int?
+
+                                expiresAt DateTime?
+
+                                  isActive Boolean @default(true)
+
+                                    uploadedAt DateTime @default(now())
+                                      updatedAt DateTime @updatedAt
+
+                                        employee Employee @relation(
+                                                fields: [employeeId],
+                                                    references: [id],
+                                                        onDelete: Cascade
+                                        )
+
+                                          @@index([employeeId])
+                                            @@index([employeeId, documentType])
+                                              @@index([employeeId, isActive])
+
+                                                @@map("employee_documents")
+}
+
+/*
+|--------------------------------------------------------------------------
+| AUDIT LOG
+|--------------------------------------------------------------------------
+*/
 
 model AuditLog {
-      id                String      @id @default(uuid())
+      id String @id @default(uuid())
 
-        companyId         String?
-          userId            String?
+        companyId String?
+          userId    String?
 
-            company           Company?    @relation(fields: [companyId], references: [id], onDelete: SetNull)
-              user              User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+            action AuditAction
 
-                action            AuditAction
+              module   String?
+                resource String?
+                  resourceId String?
 
-                  module            String?
-                    resource          String?
-                      resourceId        String?
+                    description String?
 
-                        description       String?
+                      ipAddress String?
+                        userAgent String?
 
-                          ipAddress         String?
-                            userAgent         String?
+                          /*
+                             * Additional structured information.
+                                */
+                                  metadata Json?
 
-                              metadata          Json?
+                                    createdAt DateTime @default(now())
 
-                                createdAt         DateTime    @default(now())
+                                      company Company? @relation(
+                                            fields: [companyId],
+                                                references: [id],
+                                                    onDelete: Cascade
+                                      )
 
-                                  @@index([companyId])
-                                    @@index([userId])
-                                      @@index([action])
-                                        @@index([module])
-                                          @@index([resourceId])
-                                            @@index([createdAt])
-                                              @@map("audit_logs")
+                                        user User? @relation(
+                                                fields: [userId],
+                                                    references: [id],
+                                                        onDelete: SetNull
+                                        )
+
+                                          @@index([companyId])
+                                            @@index([userId])
+                                              @@index([action])
+                                                @@index([module])
+                                                  @@index([resource])
+                                                    @@index([resourceId])
+                                                      @@index([createdAt])
+
+                                                        @@map("audit_logs")
 }
 
-// ============================================================
-// SYSTEM SETTINGS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| SYSTEM SETTINGS
+|--------------------------------------------------------------------------
+*/
 
 model SystemSetting {
-      id                String      @id @default(uuid())
+      id String @id @default(uuid())
 
-        companyId         String
-          company           Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+        companyId String
 
-            key               String
-              value             Json
+          key   String
+            value String?
 
-                description       String?
-                  isEncrypted       Boolean     @default(false)
+              createdAt DateTime @default(now())
+                updatedAt DateTime @updatedAt
 
-                    createdAt         DateTime    @default(now())
-                      updatedAt         DateTime    @updatedAt
+                  company Company @relation(
+                        fields: [companyId],
+                            references: [id],
+                                onDelete: Cascade
+                  )
 
-                        @@unique([companyId, key])
-                          @@index([companyId])
-                            @@map("system_settings")
+                    @@unique([companyId, key])
+                      @@index([companyId])
+
+                        @@map("system_settings")
 }
 
-// ============================================================
-// WALLET FOUNDATION
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| WALLET
+|--------------------------------------------------------------------------
+*/
 
 model Wallet {
-      id                String       @id @default(uuid())
+      id String @id @default(uuid())
 
-        companyId         String       @unique
-          company           Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+        companyId String
 
-            currency          String       @default("NGN")
+          balance Decimal @default(0) @db.Decimal(18, 2)
 
-              balance           Decimal      @default(0) @db.Decimal(18, 2)
+            currency String @default("NGN")
 
-                isActive          Boolean      @default(true)
+              isActive Boolean @default(true)
 
-                  createdAt         DateTime     @default(now())
-                    updatedAt         DateTime     @updatedAt
+                createdAt DateTime @default(now())
+                  updatedAt DateTime @updatedAt
 
-                      ledgerEntries     WalletLedgerEntry[]
+                    company Company @relation(
+                            fields: [companyId],
+                                references: [id],
+                                    onDelete: Cascade
+                    )
 
-                        @@index([currency])
-                          @@map("wallets")
+                      ledgerEntries WalletLedgerEntry[]
+
+                        @@unique([companyId])
+                          @@index([companyId])
+                            @@map("wallets")
 }
 
-// ============================================================
-// WALLET LEDGER
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| WALLET LEDGER
+|--------------------------------------------------------------------------
+*/
 
 model WalletLedgerEntry {
-      id                String      @id @default(uuid())
+      id String @id @default(uuid())
 
-        walletId          String
+        walletId String
 
-          wallet            Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+          type WalletEntryType
 
-            type              String
-              reference         String?
+            status WalletEntryStatus @default(PENDING)
 
-                debit             Decimal     @default(0) @db.Decimal(18, 2)
-                  credit            Decimal     @default(0) @db.Decimal(18, 2)
+              amount Decimal @db.Decimal(18, 2)
 
-                    balanceBefore     Decimal     @db.Decimal(18, 2)
-                      balanceAfter      Decimal     @db.Decimal(18, 2)
+                balanceBefore Decimal @db.Decimal(18, 2)
+                  balanceAfter  Decimal @db.Decimal(18, 2)
 
-                        description       String?
-                          metadata          Json?
+                    reference String @unique
 
-                            createdAt         DateTime    @default(now())
+                      description String?
+
+                        metadata Json?
+
+                          createdAt DateTime @default(now())
+
+                            wallet Wallet @relation(
+                                    fields: [walletId],
+                                        references: [id],
+                                            onDelete: Cascade
+                            )
 
                               @@index([walletId])
-                                @@index([reference])
-                                  @@index([createdAt])
-                                    @@map("wallet_ledger_entries")
+                                @@index([walletId, type])
+                                  @@index([walletId, status])
+                                    @@index([createdAt])
+
+                                      @@map("wallet_ledger_entries")
+}
+                            )
+}
+                    )
+}
+                  )
+}
+                                        )
+                                      )
+}
+                                        )
+}
+                            )
+}
+                            )
+}
+                          )
+}
+                                                                                                         )
+                                                                                                       )
+                                                                                                     )
+                                                                                                   )
+                                                                                                 )
+}
+                          )
+                        )
+}
+                      )
+}
+                                             )
+                                           )
+}
+              )
+            )
+}
+              )
+            )
 }
 }
+                        )
 }
-}
-}
-}
-}
-}
-}
+                                        )
 }
 }
 }
