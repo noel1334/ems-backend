@@ -14,6 +14,7 @@ import employeeRoutes from "../modules/employees/employee.routes.js";
 import shiftRoutes from "../modules/shifts/shift.routes.js";
 import scheduleRoutes from "../modules/schedules/schedule.routes.js";
 import holidayRoutes from "../modules/holidays/holiday.routes.js";
+import attendanceRoutes from "../modules/attendance/attendance.routes.js";
 
 const router = Router();
 
@@ -111,5 +112,9 @@ router.use(
     "/holidays",
     holidayRoutes
 );
+router.use(
+      "/attendance",
+        attendanceRoutes,
+        );
 
 export default router;
