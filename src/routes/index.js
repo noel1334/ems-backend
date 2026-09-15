@@ -15,6 +15,7 @@ import shiftRoutes from "../modules/shifts/shift.routes.js";
 import scheduleRoutes from "../modules/schedules/schedule.routes.js";
 import holidayRoutes from "../modules/holidays/holiday.routes.js";
 import attendanceRoutes from "../modules/attendance/attendance.routes.js";
+import leaveRoutes from "../modules/leave/leave.routes.js";
 
 const router = Router();
 
@@ -25,10 +26,10 @@ const router = Router();
 */
 
 router.get("/health", (req, res) => {
-    return res.status(200).json({
-        success: true,
-        message: "EMS API is healthy",
-    });
+  return res.status(200).json({
+    success: true,
+    message: "EMS API is healthy",
+  });
 });
 
 /*
@@ -45,20 +46,11 @@ router.use("/auth", authRoutes);
 |--------------------------------------------------------------------------
 */
 
-router.use(
-    "/companies",
-    companyRoutes
-);
+router.use("/companies", companyRoutes);
 
-router.use(
-    "/users",
-    userRoutes
-);
+router.use("/users", userRoutes);
 
-router.use(
-    "/rbac",
-    rbacRoutes
-);
+router.use("/rbac", rbacRoutes);
 
 /*
 |--------------------------------------------------------------------------
@@ -66,15 +58,9 @@ router.use(
 |--------------------------------------------------------------------------
 */
 
-router.use(
-    "/departments",
-    departmentRoutes
-);
+router.use("/departments", departmentRoutes);
 
-router.use(
-    "/designations",
-    designationRoutes
-);
+router.use("/designations", designationRoutes);
 
 /*
 |--------------------------------------------------------------------------
@@ -82,15 +68,9 @@ router.use(
 |--------------------------------------------------------------------------
 */
 
-router.use(
-    "/employees",
-    employeeProfileRoutes
-);
+router.use("/employees", employeeProfileRoutes);
 
-router.use(
-    "/employees",
-    employeeRoutes
-);
+router.use("/employees", employeeRoutes);
 
 /*
 |--------------------------------------------------------------------------
@@ -98,23 +78,13 @@ router.use(
 |--------------------------------------------------------------------------
 */
 
-router.use(
-    "/shifts",
-    shiftRoutes
-);
+router.use("/shifts", shiftRoutes);
 
-router.use(
-    "/schedules",
-    scheduleRoutes
-);
+router.use("/schedules", scheduleRoutes);
 
-router.use(
-    "/holidays",
-    holidayRoutes
-);
-router.use(
-      "/attendance",
-        attendanceRoutes,
-        );
+router.use("/holidays", holidayRoutes);
+router.use("/attendance", attendanceRoutes);
+
+router.use("/leave", leaveRoutes);
 
 export default router;
