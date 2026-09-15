@@ -1,11 +1,30 @@
-import { randomUUID } from "node:crypto";
+import crypto from "node:crypto";
+import bcrypt from "bcryptjs";
 
-export const requestIdMiddleware = (req, res, next) => {
-  const requestId = req.headers["x-request-id"] || randomUUID();
+const BCRYPT_SALT_ROUNDS = 12;
 
-  req.requestId = requestId;
+export const hashPassword = async (password) => {
+    return bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+};
 
-  res.setHeader("X-Request-ID", requestId);
+export const comparePassword = async (
+    password,
+    passwordHash
+) => {
+    return bcrypt.compare(password, passwordHash);
+};
 
-  next();
+export const hashToken = (token) => {
+    return crypto
+        .createHash("sha256")
+        .update(token)
+        .digest("hex");
+};
+
+export const generateRandomToken = (bytes = 32) => {
+    return crypto.randomBytes(bytes).toString("hex");
+};
+
+export const generateTokenId = () => {
+    return crypto.randomUUID();
 };
