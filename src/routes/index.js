@@ -18,6 +18,7 @@ import attendanceRoutes from "../modules/attendance/attendance.routes.js";
 import leaveRoutes from "../modules/leave/leave.routes.js";
 import payrollRoutes from "../modules/payroll/payroll.routes.js";
 import walletRoutes from "../modules/wallet/wallet.routes.js";
+import paymentRoutes from "../modules/payments/payment.routes.js";
 
 const router = Router();
 
@@ -90,5 +91,6 @@ router.use("/attendance", attendanceRoutes);
 router.use("/leave", leaveRoutes);
 router.use("/payroll", payrollRoutes);
 router.use("/wallet", walletRoutes);
+router.use("/payments", paymentRoutes);
 
 export default router;

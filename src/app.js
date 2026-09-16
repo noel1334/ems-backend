@@ -24,24 +24,31 @@ app.use(
   cors({
     origin: env.CORS_ORIGIN,
     credentials: true,
-  }),
+  })
 );
 
 // ============================================================
 // REQUEST PARSING
 // ============================================================
+app.use(
+  "/api/v1/payments/webhooks/paystack",
+  express.raw({
+    type: "application/json",
+  })
+);
+app.use("/api/v1/payments/webhooks/flutterwave", express.json());
 
 app.use(
   express.json({
     limit: "2mb",
-  }),
+  })
 );
 
 app.use(
   express.urlencoded({
     extended: true,
     limit: "2mb",
-  }),
+  })
 );
 
 app.use(cookieParser());
