@@ -1,0 +1,10 @@
+import fs from "node:fs";
+import path from "node:path";
+const root = path.resolve(".");
+const required=["src/modules/reports/report.service.js","src/modules/reports/report.controller.js","src/modules/reports/report.export.controller.js","src/modules/reports/report.routes.js"];
+for (const file of required) if(!fs.existsSync(path.join(root,file))) throw new Error(`Missing ${file}`);
+const route=fs.readFileSync(path.join(root,"src/route/index.js"),"utf8");
+if(!route.includes('reportRoutes')||!route.includes('router.use("/reports", reportRoutes)')) throw new Error("Reports route not mounted");
+const pkg=JSON.parse(fs.readFileSync(path.join(root,"package.json"),"utf8"));
+for(const dep of ["exceljs","pdfkit"]) if(!pkg.dependencies[dep]) throw new Error(`Missing dependency ${dep}`);
+console.log("Stage 28 report/export checks passed");

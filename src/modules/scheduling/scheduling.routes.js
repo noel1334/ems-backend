@@ -1,0 +1,15 @@
+import { Router } from "express";
+import { authenticate } from "../../middleware/auth.middleware.js";
+import { requirePermission } from "../../middleware/permission.middleware.js";
+import * as c from "./scheduling.controller.js";
+const router=Router();router.use(authenticate);
+router.get("/policies",requirePermission("scheduling","policies","READ"),c.listPolicies);
+router.post("/policies",requirePermission("scheduling","policies","CREATE"),c.createPolicy);
+router.get("/policies/:id",requirePermission("scheduling","policies","READ"),c.getPolicy);
+router.patch("/policies/:id",requirePermission("scheduling","policies","UPDATE"),c.updatePolicy);
+router.get("/generations",requirePermission("scheduling","generations","READ"),c.listGenerations);
+router.post("/generations",requirePermission("scheduling","generations","CREATE"),c.generate);
+router.get("/generations/:id",requirePermission("scheduling","generations","READ"),c.getGeneration);
+router.post("/generations/:id/approve",requirePermission("scheduling","generations","APPROVE"),c.approve);
+router.post("/generations/:id/publish",requirePermission("scheduling","generations","MANAGE"),c.publish);
+export default router;

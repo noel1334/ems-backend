@@ -1,0 +1,11 @@
+import { Router } from "express";
+import authenticate from "../../middleware/auth.middleware.js";
+import requirePermission from "../../middleware/permission.middleware.js";
+import * as controller from "./dashboard.controller.js";
+const router=Router(); router.use(authenticate);
+router.get("/overview",requirePermission("dashboard","dashboard","READ"),controller.overview);
+router.get("/attendance",requirePermission("attendance","attendance","READ"),controller.attendance);
+router.get("/leave",requirePermission("leave","leave","READ"),controller.leave);
+router.get("/payroll",requirePermission("payroll","payroll","READ"),controller.payroll);
+router.get("/devices",requirePermission("biometrics","biometrics","READ"),controller.devices);
+export default router;

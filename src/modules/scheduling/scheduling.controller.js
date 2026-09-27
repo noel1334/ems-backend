@@ -1,0 +1,15 @@
+import { asyncHandler } from "../../common/utils/asyncHandler.js";
+import { AppError } from "../../common/errors/AppError.js";
+import * as service from "./scheduling.service.js";
+import { policySchema, policyUpdateSchema, generateSchema, generationListSchema } from "./scheduling.validation.js";
+const cid=req=>req.tenant?.companyId||req.tenant?.id||req.user?.companyId, actor=req=>req.user?.userId, meta=req=>({requestId:req.requestId,ipAddress:req.ip,userAgent:req.get("user-agent")});
+const parse=(schema,v)=>{const r=schema.safeParse(v);if(!r.success)throw new AppError("Validation failed",400,{code:"VALIDATION_ERROR",details:r.error.issues});return r.data;};
+export const listPolicies=asyncHandler(async(req,res)=>res.json({success:true,...await service.listPolicies(cid(req),req.query)}));
+export const createPolicy=asyncHandler(async(req,res)=>res.status(201).json({success:true,data:await service.createPolicy(cid(req),parse(policySchema,req.body))}));
+export const getPolicy=asyncHandler(async(req,res)=>res.json({success:true,data:await service.getPolicy(cid(req),req.params.id)}));
+export const updatePolicy=asyncHandler(async(req,res)=>res.json({success:true,data:await service.updatePolicy(cid(req),req.params.id,parse(policyUpdateSchema,req.body))}));
+export const listGenerations=asyncHandler(async(req,res)=>res.json({success:true,...await service.listGenerations(cid(req),parse(generationListSchema,req.query))}));
+export const getGeneration=asyncHandler(async(req,res)=>res.json({success:true,data:await service.getGeneration(cid(req),req.params.id)}));
+export const generate=asyncHandler(async(req,res)=>res.status(201).json({success:true,message:"Schedule generated as a draft",data:await service.generate(cid(req),actor(req),parse(generateSchema,req.body),meta(req))}));
+export const approve=asyncHandler(async(req,res)=>res.json({success:true,message:"Schedule generation approved",data:await service.approve(cid(req),actor(req),req.params.id,meta(req))}));
+export const publish=asyncHandler(async(req,res)=>res.json({success:true,message:"Schedule published successfully",data:await service.publish(cid(req),actor(req),req.params.id,meta(req))}));
