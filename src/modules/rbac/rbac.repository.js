@@ -1,5 +1,18 @@
 import prisma from "../../config/database.js";
 
+const roleInclude = {
+    permissions: {
+        include: {
+            permission: true
+        }
+    },
+    users: {
+        include: {
+            user: true
+        }
+    }
+};
+
 const userInclude = {
     roles: {
         include: {
@@ -14,9 +27,7 @@ export const findUserById = async (
     tx = prisma
 ) =>
     tx.user.findUnique({
-        where: {
-            id: userId
-        },
+        where: { id: userId },
         include: userInclude
     });
 
@@ -56,59 +67,51 @@ export const listUsers = async (
 ) => {
     const where = {
         companyId,
-        ...(status
-            ? {
-                status
-            }
-            : {}),
+        ...(status ? { status } : {}),
         ...(search
             ? {
-                OR: [
-                    {
-                        firstName: {
-                            contains: search,
-                            mode: "insensitive"
-                        }
-                    },
-                    {
-                        lastName: {
-                            contains: search,
-                            mode: "insensitive"
-                        }
-                    },
-                    {
-                        email: {
-                            contains: search,
-                            mode: "insensitive"
-                        }
-                    },
-                    {
-                        phone: {
-                            contains: search,
-                            mode: "insensitive"
-                        }
-                    }
-                ]
-            }
+                  OR: [
+                      {
+                          firstName: {
+                              contains: search,
+                              mode: "insensitive"
+                          }
+                      },
+                      {
+                          lastName: {
+                              contains: search,
+                              mode: "insensitive"
+                          }
+                      },
+                      {
+                          email: {
+                              contains: search,
+                              mode: "insensitive"
+                          }
+                      },
+                      {
+                          phone: {
+                              contains: search,
+                              mode: "insensitive"
+                          }
+                      }
+                  ]
+              }
             : {})
     };
 
-    const [users, total] =
-        await Promise.all([
-            tx.user.findMany({
-                where,
-                include: userInclude,
-                orderBy: {
-                    createdAt: "desc"
-                },
-                skip,
-                take
-            }),
-
-            tx.user.count({
-                where
-            })
-        ]);
+    const [users, total] = await Promise.all([
+        tx.user.findMany({
+            where,
+            include: userInclude,
+            orderBy: {
+                createdAt: "desc"
+            },
+            skip,
+            take
+        }),
+        tx.user.count({ where })
+    ]);
 
     return {
         users,
@@ -131,9 +134,7 @@ export const updateUser = async (
     tx = prisma
 ) =>
     tx.user.update({
-        where: {
-            id: userId
-        },
+        where: { id: userId },
         data,
         include: userInclude
     });
@@ -143,9 +144,7 @@ export const deleteUser = async (
     tx = prisma
 ) =>
     tx.user.delete({
-        where: {
-            id: userId
-        }
+        where: { id: userId }
     });
 
 export const findRolesByIds = async (
@@ -160,9 +159,7 @@ export const findRolesByIds = async (
             },
             isActive: true,
             OR: [
-                {
-                    companyId
-                },
+                { companyId },
                 {
                     companyId: null,
                     scope: "SYSTEM"
@@ -180,14 +177,219 @@ export const findRoleById = async (
         where: {
             id: roleId,
             OR: [
-                {
-                    companyId
-                },
+                { companyId },
                 {
                     companyId: null,
                     scope: "SYSTEM"
                 }
             ]
+        },
+        include: roleInclude
+    });
+
+export const findCompanyRoleByName = async (
+    name,
+    companyId,
+    tx = prisma
+) =>
+    tx.role.findFirst({
+        where: {
+            companyId,
+            name
+        }
+    });
+
+export const createRole = async (
+    data,
+    tx = prisma
+) =>
+    tx.role.create({
+        data
+    });
+
+export const updateRole = async (
+    roleId,
+    data,
+    tx = prisma
+) =>
+    tx.role.update({
+        where: {
+            id: roleId
+        },
+        data,
+        include: roleInclude
+    });
+
+export const listRoles = async (
+    {
+        companyId,
+        page,
+        limit,
+        search,
+        scope
+    },
+    tx = prisma
+) => {
+    const where = {
+        OR: [
+            {
+                companyId
+            },
+            {
+                companyId: null,
+                scope: "SYSTEM"
+            }
+        ],
+        ...(search
+            ? {
+                  name: {
+                      contains: search,
+                      mode: "insensitive"
+                  }
+              }
+            : {}),
+        ...(scope ? { scope } : {})
+    };
+
+    const [roles, total] = await Promise.all([
+        tx.role.findMany({
+            where,
+            include: roleInclude,
+            orderBy: [
+                {
+                    isSystem: "desc"
+                },
+                {
+                    name: "asc"
+                }
+            ],
+            skip: (page - 1) * limit,
+            take: limit
+        }),
+        tx.role.count({ where })
+    ]);
+
+    return {
+        roles,
+        total
+    };
+};
+
+export const createRolePermissions = async (
+    data,
+    tx = prisma
+) =>
+    tx.rolePermission.createMany({
+        data,
+        skipDuplicates: true
+    });
+
+export const deleteRolePermissions = async (
+    roleId,
+    tx = prisma
+) =>
+    tx.rolePermission.deleteMany({
+        where: {
+            roleId
+        }
+    });
+
+export const findPermissionsByIds = async (
+    permissionIds,
+    tx = prisma
+) =>
+    tx.permission.findMany({
+        where: {
+            id: {
+                in: permissionIds
+            },
+            isActive: true
+        }
+    });
+
+export const listPermissions = async (
+    {
+        module,
+        action,
+        search,
+        page,
+        limit
+    },
+    tx = prisma
+) => {
+    const where = {
+        isActive: true,
+        ...(module ? { module } : {}),
+        ...(action ? { action } : {}),
+        ...(search
+            ? {
+                  OR: [
+                      {
+                          module: {
+                              contains: search,
+                              mode: "insensitive"
+                          }
+                      },
+                      {
+                          resource: {
+                              contains: search,
+                              mode: "insensitive"
+                          }
+                      },
+                      {
+                          description: {
+                              contains: search,
+                              mode: "insensitive"
+                          }
+                      }
+                  ]
+              }
+            : {})
+    };
+
+    const [permissions, total] = await Promise.all([
+        tx.permission.findMany({
+            where,
+            orderBy: [
+                {
+                    module: "asc"
+                },
+                {
+                    resource: "asc"
+                },
+                {
+                    action: "asc"
+                }
+            ],
+            skip: (page - 1) * limit,
+            take: limit
+        }),
+        tx.permission.count({ where })
+    ]);
+
+    return {
+        permissions,
+        total
+    };
+};
+
+export const findRoleUsers = async (
+    roleId,
+    tx = prisma
+) =>
+    tx.userRole.findMany({
+        where: {
+            roleId
+        },
+        include: {
+            user: {
+                include: {
+                    company: true
+                }
+            }
+        },
+        orderBy: {
+            assignedAt: "desc"
         }
     });
 
