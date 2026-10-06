@@ -29,6 +29,8 @@ import dashboardRoutes from "../modules/dashboard/dashboard.routes.js";
 import notificationRoutes from "../modules/notifications/notification.routes.js";
 import reportRoutes from "../modules/reports/report.routes.js";
 import auditRoutes from "../modules/audit/audit.routes.js";
+import inventoryRoutes from "../modules/inventory/inventory.routes.js";
+import platformRoutes from "../modules/platform/platform.routes.js";
 import prisma from "../config/database.js";
 
 const router = Router();
@@ -135,5 +137,7 @@ router.use("/dashboard", dashboardRoutes);
 router.use("/notifications", notificationRoutes);
 router.use("/reports", reportRoutes);
 router.use("/audit-logs", auditRoutes);
+router.use("/inventory", inventoryRoutes);
+router.use("/platform", platformRoutes);
 
 export default router;

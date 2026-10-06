@@ -77,6 +77,7 @@ const createAuthenticationTokens = ({
         generateAccessToken({
             userId: user.id,
             companyId: user.companyId,
+            employeeId: user.employeeId,
             sessionId,
             roles
         });
@@ -85,6 +86,7 @@ const createAuthenticationTokens = ({
         generateRefreshToken({
             userId: user.id,
             companyId: user.companyId,
+            employeeId: user.employeeId,
             sessionId,
             roles,
             tokenId: refreshTokenId
@@ -441,6 +443,15 @@ export const loginService = async ({
     };
 };
 
+
+const isSuperAdminUser = async (userId, tx = prisma) => {
+  const user = await tx.user.findUnique({
+    where: { id: userId },
+    select: { roles: { where: { role: { isActive: true, name: "SUPER_ADMIN", scope: "SYSTEM" } }, select: { roleId: true } } },
+  });
+  return Boolean(user?.roles?.length);
+};
+
 export const refreshAuthenticationService =
     async ({
         refreshToken,
@@ -480,9 +491,9 @@ export const refreshAuthenticationService =
 
         if (
             !userId ||
-            !companyId ||
             !sessionId ||
-            !tokenId
+            !tokenId ||
+            (!companyId && !(await isSuperAdminUser(userId)))
         ) {
             throw new AppError(
                 "Invalid refresh token payload",

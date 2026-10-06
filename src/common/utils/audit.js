@@ -10,8 +10,6 @@ export async function writeAudit(prisma, {
   userAgent,
   metadata,
 }) {
-  if (!companyId) return null;
-
   return prisma.auditLog.create({
     data: {
       companyId,

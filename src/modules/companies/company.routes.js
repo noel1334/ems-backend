@@ -1,32 +1,14 @@
 import { Router } from "express";
-import {
-  createCompany,
-  getCompany,
-  updateCompany,
-} from "./company.controller.js";
+import { authMiddleware } from "../../middleware/auth.middleware.js";
+import { tenantMiddleware } from "../../middleware/tenant.middleware.js";
+import { requireSuperAdmin } from "../../middleware/super-admin.middleware.js";
+import { createCompany, getCompany, updateCompany } from "./company.controller.js";
 
 const router = Router();
 
-/*
- * Public company creation endpoint.
- *
- * The full onboarding flow will later be made atomic:
- *
- * Company
- *   +
- * Initial Company Admin
- *   +
- * Role assignment
- *   +
- * Session/authentication
- *
- * That will be handled during the authentication/bootstrap stage.
- */
-
-router.post("/", createCompany);
-
-router.get("/me", getCompany);
-
-router.patch("/me", updateCompany);
+// Tenant creation is a platform operation. Normal company users cannot create tenants.
+router.post("/", authMiddleware, requireSuperAdmin, createCompany);
+router.get("/me", authMiddleware, tenantMiddleware, getCompany);
+router.patch("/me", authMiddleware, tenantMiddleware, updateCompany);
 
 export default router;

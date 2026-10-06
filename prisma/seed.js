@@ -405,6 +405,16 @@ const permissions = [
   { module: "scheduling", resource: "generations", action: "APPROVE", description: "Approve generated schedules" },
   { module: "scheduling", resource: "generations", action: "MANAGE", description: "Publish generated schedules" },
 
+  // ============================================================
+  // INVENTORY / STORE
+  // ============================================================
+  ...["inventory","transactions","ledger","locations","suppliers"].flatMap((resource) => [
+    { module: "inventory", resource, action: "CREATE", description: `Create ${resource}` },
+    { module: "inventory", resource, action: "READ", description: `View ${resource}` },
+    { module: "inventory", resource, action: "UPDATE", description: `Update ${resource}` },
+    { module: "inventory", resource, action: "MANAGE", description: `Manage ${resource}` },
+    ...(resource === "transactions" ? [{ module: "inventory", resource, action: "APPROVE", description: "Confirm or dispute inventory transactions" }] : []),
+  ]),
 ];
 
 const roleDefinitions = [
@@ -435,6 +445,12 @@ const roleDefinitions = [
   {
     name: "EMPLOYEE",
     description: "Standard employee",
+    scope: "COMPANY",
+    isSystem: true,
+  },
+  {
+    name: "STORE_KEEPER",
+    description: "Inventory and store operations administrator",
     scope: "COMPANY",
     isSystem: true,
   },
@@ -563,13 +579,18 @@ const seed = async () => {
         `${permission.module}:${permission.resource}:${permission.action}`
     );
 
+  const inventoryPermissionKeys = permissions
+    .filter((permission) => permission.module === "inventory")
+    .map((permission) => `${permission.module}:${permission.resource}:${permission.action}`);
+
   const employeePermissionKeys = permissions
     .filter(
       (permission) =>
-        permission.action === "READ" &&
-        ["employees", "attendance", "leave", "payroll", "wallet"].includes(
+        (permission.action === "READ" &&
+        ["employees", "attendance", "leave", "payroll", "wallet", "inventory"].includes(
           permission.module
-        )
+        )) ||
+        (permission.module === "inventory" && permission.resource === "transactions" && permission.action === "APPROVE")
     )
     .map(
       (permission) =>
@@ -601,6 +622,10 @@ const seed = async () => {
     EMPLOYEE: employeePermissionKeys
       .map((key) => permissionMap.get(key)?.id)
       .filter(Boolean),
+
+    STORE_KEEPER: inventoryPermissionKeys
+      .map((key) => permissionMap.get(key)?.id)
+      .filter(Boolean),
   };
 
   for (const [roleName, permissionIds] of Object.entries(rolePermissionKeys)) {
@@ -628,6 +653,18 @@ const seed = async () => {
   }
 
   console.log("✅ Role permissions assigned");
+
+  // Optional platform administrator bootstrap. Only created when both values are supplied.
+  const superAdminEmail = String(process.env.SUPER_ADMIN_EMAIL || "").trim().toLowerCase();
+  const superAdminPassword = String(process.env.SUPER_ADMIN_PASSWORD || "");
+  if (superAdminEmail && superAdminPassword) {
+    const superAdminRole = roleMap.get("SUPER_ADMIN");
+    const existingSuperAdmin = await prisma.user.findFirst({ where: { email: superAdminEmail, companyId: null } });
+    const user = existingSuperAdmin || await prisma.user.create({ data: { companyId: null, email: superAdminEmail, passwordHash: await bcrypt.hash(superAdminPassword, 12), firstName: "Platform", lastName: "Administrator", status: "ACTIVE", emailVerified: true, emailVerifiedAt: new Date() } });
+    await prisma.userRole.upsert({ where: { userId_roleId: { userId: user.id, roleId: superAdminRole.id } }, update: {}, create: { userId: user.id, roleId: superAdminRole.id } });
+    console.log(`✅ Super Admin ready: ${superAdminEmail}`);
+  }
+
 
   // ============================================================
   // 4. SYSTEM ADMIN

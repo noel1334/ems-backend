@@ -4,12 +4,14 @@ import { env } from "../../config/env.js";
 const buildPayload = ({
     userId,
     companyId,
+    employeeId,
     sessionId,
     roles = [],
     tokenId
 }) => ({
     userId,
     companyId,
+    employeeId,
     sessionId,
     roles,
     tokenId
@@ -18,6 +20,7 @@ const buildPayload = ({
 export const generateAccessToken = ({
     userId,
     companyId,
+    employeeId,
     sessionId,
     roles = []
 }) => {
@@ -25,6 +28,7 @@ export const generateAccessToken = ({
         buildPayload({
             userId,
             companyId,
+            employeeId,
             sessionId,
             roles
         }),
@@ -38,6 +42,7 @@ export const generateAccessToken = ({
 export const generateRefreshToken = ({
     userId,
     companyId,
+    employeeId,
     sessionId,
     roles = [],
     tokenId
@@ -46,6 +51,7 @@ export const generateRefreshToken = ({
         buildPayload({
             userId,
             companyId,
+            employeeId,
             sessionId,
             roles,
             tokenId

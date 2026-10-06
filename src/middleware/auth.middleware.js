@@ -22,8 +22,16 @@ export const authMiddleware = (req, res, next) => {
 
     const payload = verifyAccessToken(token);
 
-    if (!payload?.userId || !payload?.companyId || !payload?.sessionId) {
+    if (!payload?.userId || !payload?.sessionId) {
       throw new AppError("Invalid authentication token", 401, {
+        code: "INVALID_ACCESS_TOKEN",
+      });
+    }
+
+    // Platform users (SUPER_ADMIN) intentionally have no tenant/company.
+    // Company users must always carry a companyId in their token.
+    if (!payload.companyId && !Array.isArray(payload.roles)?.includes("SUPER_ADMIN")) {
+      throw new AppError("Invalid tenant authentication token", 401, {
         code: "INVALID_ACCESS_TOKEN",
       });
     }

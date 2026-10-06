@@ -291,6 +291,38 @@ enum BiometricType {
   OTHER
 }
 
+enum InventoryTransactionType {
+  ISSUE
+  RETURN
+}
+
+enum InventoryTransactionStatus {
+  PENDING_EMPLOYEE_CONFIRMATION
+  CONFIRMED
+  DISPUTED
+  CANCELLED
+}
+
+enum InventoryLedgerType {
+  RECEIPT
+  ISSUE
+  RETURN
+  ADJUSTMENT
+  DAMAGE
+  LOSS
+}
+
+enum InventoryVerificationMethod {
+  FINGERPRINT
+  FACE
+}
+
+enum InventoryVerificationStatus {
+  VERIFIED
+  EXPIRED
+  USED
+}
+
 enum BiometricStatus {
   ACTIVE
   INACTIVE
@@ -348,6 +380,12 @@ model Company {
   payrollPeriods                PayrollPeriod[]
   payrollItems                  PayrollItem[]
   biometricRecords              BiometricRecord[]
+  inventoryLocations            InventoryLocation[]
+  inventorySuppliers            InventorySupplier[]
+  inventoryItems                InventoryItem[]
+  inventoryTransactions         InventoryTransaction[]
+  inventoryLedgerEntries        InventoryLedgerEntry[]
+  inventoryVerifications        InventoryVerification[]
   authTokens                    AuthToken[]
   notifications                 Notification[]
 
@@ -387,6 +425,9 @@ model User {
   notifications                Notification[]
   generatedScheduleGenerations ScheduleGeneration[] @relation("ScheduleGenerationGeneratedBy")
   approvedScheduleGenerations  ScheduleGeneration[] @relation("ScheduleGenerationApprovedBy")
+  inventoryTransactionsAsStorekeeper InventoryTransaction[] @relation("InventoryStorekeeper")
+  inventoryVerificationsCreated InventoryVerification[] @relation("InventoryVerificationActor")
+  inventoryLedgerEntries InventoryLedgerEntry[]
 
   @@unique([companyId, email])
   @@index([email])
@@ -575,6 +616,8 @@ model Employee {
   salaries                      EmployeeSalary[]
   payrollItems                  PayrollItem[]
   biometricRecords              BiometricRecord[]
+  inventoryTransactions         InventoryTransaction[]
+  inventoryVerifications        InventoryVerification[]
 
   @@unique([companyId, employeeNumber])
   @@index([companyId])
@@ -1392,6 +1435,144 @@ model WalletLedgerEntry {
   @@index([walletId, status])
   @@index([createdAt])
   @@map("wallet_ledger_entries")
+}
+
+
+model InventoryLocation {
+  id          String   @id @default(uuid())
+  companyId   String
+  name        String
+  code        String
+  address     String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  items       InventoryItem[]
+  transactions InventoryTransaction[]
+  @@unique([companyId, code])
+  @@index([companyId, isActive])
+  @@map("inventory_locations")
+}
+
+model InventorySupplier {
+  id          String   @id @default(uuid())
+  companyId   String
+  name        String
+  email       String?
+  phone       String?
+  address     String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  ledgerEntries InventoryLedgerEntry[]
+  @@unique([companyId, name])
+  @@index([companyId, isActive])
+  @@map("inventory_suppliers")
+}
+
+model InventoryItem {
+  id              String   @id @default(uuid())
+  companyId       String
+  locationId      String?
+  sku             String
+  barcode         String
+  name            String
+  category        String?
+  unit            String   @default("piece")
+  quantity        Int      @default(0)
+  reservedQuantity Int     @default(0)
+  minimumQuantity Int      @default(0)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  location        InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  transactions    InventoryTransaction[]
+  ledgerEntries   InventoryLedgerEntry[]
+  @@unique([companyId, sku])
+  @@unique([companyId, barcode])
+  @@index([companyId, isActive])
+  @@index([companyId, locationId])
+  @@map("inventory_items")
+}
+
+model InventoryVerification {
+  id              String   @id @default(uuid())
+  companyId       String
+  employeeId      String
+  actorUserId     String
+  method          InventoryVerificationMethod
+  biometricId     String
+  provider        String?
+  verificationReference String
+  status          InventoryVerificationStatus @default(VERIFIED)
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdAt       DateTime @default(now())
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  actorUser       User     @relation("InventoryVerificationActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  transaction     InventoryTransaction?
+  @@unique([verificationReference])
+  @@index([companyId, employeeId, status])
+  @@index([expiresAt])
+  @@map("inventory_verifications")
+}
+
+model InventoryTransaction {
+  id              String   @id @default(uuid())
+  companyId       String
+  itemId          String
+  employeeId      String
+  storekeeperId   String
+  locationId      String?
+  verificationId  String   @unique
+  type            InventoryTransactionType
+  status          InventoryTransactionStatus @default(PENDING_EMPLOYEE_CONFIRMATION)
+  quantity        Int
+  note            String?
+  employeeNote    String?
+  confirmedAt     DateTime?
+  disputedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  item            InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  storekeeper     User @relation("InventoryStorekeeper", fields: [storekeeperId], references: [id], onDelete: Restrict)
+  location        InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  verification   InventoryVerification @relation(fields: [verificationId], references: [id], onDelete: Restrict)
+  ledgerEntry    InventoryLedgerEntry?
+  @@index([companyId, status, createdAt])
+  @@index([companyId, employeeId, createdAt])
+  @@index([companyId, itemId, createdAt])
+  @@map("inventory_transactions")
+}
+
+model InventoryLedgerEntry {
+  id             String   @id @default(uuid())
+  companyId      String
+  itemId         String
+  transactionId  String?  @unique
+  supplierId     String?
+  actorUserId    String?
+  type           InventoryLedgerType
+  quantity       Int
+  balanceBefore  Int
+  balanceAfter   Int
+  reference      String
+  note           String?
+  createdAt      DateTime @default(now())
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  item           InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  transaction    InventoryTransaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  supplier       InventorySupplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  actorUser      User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  @@index([companyId, itemId, createdAt])
+  @@index([companyId, type, createdAt])
+  @@map("inventory_ledger_entries")
 }
 
 model BiometricRecord {
