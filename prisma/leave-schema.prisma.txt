@@ -1,0 +1,131 @@
+// Add these enums/models to the EXISTING prisma/schema.prisma. Do not replace the existing schema.
+
+enum LeaveRequestStatus { PENDING APPROVED REJECTED CANCELLED }
+enum LeaveDurationType { FULL_DAY HALF_DAY }
+enum HalfDayPeriod { FIRST_HALF SECOND_HALF }
+enum LeaveApprovalStatus { PENDING APPROVED REJECTED }
+enum LeaveBalanceTransactionType { ALLOCATION ACCRUAL CARRY_FORWARD DEDUCTION RESTORATION ADJUSTMENT }
+
+model LeaveType {
+  id String @id @default(uuid())
+  companyId String
+  name String
+  code String
+  description String?
+  annualEntitlement Decimal @db.Decimal(8,2)
+  carryForwardAllowed Boolean @default(false)
+  maxCarryForward Decimal @db.Decimal(8,2)
+  requiresApproval Boolean @default(true)
+  approvalLevels Int @default(1)
+  isPaid Boolean @default(true)
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  company Company @relation(fields:[companyId], references:[id], onDelete:Cascade)
+  balances LeaveBalance[]
+  requests LeaveRequest[]
+  @@unique([companyId,name])
+  @@unique([companyId,code])
+  @@index([companyId,isActive])
+}
+
+model LeaveBalance {
+  id String @id @default(uuid())
+  companyId String
+  employeeId String
+  leaveTypeId String
+  year Int
+  openingBalance Decimal @db.Decimal(8,2)
+  accrued Decimal @db.Decimal(8,2)
+  used Decimal @db.Decimal(8,2)
+  pending Decimal @db.Decimal(8,2)
+  adjustment Decimal @db.Decimal(8,2)
+  carriedForward Decimal @db.Decimal(8,2)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  company Company @relation(fields:[companyId], references:[id], onDelete:Cascade)
+  employee Employee @relation(fields:[employeeId], references:[id], onDelete:Cascade)
+  leaveType LeaveType @relation(fields:[leaveTypeId], references:[id], onDelete:Cascade)
+  transactions LeaveBalanceTransaction[]
+  @@unique([employeeId,leaveTypeId,year])
+  @@index([companyId,year])
+  @@index([companyId,employeeId])
+  @@index([companyId,leaveTypeId])
+}
+
+model LeaveRequest {
+  id String @id @default(uuid())
+  companyId String
+  employeeId String
+  leaveTypeId String
+  startDate DateTime
+  endDate DateTime
+  durationType LeaveDurationType @default(FULL_DAY)
+  halfDayPeriod HalfDayPeriod?
+  totalDays Decimal @db.Decimal(8,2)
+  reason String
+  status LeaveRequestStatus @default(PENDING)
+  currentApprovalLevel Int @default(1)
+  submittedAt DateTime @default(now())
+  approvedAt DateTime?
+  rejectedAt DateTime?
+  rejectionReason String?
+  cancelledAt DateTime?
+  cancelledById String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  company Company @relation(fields:[companyId], references:[id], onDelete:Cascade)
+  employee Employee @relation(fields:[employeeId], references:[id], onDelete:Cascade)
+  leaveType LeaveType @relation(fields:[leaveTypeId], references:[id], onDelete:Restrict)
+  approvals LeaveApproval[]
+  transactions LeaveBalanceTransaction[]
+  @@index([companyId,startDate,endDate])
+  @@index([companyId,employeeId,status])
+  @@index([companyId,leaveTypeId])
+}
+
+model LeaveApproval {
+  id String @id @default(uuid())
+  leaveRequestId String
+  approverUserId String?
+  level Int
+  status LeaveApprovalStatus @default(PENDING)
+  comment String?
+  actedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  leaveRequest LeaveRequest @relation(fields:[leaveRequestId], references:[id], onDelete:Cascade)
+  @@unique([leaveRequestId,level])
+  @@index([approverUserId])
+}
+
+model LeaveBalanceTransaction {
+  id String @id @default(uuid())
+  companyId String
+  employeeId String
+  leaveTypeId String
+  leaveRequestId String?
+  type LeaveBalanceTransactionType
+  amount Decimal @db.Decimal(8,2)
+  balanceAfter Decimal @db.Decimal(8,2)
+  note String?
+  createdById String?
+  createdAt DateTime @default(now())
+  company Company @relation(fields:[companyId], references:[id], onDelete:Cascade)
+  employee Employee @relation(fields:[employeeId], references:[id], onDelete:Cascade)
+  leaveType LeaveType @relation(fields:[leaveTypeId], references:[id], onDelete:Cascade)
+  leaveRequest LeaveRequest? @relation(fields:[leaveRequestId], references:[id], onDelete:SetNull)
+  @@index([companyId,employeeId,createdAt])
+  @@index([companyId,leaveTypeId])
+  @@index([leaveRequestId])
+}
+
+// Add to existing Company:
+// leaveTypes LeaveType[]
+// leaveBalances LeaveBalance[]
+// leaveRequests LeaveRequest[]
+// leaveBalanceTransactions LeaveBalanceTransaction[]
+// Add to existing Employee:
+// leaveBalances LeaveBalance[]
+// leaveRequests LeaveRequest[]
+// leaveBalanceTransactions LeaveBalanceTransaction[]
