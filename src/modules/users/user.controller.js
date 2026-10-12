@@ -94,6 +94,7 @@ export const createUser = async (
     const user =
         await createUserService({
             companyId: req.tenant.id,
+            currentUserId: req.user.userId,
             ...parsed.data
         });
 
@@ -162,7 +163,8 @@ export const assignRolesToUser =
             await assignRolesToUserService({
                 userId: req.params.id,
                 companyId: req.tenant.id,
-                roleIds: parsed.data.roleIds
+                roleIds: parsed.data.roleIds,
+                currentUserId: req.user.userId
             });
 
         return res.status(200).json({

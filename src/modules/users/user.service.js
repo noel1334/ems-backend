@@ -1,6 +1,7 @@
 import prisma from "../../config/database.js";
 import { AppError } from "../../common/errors/AppError.js";
 import { hashPassword } from "../../common/utils/crypto.js";
+import { isTenantAssignablePermission } from "../rbac/rbac.policy.js";
 import {
     createUser,
     createManyUserRoles,
@@ -20,7 +21,8 @@ import {
 const validateRoles = async (
     roleIds,
     companyId,
-    tx
+    tx,
+    actorUserId
 ) => {
     if (!roleIds?.length) {
         return [];
@@ -35,10 +37,34 @@ const validateRoles = async (
 
     if (roles.length !== roleIds.length) {
         throw new AppError(
-            "One or more selected roles are invalid or unavailable",
+            "One or more selected roles are invalid or unavailable for this company",
             400,
             "INVALID_ROLES"
         );
+    }
+
+    if (roles.some((role) => role.scope !== "COMPANY" || role.name === "SUPER_ADMIN")) {
+        throw new AppError("Platform-only roles cannot be assigned to company users", 403, "SYSTEM_ROLE_PROTECTED");
+    }
+
+    if (actorUserId && roleIds.length) {
+        const actor = await tx.user.findFirst({
+            where: { id: actorUserId, companyId, status: "ACTIVE" },
+            select: { roles: { where: { role: { isActive: true } }, select: { role: { select: { scope: true, companyId: true, permissions: { where: { permission: { isActive: true } }, select: { permissionId: true, permission: true } } } } } } },
+        });
+        if (!actor) throw new AppError("Active company administrator not found", 403, "ROLE_GRANT_NOT_ALLOWED");
+        const allowedPermissionIds = new Set(actor.roles
+            .filter(({ role }) => role.scope === "COMPANY" && (role.companyId === null || role.companyId === companyId))
+            .flatMap(({ role }) => role.permissions.filter(({ permission }) => isTenantAssignablePermission(permission)).map(({ permissionId }) => permissionId)));
+        for (const role of roles) {
+            const rolePermissionRows = await tx.rolePermission.findMany({
+                where: { roleId: role.id, permission: { isActive: true } },
+                select: { permissionId: true, permission: true },
+            });
+            if (rolePermissionRows.filter(({ permission }) => isTenantAssignablePermission(permission)).some(({ permissionId }) => !allowedPermissionIds.has(permissionId))) {
+                throw new AppError(`You are not allowed to assign the ${role.name} role because it grants permissions you do not hold`, 403, "ROLE_GRANT_NOT_ALLOWED");
+            }
+        }
     }
 
     return roles;
@@ -108,7 +134,8 @@ export const createUserService =
         middleName,
         phone,
         avatarUrl,
-        roleIds
+        roleIds,
+        currentUserId
     }) => {
         return prisma.$transaction(
             async (tx) => {
@@ -139,7 +166,8 @@ export const createUserService =
                     await validateRoles(
                         roleIds,
                         companyId,
-                        tx
+                        tx,
+                        currentUserId
                     );
 
                 const forbiddenSystemRole =
@@ -265,7 +293,8 @@ export const assignRolesToUserService =
     async ({
         userId,
         companyId,
-        roleIds
+        roleIds,
+        currentUserId
     }) => {
         const user =
             await findUserByIdAndCompany(
@@ -285,7 +314,8 @@ export const assignRolesToUserService =
             await validateRoles(
                 roleIds,
                 companyId,
-                prisma
+                prisma,
+                currentUserId
             );
 
         const forbidden =

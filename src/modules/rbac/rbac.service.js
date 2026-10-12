@@ -1,5 +1,7 @@
 import prisma from "../../config/database.js";
 import { AppError } from "../../common/errors/AppError.js";
+import { isTenantAssignablePermission, isReservedSystemRoleName } from "./rbac.policy.js";
+import { writeAudit } from "../../common/utils/audit.js";
 import {
     createRole,
     createRolePermissions,
@@ -13,31 +15,26 @@ import {
     updateRole
 } from "./rbac.repository.js";
 
-const validatePermissions = async (
-    permissionIds,
-    tx
-) => {
-    if (!permissionIds?.length) {
-        return [];
+const validatePermissions = async (permissionIds, tx, actorUserId, companyId) => {
+    if (!permissionIds?.length) return [];
+    const permissions = await findPermissionsByIds(permissionIds, tx);
+    if (permissions.length !== permissionIds.length) {
+        throw new AppError("One or more permissions are invalid or inactive", 400, "INVALID_PERMISSIONS");
     }
-
-    const permissions =
-        await findPermissionsByIds(
-            permissionIds,
-            tx
-        );
-
-    if (
-        permissions.length !==
-        permissionIds.length
-    ) {
-        throw new AppError(
-            "One or more permissions are invalid or inactive",
-            400,
-            "INVALID_PERMISSIONS"
-        );
+    if (permissions.some((permission) => !isTenantAssignablePermission(permission))) {
+        throw new AppError("Company roles cannot be granted platform-only permissions", 403, "PLATFORM_PERMISSION_NOT_ASSIGNABLE");
     }
-
+    if (actorUserId) {
+        const actor = await tx.user.findFirst({
+            where: { id: actorUserId, companyId, status: "ACTIVE" },
+            select: { id: true, roles: { where: { role: { isActive: true } }, select: { role: { select: { scope: true, companyId: true, permissions: { where: { permission: { isActive: true } }, select: { permissionId: true, permission: true } } } } } } },
+        });
+        if (!actor) throw new AppError("Active company administrator not found", 403, "ROLE_GRANT_NOT_ALLOWED");
+        const allowed = new Set(actor.roles.filter(({ role }) => role.scope === "COMPANY" && (role.companyId === null || role.companyId === companyId)).flatMap(({ role }) => role.permissions.filter(({ permission }) => isTenantAssignablePermission(permission)).map(({ permissionId }) => permissionId)));
+        if (permissions.some((permission) => !allowed.has(permission.id))) {
+            throw new AppError("You can only assign permissions already granted to your own roles", 403, "PERMISSION_DELEGATION_DENIED");
+        }
+    }
     return permissions;
 };
 
@@ -97,8 +94,16 @@ export const createRoleService =
         companyId,
         name,
         description,
-        permissionIds
+        permissionIds,
+        actorUserId,
+        requestId,
+        ipAddress,
+        userAgent
     }) => {
+        if (isReservedSystemRoleName(name)) {
+            throw new AppError("This name is reserved for a protected system role", 400, "RESERVED_ROLE_NAME");
+        }
+
         const existing =
             await findCompanyRoleByName(
                 name,
@@ -116,7 +121,9 @@ export const createRoleService =
         const permissions =
             await validatePermissions(
                 permissionIds,
-                prisma
+                prisma,
+                actorUserId,
+                companyId
             );
 
         return prisma.$transaction(
@@ -147,11 +154,24 @@ export const createRoleService =
                     );
                 }
 
-                return findRoleById(
+                const result = await findRoleById(
                     role.id,
                     companyId,
                     tx
                 );
+                await writeAudit(tx, {
+                    companyId,
+                    actorUserId,
+                    action: "CREATE",
+                    module: "rbac",
+                    resource: "role",
+                    resourceId: role.id,
+                    requestId,
+                    ipAddress,
+                    userAgent,
+                    metadata: { roleName: role.name, permissionIds: permissions.map((permission) => permission.id) },
+                });
+                return result;
             }
         );
     };
@@ -160,7 +180,11 @@ export const updateRoleService =
     async ({
         roleId,
         companyId,
-        data
+        data,
+        actorUserId,
+        requestId,
+        ipAddress,
+        userAgent
     }) => {
         const role =
             await findRoleById(
@@ -184,10 +208,10 @@ export const updateRoleService =
             );
         }
 
-        if (
-            data.name &&
-            data.name !== role.name
-        ) {
+        if (data.name && data.name !== role.name) {
+            if (isReservedSystemRoleName(data.name)) {
+                throw new AppError("This name is reserved for a protected system role", 400, "RESERVED_ROLE_NAME");
+            }
             const existing =
                 await findCompanyRoleByName(
                     data.name,
@@ -243,7 +267,9 @@ export const updateRoleService =
                     const permissions =
                         await validatePermissions(
                             data.permissionIds,
-                            tx
+                            tx,
+                            actorUserId,
+                            companyId
                         );
 
                     await deleteRolePermissions(
@@ -265,11 +291,27 @@ export const updateRoleService =
                     }
                 }
 
-                return findRoleById(
+                const updated = await findRoleById(
                     roleId,
                     companyId,
                     tx
                 );
+                await writeAudit(tx, {
+                    companyId,
+                    actorUserId,
+                    action: "UPDATE",
+                    module: "rbac",
+                    resource: "role",
+                    resourceId: roleId,
+                    requestId,
+                    ipAddress,
+                    userAgent,
+                    metadata: {
+                        before: { name: role.name, isActive: role.isActive, permissionIds: (role.permissions ?? []).map((item) => item.permissionId) },
+                        after: data,
+                    },
+                });
+                return updated;
             }
         );
     };
@@ -280,16 +322,20 @@ export const listPermissionsService =
         action,
         search,
         page,
-        limit
+        limit,
+        companyId,
+        actorUserId
     }) => {
-        const result =
-            await listPermissions({
-                module,
-                action,
-                search,
-                page,
-                limit
+        let permissionIds;
+        if (actorUserId) {
+            const actor = await prisma.user.findFirst({
+                where: { id: actorUserId, companyId, status: "ACTIVE" },
+                select: { roles: { where: { role: { isActive: true } }, select: { role: { select: { scope: true, companyId: true, permissions: { where: { permission: { isActive: true } }, select: { permissionId: true, permission: true } } } } } } },
             });
+            if (!actor) throw new AppError("Active company administrator not found", 403, "ROLE_GRANT_NOT_ALLOWED");
+            permissionIds = [...new Set(actor.roles.filter(({ role }) => role.scope === "COMPANY" && (role.companyId === null || role.companyId === companyId)).flatMap(({ role }) => role.permissions.filter(({ permission }) => isTenantAssignablePermission(permission)).map(({ permissionId }) => permissionId)))];
+        }
+        const result = await listPermissions({ module, action, search, page, limit, permissionIds });
 
         return {
             permissions:
@@ -305,75 +351,45 @@ export const listPermissionsService =
         };
     };
 
-export const deactivateRoleService =
-    async ({
-        roleId,
-        companyId
-    }) => {
-        const role =
-            await findRoleById(
-                roleId,
-                companyId
-            );
+export const deactivateRoleService = async ({
+    roleId,
+    companyId,
+    actorUserId,
+    requestId,
+    ipAddress,
+    userAgent,
+}) => prisma.$transaction(async (tx) => {
+    const role = await findRoleById(roleId, companyId, tx);
+    if (!role) throw new AppError("Role not found", 404, "ROLE_NOT_FOUND");
+    if (role.isSystem) throw new AppError("System roles cannot be deactivated", 403, "SYSTEM_ROLE_PROTECTED");
+    const updated = await updateRole(roleId, { isActive: false }, tx);
+    await writeAudit(tx, {
+        companyId, actorUserId, action: "UPDATE", module: "rbac", resource: "role", resourceId: roleId,
+        requestId, ipAddress, userAgent,
+        metadata: { roleName: role.name, isActiveBefore: role.isActive, isActiveAfter: false },
+    });
+    return updated;
+});
 
-        if (!role) {
-            throw new AppError(
-                "Role not found",
-                404,
-                "ROLE_NOT_FOUND"
-            );
-        }
-
-        if (role.isSystem) {
-            throw new AppError(
-                "System roles cannot be deactivated",
-                403,
-                "SYSTEM_ROLE_PROTECTED"
-            );
-        }
-
-        return updateRole(
-            roleId,
-            {
-                isActive: false
-            }
-        );
-    };
-
-export const activateRoleService =
-    async ({
-        roleId,
-        companyId
-    }) => {
-        const role =
-            await findRoleById(
-                roleId,
-                companyId
-            );
-
-        if (!role) {
-            throw new AppError(
-                "Role not found",
-                404,
-                "ROLE_NOT_FOUND"
-            );
-        }
-
-        if (role.isSystem) {
-            throw new AppError(
-                "System roles cannot be changed",
-                403,
-                "SYSTEM_ROLE_PROTECTED"
-            );
-        }
-
-        return updateRole(
-            roleId,
-            {
-                isActive: true
-            }
-        );
-    };
+export const activateRoleService = async ({
+    roleId,
+    companyId,
+    actorUserId,
+    requestId,
+    ipAddress,
+    userAgent,
+}) => prisma.$transaction(async (tx) => {
+    const role = await findRoleById(roleId, companyId, tx);
+    if (!role) throw new AppError("Role not found", 404, "ROLE_NOT_FOUND");
+    if (role.isSystem) throw new AppError("System roles cannot be changed", 403, "SYSTEM_ROLE_PROTECTED");
+    const updated = await updateRole(roleId, { isActive: true }, tx);
+    await writeAudit(tx, {
+        companyId, actorUserId, action: "UPDATE", module: "rbac", resource: "role", resourceId: roleId,
+        requestId, ipAddress, userAgent,
+        metadata: { roleName: role.name, isActiveBefore: role.isActive, isActiveAfter: true },
+    });
+    return updated;
+});
 
 export const getRoleUsersService =
     async ({
@@ -395,6 +411,7 @@ export const getRoleUsersService =
         }
 
         return findRoleUsers(
-            roleId
+            roleId,
+            companyId
         );
     };

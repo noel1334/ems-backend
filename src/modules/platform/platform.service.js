@@ -3,6 +3,7 @@ import prisma from "../../config/database.js";
 import { hashPassword } from "../../common/utils/crypto.js";
 import AppError from "../../common/errors/AppError.js";
 import { writeAudit } from "../../common/utils/audit.js";
+import { isReservedSystemRoleName, isTenantAssignablePermission } from "../rbac/rbac.policy.js";
 
 const adminSelect = {
   id: true,
@@ -173,6 +174,61 @@ export const updateTenant = async (actorUserId, id, data, context = {}) => {
   return getTenant(company.id);
 };
 
+
+export const listTenantDepartments = async (companyId) => {
+  await requireTenant(companyId);
+  return prisma.department.findMany({ where: { companyId, isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true, code: true, isActive: true } });
+};
+
+export const listTenantDesignations = async (companyId) => {
+  await requireTenant(companyId);
+  return prisma.designation.findMany({ where: { companyId, isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true, code: true, departmentId: true, isActive: true } });
+};
+
+const tenantRoleInclude = {
+  permissions: {
+    where: { permission: { isActive: true } },
+    include: { permission: true },
+  },
+};
+
+const tenantRoleView = (role) => ({
+  id: role.id,
+  companyId: role.companyId,
+  name: role.name,
+  description: role.description,
+  scope: role.scope,
+  isSystem: role.isSystem,
+  isActive: role.isActive,
+  permissions: (role.permissions ?? [])
+    .map(({ permission }) => permission)
+    .filter((permission) => isTenantAssignablePermission(permission))
+    .map((permission) => ({
+      id: permission.id,
+      module: permission.module,
+      resource: permission.resource,
+      action: permission.action,
+      description: permission.description,
+    })),
+  createdAt: role.createdAt,
+  updatedAt: role.updatedAt,
+});
+
+async function validateTenantPermissionIds(permissionIds = [], tx = prisma) {
+  if (!permissionIds.length) return [];
+  const permissions = await tx.permission.findMany({
+    where: { id: { in: permissionIds }, isActive: true },
+  });
+  if (permissions.length !== permissionIds.length) {
+    throw new AppError("One or more selected permissions are missing or inactive", 400, "INVALID_PERMISSIONS");
+  }
+  const disallowed = permissions.filter((permission) => !isTenantAssignablePermission(permission));
+  if (disallowed.length) {
+    throw new AppError("Company roles cannot be granted platform-only permissions", 403, "PLATFORM_PERMISSION_NOT_ASSIGNABLE");
+  }
+  return permissions;
+}
+
 export const listTenantRoles = async (companyId) => {
   await requireTenant(companyId);
   const roles = await prisma.role.findMany({
@@ -182,11 +238,101 @@ export const listTenantRoles = async (companyId) => {
       name: { not: "SUPER_ADMIN" },
       OR: [{ companyId: null }, { companyId }],
     },
-    select: { id: true, name: true, description: true, scope: true, isSystem: true },
+    include: tenantRoleInclude,
     orderBy: [{ isSystem: "desc" }, { name: "asc" }],
   });
-  return roles;
+  return roles.map(tenantRoleView);
 };
+
+export const listPlatformPermissionCatalog = async (query = {}) => {
+  const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
+  const limit = Math.min(200, Math.max(1, Number.parseInt(query.limit, 10) || 200));
+  const all = await prisma.permission.findMany({
+    where: { isActive: true, ...(query.module ? { module: query.module } : {}) },
+    orderBy: [{ module: "asc" }, { resource: "asc" }, { action: "asc" }],
+  });
+  const filtered = all.filter((permission) =>
+    isTenantAssignablePermission(permission) && (!query.search ||
+      `${permission.module} ${permission.resource} ${permission.action} ${permission.description ?? ""}`.toLowerCase().includes(String(query.search).toLowerCase()))
+  );
+  const start = (page - 1) * limit;
+  return {
+    items: filtered.slice(start, start + limit).map(({ id, module, resource, action, description }) => ({ id, module, resource, action, description })),
+    pagination: { page, limit, total: filtered.length, totalPages: Math.max(1, Math.ceil(filtered.length / limit)) },
+  };
+};
+
+export const createTenantRole = async (actorUserId, companyId, data, context = {}) => prisma.$transaction(async (tx) => {
+  await requireTenant(companyId, tx);
+  if (isReservedSystemRoleName(data.name)) {
+    throw new AppError("This name is reserved for a protected system role", 400, "RESERVED_ROLE_NAME");
+  }
+  const name = data.name.trim();
+  const existing = await tx.role.findFirst({ where: { companyId, name: { equals: name, mode: "insensitive" } } });
+  if (existing) throw new AppError("A role with this name already exists in this company", 409, "ROLE_ALREADY_EXISTS");
+  const permissions = await validateTenantPermissionIds(data.permissionIds ?? [], tx);
+  const role = await tx.role.create({
+    data: { companyId, name, description: data.description ?? null, scope: "COMPANY", isSystem: false, isActive: true },
+  });
+  if (permissions.length) {
+    await tx.rolePermission.createMany({ data: permissions.map((permission) => ({ roleId: role.id, permissionId: permission.id })), skipDuplicates: true });
+  }
+  const result = await tx.role.findUnique({ where: { id: role.id }, include: tenantRoleInclude });
+  await writeAudit(tx, {
+    companyId,
+    actorUserId,
+    action: "CREATE",
+    module: "platform",
+    resource: "tenant_role",
+    resourceId: role.id,
+    requestId: context.requestId,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+    metadata: { roleName: role.name, permissionCount: permissions.length },
+  });
+  return tenantRoleView(result);
+});
+
+export const updateTenantRole = async (actorUserId, companyId, roleId, data, context = {}) => prisma.$transaction(async (tx) => {
+  await requireTenant(companyId, tx);
+  const existing = await tx.role.findFirst({ where: { id: roleId, companyId }, include: tenantRoleInclude });
+  if (!existing) throw new AppError("Custom role not found in this company", 404, "ROLE_NOT_FOUND");
+  if (existing.isSystem || existing.scope !== "COMPANY") throw new AppError("System roles cannot be modified by tenant administrators", 403, "SYSTEM_ROLE_PROTECTED");
+
+  const updateData = {};
+  if (data.name !== undefined) {
+    const name = data.name.trim();
+    if (isReservedSystemRoleName(name)) throw new AppError("This name is reserved for a protected system role", 400, "RESERVED_ROLE_NAME");
+    const duplicate = await tx.role.findFirst({ where: { companyId, id: { not: roleId }, name: { equals: name, mode: "insensitive" } } });
+    if (duplicate) throw new AppError("A role with this name already exists in this company", 409, "ROLE_ALREADY_EXISTS");
+    updateData.name = name;
+  }
+  if (data.description !== undefined) updateData.description = data.description;
+  if (data.isActive !== undefined) updateData.isActive = data.isActive;
+
+  if (data.permissionIds !== undefined) {
+    const permissions = await validateTenantPermissionIds(data.permissionIds, tx);
+    await tx.rolePermission.deleteMany({ where: { roleId } });
+    if (permissions.length) {
+      await tx.rolePermission.createMany({ data: permissions.map((permission) => ({ roleId, permissionId: permission.id })), skipDuplicates: true });
+    }
+  }
+  if (Object.keys(updateData).length) await tx.role.update({ where: { id: roleId }, data: updateData });
+  const updated = await tx.role.findUnique({ where: { id: roleId }, include: tenantRoleInclude });
+  await writeAudit(tx, {
+    companyId,
+    actorUserId,
+    action: "UPDATE",
+    module: "platform",
+    resource: "tenant_role",
+    resourceId: roleId,
+    requestId: context.requestId,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+    metadata: { before: { name: existing.name, isActive: existing.isActive, permissionIds: existing.permissions.map((item) => item.permissionId) }, after: data },
+  });
+  return tenantRoleView(updated);
+});
 
 export const listTenantUsers = async (companyId, query = {}) => {
   await requireTenant(companyId);
@@ -235,6 +381,17 @@ export const createTenantUser = async (actorUserId, companyId, data, context = {
     const isEmployee = roles.some((role) => role.name === "EMPLOYEE");
     let employee = null;
     if (isEmployee) {
+      if (data.departmentId) {
+        const department = await tx.department.findFirst({ where: { id: data.departmentId, companyId } });
+        if (!department) throw new AppError("Selected department does not belong to this company", 400, "INVALID_DEPARTMENT");
+      }
+      if (data.designationId) {
+        const designation = await tx.designation.findFirst({ where: { id: data.designationId, companyId } });
+        if (!designation) throw new AppError("Selected designation does not belong to this company", 400, "INVALID_DESIGNATION");
+        if (data.departmentId && designation.departmentId && designation.departmentId !== data.departmentId) {
+          throw new AppError("Selected designation belongs to a different department", 400, "DESIGNATION_DEPARTMENT_MISMATCH");
+        }
+      }
       employee = await tx.employee.create({ data: {
         companyId,
         employeeNumber: `EMP-${randomUUID().slice(0, 8).toUpperCase()}`,
@@ -248,6 +405,8 @@ export const createTenantUser = async (actorUserId, companyId, data, context = {
         employmentStatus: "ACTIVE",
         hireDate: new Date(),
         country: company.country || "Nigeria",
+        departmentId: data.departmentId ?? null,
+        designationId: data.designationId ?? null,
       } });
     }
 

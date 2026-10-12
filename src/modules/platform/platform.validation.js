@@ -31,6 +31,8 @@ export const createPlatformUserSchema = z.object({
   phone: z.string().trim().max(30).optional().nullable(),
   jobTitle: z.string().trim().max(150).optional().nullable(),
   employeeType: z.enum(["FULL_TIME", "PART_TIME", "CONTRACT", "INTERN", "TEMPORARY"]).optional().default("FULL_TIME"),
+  departmentId: z.string().uuid().optional().nullable(),
+  designationId: z.string().uuid().optional().nullable(),
   roleIds: z.array(z.string().uuid()).min(1, "Select at least one company role").max(20)
     .refine((ids) => new Set(ids).size === ids.length, "Role selections must be unique"),
 });
@@ -38,4 +40,28 @@ export const createPlatformUserSchema = z.object({
 
 export const updatePlatformUserSchema = z.object({
   status: z.enum(["ACTIVE", "INACTIVE", "SUSPENDED", "LOCKED"]),
+});
+
+
+const tenantRoleNameSchema = z.string().trim().min(2, "Role name must contain at least 2 characters").max(100).regex(/^[A-Za-z0-9 _-]+$/, "Role name may contain letters, numbers, spaces, underscores and hyphens only");
+const permissionIdsSchema = z.array(z.string().uuid()).max(200).default([]).refine((ids) => new Set(ids).size === ids.length, "Permission selections must be unique");
+
+export const createTenantRoleSchema = z.object({
+  name: tenantRoleNameSchema,
+  description: z.string().trim().max(500).optional().nullable(),
+  permissionIds: permissionIdsSchema,
+});
+
+export const updateTenantRoleSchema = z.object({
+  name: tenantRoleNameSchema.optional(),
+  description: z.string().trim().max(500).optional().nullable(),
+  isActive: z.boolean().optional(),
+  permissionIds: z.array(z.string().uuid()).max(200).optional().refine((ids) => ids === undefined || new Set(ids).size === ids.length, "Permission selections must be unique"),
+}).refine((value) => Object.keys(value).length > 0, "At least one field is required");
+
+export const platformPermissionQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(200),
+  module: z.string().trim().max(100).optional(),
+  search: z.string().trim().max(100).optional(),
 });

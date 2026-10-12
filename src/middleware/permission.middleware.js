@@ -1,5 +1,6 @@
 import { AppError } from "../common/errors/AppError.js";
 import prisma from "../config/database.js";
+import { isTenantAssignablePermission } from "../modules/rbac/rbac.policy.js";
 
 export const requirePermission = (moduleName, resource, action) => {
     return async (req, res, next) => {
@@ -22,9 +23,7 @@ export const requirePermission = (moduleName, resource, action) => {
                     status: true,
                     roles: {
                         where: {
-                            role: {
-                                isActive: true
-                            }
+                            role: { isActive: true }
                         },
                         include: {
                             role: {
@@ -80,10 +79,9 @@ export const requirePermission = (moduleName, resource, action) => {
                                                       * is appropriate.
                                                              */
             const hasSuperAdminRole =
-                user.roles.some(
-                    (userRole) =>
-                        userRole.role.name ===
-                        "SUPER_ADMIN"
+                user.companyId === null && user.roles.some(
+                    (userRole) => userRole.role.name === "SUPER_ADMIN" &&
+                        userRole.role.scope === "SYSTEM" && userRole.role.companyId === null
                 );
 
             if (hasSuperAdminRole) {
@@ -98,8 +96,12 @@ export const requirePermission = (moduleName, resource, action) => {
             }
 
             const hasPermission =
-                user.roles.some((userRole) =>
-                    userRole.role.permissions.some(
+                user.roles.some((userRole) => {
+                    const role = userRole.role;
+                    const roleBelongsToUserTenant = user.companyId !== null &&
+                        role.scope === "COMPANY" &&
+                        (role.companyId === null || role.companyId === user.companyId);
+                    return roleBelongsToUserTenant && role.permissions.some(
                         (rolePermission) => {
                             const permission =
                                 rolePermission.permission;
@@ -111,11 +113,11 @@ export const requirePermission = (moduleName, resource, action) => {
                                 resource &&
                                 permission.action ===
                                 action &&
-                                permission.isActive
+                                isTenantAssignablePermission(permission)
                             );
                         }
-                    )
-                );
+                    );
+                });
 
             if (!hasPermission) {
                 throw new AppError(

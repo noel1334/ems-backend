@@ -157,15 +157,17 @@ export const findRolesByIds = async (
             id: {
                 in: roleIds
             },
+            scope: "COMPANY",
             isActive: true,
             OR: [
                 { companyId },
                 {
                     companyId: null,
-                    scope: "SYSTEM"
+                    scope: "COMPANY"
                 }
             ]
-        }
+        },
+        include: { permissions: { include: { permission: true } } }
     });
 
 export const findRoleById = async (
@@ -176,11 +178,12 @@ export const findRoleById = async (
     tx.role.findFirst({
         where: {
             id: roleId,
+            scope: "COMPANY",
             OR: [
                 { companyId },
                 {
                     companyId: null,
-                    scope: "SYSTEM"
+                    scope: "COMPANY"
                 }
             ]
         },
@@ -195,7 +198,7 @@ export const findCompanyRoleByName = async (
     tx.role.findFirst({
         where: {
             companyId,
-            name
+            name: { equals: name, mode: "insensitive" }
         }
     });
 
@@ -231,13 +234,14 @@ export const listRoles = async (
     tx = prisma
 ) => {
     const where = {
+        scope: "COMPANY",
         OR: [
             {
                 companyId
             },
             {
                 companyId: null,
-                scope: "SYSTEM"
+                scope: "COMPANY"
             }
         ],
         ...(search
@@ -248,7 +252,8 @@ export const listRoles = async (
                   }
               }
             : {}),
-        ...(scope ? { scope } : {})
+        ...(scope === "COMPANY" ? { scope: "COMPANY" } : {}),
+        scope: "COMPANY"
     };
 
     const [roles, total] = await Promise.all([
@@ -313,12 +318,14 @@ export const listPermissions = async (
         action,
         search,
         page,
-        limit
+        limit,
+        permissionIds
     },
     tx = prisma
 ) => {
     const where = {
         isActive: true,
+        ...(Array.isArray(permissionIds) ? { id: { in: permissionIds } } : {}),
         ...(module ? { module } : {}),
         ...(action ? { action } : {}),
         ...(search
@@ -375,11 +382,13 @@ export const listPermissions = async (
 
 export const findRoleUsers = async (
     roleId,
+    companyId,
     tx = prisma
 ) =>
     tx.userRole.findMany({
         where: {
-            roleId
+            roleId,
+            user: { companyId }
         },
         include: {
             user: {

@@ -136,6 +136,10 @@ export const createRole = async (
     const role =
         await createRoleService({
             companyId: req.tenant.id,
+            actorUserId: req.user.userId,
+            requestId: req.requestId,
+            ipAddress: req.ip,
+            userAgent: req.get("user-agent"),
             ...parsed.data
         });
 
@@ -171,6 +175,10 @@ export const updateRole = async (
         await updateRoleService({
             roleId: req.params.id,
             companyId: req.tenant.id,
+            actorUserId: req.user.userId,
+            requestId: req.requestId,
+            ipAddress: req.ip,
+            userAgent: req.get("user-agent"),
             data: parsed.data
         });
 
@@ -191,7 +199,11 @@ export const activateRole = async (
     const role =
         await activateRoleService({
             roleId: req.params.id,
-            companyId: req.tenant.id
+            companyId: req.tenant.id,
+            actorUserId: req.user.userId,
+            requestId: req.requestId,
+            ipAddress: req.ip,
+            userAgent: req.get("user-agent")
         });
 
     return res.status(200).json({
@@ -209,8 +221,11 @@ export const deactivateRole =
         const role =
             await deactivateRoleService({
                 roleId: req.params.id,
-                companyId:
-                    req.tenant.id
+                companyId: req.tenant.id,
+                actorUserId: req.user.userId,
+                requestId: req.requestId,
+                ipAddress: req.ip,
+                userAgent: req.get("user-agent")
             });
 
         return res.status(200).json({
@@ -240,9 +255,11 @@ export const listPermissions =
         }
 
         const result =
-            await listPermissionsService(
-                parsed.data
-            );
+            await listPermissionsService({
+                ...parsed.data,
+                companyId: req.tenant.id,
+                actorUserId: req.user.userId,
+            });
 
         return res.status(200).json({
             success: true,

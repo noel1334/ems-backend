@@ -9,7 +9,8 @@ export async function nextEmployeeNumber(companyId, tx) {
   const rows = await tx.$queryRaw`
     INSERT INTO system_settings (id, "companyId", key, value, "createdAt", "updatedAt")
     VALUES (${id}::uuid, ${companyId}::uuid, ${SEQUENCE_KEY},
-      (SELECT COALESCE(MAX(CASE WHEN "employeeNumber" ~ '^EMP-[0-9]+$' THEN SUBSTRING("employeeNumber" FROM 5)::bigint ELSE 0 END), 0) + 1)::text,
+      (SELECT (COALESCE(MAX(CASE WHEN "employeeNumber" ~ '^EMP-[0-9]+$' THEN SUBSTRING("employeeNumber" FROM 5)::bigint ELSE 0 END), 0) + 1)::text
+       FROM employees WHERE "companyId" = ${companyId}::uuid),
       NOW(), NOW())
     ON CONFLICT ("companyId", key)
     DO UPDATE SET value = (COALESCE(system_settings.value, '0')::bigint + 1)::text, "updatedAt" = NOW()

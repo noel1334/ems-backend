@@ -16,13 +16,13 @@ export const errorHandler = (error, req, res, next) => {
     details = error.details;
   } else if (error instanceof ZodError) {
     statusCode = 400;
-    message = "Validation failed";
     code = "VALIDATION_ERROR";
-
     details = error.issues.map((issue) => ({
       field: issue.path.join("."),
       message: issue.message,
     }));
+    const summary = details.map((item) => `${item.field || "request"}: ${item.message}`).join("; ");
+    message = summary ? `Validation failed — ${summary}` : "Validation failed";
   } else if (error instanceof Prisma.PrismaClientKnownRequestError) {
     switch (error.code) {
       case "P2002":
@@ -52,7 +52,17 @@ export const errorHandler = (error, req, res, next) => {
     code = "INVALID_JSON";
   }
 
-  if (env.NODE_ENV !== "production") {
+  if (statusCode === 400 && code === "VALIDATION_ERROR") {
+    // Log field names/messages only; never log request bodies or passwords.
+    console.warn(JSON.stringify({
+      event: "api_validation_error",
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+      statusCode,
+      details,
+    }));
+  } else if (env.NODE_ENV !== "production") {
     console.error(error);
   }
 

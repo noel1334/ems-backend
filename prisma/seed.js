@@ -406,6 +406,51 @@ const permissions = [
   { module: "scheduling", resource: "generations", action: "MANAGE", description: "Publish generated schedules" },
 
   // ============================================================
+  // PERMISSIONS REQUIRED BY EXISTING API ROUTES
+  // Keep this catalogue aligned with the middleware checks in route files.
+  // ============================================================
+  { module: "dashboard", resource: "dashboard", action: "READ", description: "View dashboard overview" },
+  { module: "employees", resource: "employee-profile", action: "READ", description: "View employee profile" },
+  { module: "employees", resource: "employee-profile", action: "UPDATE", description: "Update employee profile" },
+  { module: "holidays", resource: "holiday", action: "CREATE", description: "Create company holidays" },
+  { module: "holidays", resource: "holiday", action: "DELETE", description: "Delete company holidays" },
+  { module: "holidays", resource: "holiday", action: "READ", description: "View company holidays" },
+  { module: "holidays", resource: "holiday", action: "UPDATE", description: "Update company holidays" },
+  { module: "leave", resource: "entitlements", action: "MANAGE", description: "Manage leave entitlements" },
+  { module: "leave", resource: "entitlements", action: "READ", description: "View leave entitlements" },
+  { module: "leave", resource: "reports", action: "READ", description: "View leave reports" },
+  { module: "leave", resource: "requests", action: "APPROVE", description: "Approve or reject leave requests" },
+  { module: "leave", resource: "requests", action: "CREATE", description: "Create leave requests" },
+  { module: "leave", resource: "requests", action: "READ", description: "View leave requests" },
+  { module: "leave", resource: "requests", action: "UPDATE", description: "Update leave requests" },
+  { module: "leave", resource: "types", action: "CREATE", description: "Create leave types" },
+  { module: "leave", resource: "types", action: "DELETE", description: "Delete leave types" },
+  { module: "leave", resource: "types", action: "READ", description: "View leave types" },
+  { module: "leave", resource: "types", action: "UPDATE", description: "Update leave types" },
+  { module: "payroll", resource: "payslips", action: "READ", description: "View payslips" },
+  { module: "payroll", resource: "runs", action: "APPROVE", description: "Approve payroll runs" },
+  { module: "payroll", resource: "runs", action: "CREATE", description: "Create payroll runs" },
+  { module: "payroll", resource: "runs", action: "READ", description: "View payroll runs" },
+  { module: "payroll", resource: "runs", action: "UPDATE", description: "Update payroll runs" },
+  { module: "payroll", resource: "salaries", action: "CREATE", description: "Create employee salary records" },
+  { module: "payroll", resource: "structures", action: "CREATE", description: "Create payroll structures" },
+  { module: "payroll", resource: "structures", action: "DELETE", description: "Delete payroll structures" },
+  { module: "payroll", resource: "structures", action: "READ", description: "View payroll structures" },
+  { module: "payroll", resource: "structures", action: "UPDATE", description: "Update payroll structures" },
+  { module: "rbac", resource: "roles", action: "MANAGE", description: "Manage roles and role permissions" },
+  { module: "rbac", resource: "user-roles", action: "MANAGE", description: "Assign and remove user roles" },
+  { module: "reports", resource: "reports", action: "EXPORT", description: "Export company reports" },
+  { module: "reports", resource: "reports", action: "READ", description: "View company reports" },
+  { module: "schedules", resource: "schedule", action: "CREATE", description: "Create schedules" },
+  { module: "schedules", resource: "schedule", action: "DELETE", description: "Delete schedules" },
+  { module: "schedules", resource: "schedule", action: "READ", description: "View schedules" },
+  { module: "schedules", resource: "schedule", action: "UPDATE", description: "Update schedules" },
+  { module: "shifts", resource: "shift", action: "CREATE", description: "Create shifts" },
+  { module: "shifts", resource: "shift", action: "DELETE", description: "Delete shifts" },
+  { module: "shifts", resource: "shift", action: "READ", description: "View shifts" },
+  { module: "shifts", resource: "shift", action: "UPDATE", description: "Update shifts" },
+
+  // ============================================================
   // INVENTORY / STORE
   // ============================================================
   ...["inventory","transactions","ledger","locations","suppliers"].flatMap((resource) => [
@@ -563,6 +608,12 @@ const seed = async () => {
         "attendance",
         "leave",
         "audit",
+        "dashboard",
+        "scheduling",
+        "schedules",
+        "shifts",
+        "holidays",
+        "reports",
       ].includes(permission.module)
     )
     .map(
@@ -572,7 +623,7 @@ const seed = async () => {
 
   const financePermissionKeys = permissions
     .filter((permission) =>
-      ["payroll", "wallet", "payments"].includes(permission.module)
+      ["payroll", "wallet", "payments", "dashboard", "reports", "audit"].includes(permission.module)
     )
     .map(
       (permission) =>
@@ -587,7 +638,7 @@ const seed = async () => {
     .filter(
       (permission) =>
         (permission.action === "READ" &&
-        ["employees", "attendance", "leave", "payroll", "wallet", "inventory"].includes(
+        ["dashboard", "employees", "attendance", "leave", "payroll", "wallet", "inventory"].includes(
           permission.module
         )) ||
         (permission.module === "inventory" && permission.resource === "transactions" && permission.action === "APPROVE")
@@ -597,8 +648,12 @@ const seed = async () => {
         `${permission.module}:${permission.resource}:${permission.action}`
     );
 
+  const isTenantPermission = (permission) =>
+    permission.module !== "system" &&
+    !(permission.module === "company" && permission.resource === "company" && ["CREATE", "DELETE"].includes(permission.action));
+
   const companyAdminPermissionKeys = permissions
-    .filter((permission) => permission.module !== "system")
+    .filter(isTenantPermission)
     .map(
       (permission) =>
         `${permission.module}:${permission.resource}:${permission.action}`
@@ -623,9 +678,10 @@ const seed = async () => {
       .map((key) => permissionMap.get(key)?.id)
       .filter(Boolean),
 
-    STORE_KEEPER: inventoryPermissionKeys
-      .map((key) => permissionMap.get(key)?.id)
-      .filter(Boolean),
+    STORE_KEEPER: [
+      ...inventoryPermissionKeys.map((key) => permissionMap.get(key)?.id).filter(Boolean),
+      permissionMap.get("dashboard:dashboard:READ")?.id,
+    ].filter(Boolean),
   };
 
   for (const [roleName, permissionIds] of Object.entries(rolePermissionKeys)) {
@@ -634,6 +690,13 @@ const seed = async () => {
     if (!role) {
       throw new Error(`Role ${roleName} was not created`);
     }
+
+    await prisma.rolePermission.deleteMany({
+      where: {
+        roleId: role.id,
+        ...(permissionIds.length ? { permissionId: { notIn: permissionIds } } : {}),
+      },
+    });
 
     for (const permissionId of permissionIds) {
       await prisma.rolePermission.upsert({
