@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const createTenantSchema = z.object({
   name: z.string().trim().min(2).max(160),
+  industry: z.enum(["HEALTHCARE", "MANUFACTURING", "EDUCATION", "CONSTRUCTION", "HOSPITALITY", "RETAIL", "LOGISTICS", "FINANCE", "NGO", "CORPORATE", "OTHER"]).default("CORPORATE"),
   slug: z.string().trim().min(2).max(80).regex(/^[a-z0-9-]+$/),
   email: z.string().trim().email().transform((value) => value.toLowerCase()),
   country: z.string().trim().max(80).default("Nigeria"),
@@ -17,6 +18,8 @@ export const createTenantSchema = z.object({
 });
 
 export const updateTenantSchema = z.object({
+  name: z.string().trim().min(2).max(160).optional(),
+  industry: z.enum(["HEALTHCARE", "MANUFACTURING", "EDUCATION", "CONSTRUCTION", "HOSPITALITY", "RETAIL", "LOGISTICS", "FINANCE", "NGO", "CORPORATE", "OTHER"]).optional(),
   status: z.enum(["ACTIVE", "SUSPENDED", "INACTIVE"]).optional(),
   plan: z.enum(["FREE", "STARTER", "PROFESSIONAL", "ENTERPRISE"]).optional(),
   isSubscriptionActive: z.boolean().optional(),

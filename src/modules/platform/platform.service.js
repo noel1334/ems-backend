@@ -33,6 +33,7 @@ const safeCompany = (company) => {
   return {
     id: company.id,
     name: company.name,
+    industry: company.industry ?? "CORPORATE",
     slug: company.slug,
     email: company.email,
     status: company.status,
@@ -130,6 +131,7 @@ export const createTenant = async (actorUserId, data, context = {}) => {
     if (existingAdmin) throw new AppError("A user with this email already exists", 409, "EMAIL_ALREADY_EXISTS");
     const company = await tx.company.create({ data: {
       name: data.name,
+      industry: data.industry ?? "CORPORATE",
       slug: data.slug,
       email: data.email.toLowerCase(),
       country: data.country,

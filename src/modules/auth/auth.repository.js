@@ -12,7 +12,14 @@ export const findUserByEmail = async (
             company: true,
             roles: {
                 include: {
-                    role: true
+                    role: {
+                        include: {
+                            permissions: {
+                                where: { permission: { isActive: true } },
+                                include: { permission: true }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -30,7 +37,14 @@ export const findUserById = async (
             company: true,
             roles: {
                 include: {
-                    role: true
+                    role: {
+                        include: {
+                            permissions: {
+                                where: { permission: { isActive: true } },
+                                include: { permission: true }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -50,7 +64,14 @@ export const updateUser = async (
             company: true,
             roles: {
                 include: {
-                    role: true
+                    role: {
+                        include: {
+                            permissions: {
+                                where: { permission: { isActive: true } },
+                                include: { permission: true }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -81,7 +102,14 @@ export const findSessionById = async (
                     company: true,
                     roles: {
                         include: {
-                            role: true
+                            role: {
+                                include: {
+                                    permissions: {
+                                        where: { permission: { isActive: true } },
+                                        include: { permission: true }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -202,7 +230,14 @@ export const createUser = async (
             company: true,
             roles: {
                 include: {
-                    role: true
+                    role: {
+                        include: {
+                            permissions: {
+                                where: { permission: { isActive: true } },
+                                include: { permission: true }
+                            }
+                        }
+                    }
                 }
             }
         }

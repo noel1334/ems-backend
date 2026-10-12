@@ -16,6 +16,7 @@ export const mapCompany = (company) => {
         country: company.country,
         timezone: company.timezone,
         currency: company.currency,
+        industry: company.industry ?? "CORPORATE",
         status: company.status,
         createdAt: company.createdAt,
         updatedAt: company.updatedAt
@@ -33,7 +34,14 @@ export const mapRole = (role) => {
         description: role.description,
         scope: role.scope,
         isSystem: role.isSystem,
-        isActive: role.isActive
+        isActive: role.isActive,
+        permissions: role.permissions?.map((assignment) => assignment.permission).filter(Boolean).map((permission) => ({
+            id: permission.id,
+            module: permission.module,
+            resource: permission.resource,
+            action: permission.action,
+            description: permission.description
+        })) ?? []
     };
 };
 

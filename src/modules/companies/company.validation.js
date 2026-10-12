@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 const optionalString = z.string().trim().min(1).optional().nullable();
+const industrySchema = z.enum([
+  "HEALTHCARE", "MANUFACTURING", "EDUCATION", "CONSTRUCTION", "HOSPITALITY",
+  "RETAIL", "LOGISTICS", "FINANCE", "NGO", "CORPORATE", "OTHER",
+]);
 
 export const createCompanySchema = z.object({
   name: z
@@ -10,6 +14,8 @@ export const createCompanySchema = z.object({
     .max(150, "Company name cannot exceed 150 characters"),
 
   legalName: z.string().trim().max(200).optional().nullable(),
+
+  industry: industrySchema.default("CORPORATE"),
 
   slug: z
     .string()
@@ -44,6 +50,8 @@ export const createCompanySchema = z.object({
 });
 
 export const updateCompanySchema = z.object({
+  industry: industrySchema.optional(),
+
   name: z.string().trim().min(2).max(150).optional(),
 
   legalName: optionalString,
