@@ -18,6 +18,32 @@ import {
     updateUser
 } from "./user.repository.js";
 
+
+const validateEmployeeLink = async (employeeId, companyId, userId, tx) => {
+    if (!employeeId) return null;
+
+    const employee = await tx.employee.findFirst({
+        where: { id: employeeId, companyId },
+        select: { id: true }
+    });
+    if (!employee) {
+        throw new AppError("Selected employee was not found in this company", 404, "EMPLOYEE_NOT_FOUND");
+    }
+
+    const existingLink = await tx.user.findFirst({
+        where: {
+            employeeId,
+            ...(userId ? { id: { not: userId } } : {})
+        },
+        select: { id: true }
+    });
+    if (existingLink) {
+        throw new AppError("This employee profile is already linked to another user account", 409, "EMPLOYEE_ALREADY_LINKED");
+    }
+
+    return employeeId;
+};
+
 const validateRoles = async (
     roleIds,
     companyId,
@@ -135,6 +161,7 @@ export const createUserService =
         phone,
         avatarUrl,
         roleIds,
+        employeeId,
         currentUserId
     }) => {
         return prisma.$transaction(
@@ -187,6 +214,7 @@ export const createUserService =
                     );
                 }
 
+                const linkedEmployeeId = await validateEmployeeLink(employeeId, companyId, null, tx);
                 const passwordHash =
                     await hashPassword(
                         password
@@ -196,6 +224,7 @@ export const createUserService =
                     await createUser(
                         {
                             companyId,
+                            employeeId: linkedEmployeeId,
                             email:
                                 email.toLowerCase(),
                             passwordHash,
@@ -229,65 +258,29 @@ export const createUserService =
         );
     };
 
-export const updateUserService =
-    async ({
-        userId,
-        companyId,
-        data,
-        currentUserId
-    }) => {
-        const user =
-            await findUserByIdAndCompany(
-                userId,
-                companyId
-            );
-
+export const updateUserService = async ({ userId, companyId, data, currentUserId }) => {
+    return prisma.$transaction(async (tx) => {
+        const user = await findUserByIdAndCompany(userId, companyId, tx);
         if (!user) {
-            throw new AppError(
-                "User not found",
-                404,
-                "USER_NOT_FOUND"
-            );
+            throw new AppError("User not found", 404, "USER_NOT_FOUND");
         }
 
-        /*
-             * Prevent an administrator from accidentally
-                  * disabling/deleting the currently authenticated
-                       * account through this endpoint.
-                            */
-        if (
-            userId === currentUserId &&
-            data.status &&
-            data.status !== "ACTIVE"
-        ) {
-            throw new AppError(
-                "You cannot deactivate your own account",
-                400,
-                "SELF_ACCOUNT_CHANGE_NOT_ALLOWED"
-            );
+        if (userId === currentUserId && data.status && data.status !== "ACTIVE") {
+            throw new AppError("You cannot deactivate your own account", 400, "SELF_ACCOUNT_CHANGE_NOT_ALLOWED");
         }
 
-        const updated =
-            await updateUser(
-                userId,
-                data
-            );
-
-        /*
-             * If the account becomes inactive/suspended,
-                  * terminate all active sessions.
-                       */
-        if (
-            data.status &&
-            data.status !== "ACTIVE"
-        ) {
-            await revokeUserSessions(
-                userId
-            );
+        const updateData = { ...data };
+        if (Object.prototype.hasOwnProperty.call(data, "employeeId")) {
+            updateData.employeeId = await validateEmployeeLink(data.employeeId, companyId, userId, tx);
         }
 
-        return updated;
-    };
+        const updated = await updateUser(userId, updateData, tx);
+        if (data.status && data.status !== "ACTIVE") {
+            await revokeUserSessions(userId, tx);
+        }
+        return findUserByIdAndCompany(updated.id, companyId, tx);
+    });
+};
 
 export const assignRolesToUserService =
     async ({

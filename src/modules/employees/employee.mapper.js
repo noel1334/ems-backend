@@ -24,6 +24,7 @@ export const mapEmployee = (employee) => {
         phone: employee.phone,
         gender: employee.gender,
         dateOfBirth: employee.dateOfBirth,
+        maritalStatus: employee.maritalStatus ?? null,
 
         address: employee.address,
         city: employee.city,
@@ -31,12 +32,17 @@ export const mapEmployee = (employee) => {
         country: employee.country,
 
         jobTitle: employee.jobTitle,
+        profilePhotoUrl: employee.profilePhotoUrl ?? null,
 
         employeeType: employee.employeeType,
         employmentStatus: employee.employmentStatus,
 
         hireDate: employee.hireDate,
         terminationDate: employee.terminationDate,
+        departmentId: employee.departmentId ?? null,
+        designationId: employee.designationId ?? null,
+        managerId: employee.managerId ?? null,
+        userId: employee.user?.id ?? null,
 
         department: employee.department
             ? {

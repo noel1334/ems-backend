@@ -52,6 +52,8 @@ export const createEmployeeSchema = z.object({
 
     dateOfBirth: dateSchema.optional().nullable(),
 
+    maritalStatus: z.enum(["SINGLE", "MARRIED", "DIVORCED", "WIDOWED", "SEPARATED"]).optional().nullable(),
+
     address: optionalString,
 
     city: z
@@ -163,6 +165,8 @@ export const updateEmployeeSchema = z
             .nullable(),
 
         dateOfBirth: dateSchema.optional().nullable(),
+
+        maritalStatus: z.enum(["SINGLE", "MARRIED", "DIVORCED", "WIDOWED", "SEPARATED"]).optional().nullable(),
 
         address: optionalString,
 

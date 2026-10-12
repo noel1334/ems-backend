@@ -21,6 +21,7 @@ export const mapUser = (user) => {
     return {
         id: user.id,
         companyId: user.companyId,
+        employeeId: user.employeeId ?? null,
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
@@ -36,6 +37,7 @@ export const mapUser = (user) => {
             user.roles?.map((item) =>
                 mapRole(item.role)
             ) ?? [],
+        roleIds: user.roles?.map((item) => item.roleId ?? item.role?.id).filter(Boolean) ?? [],
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
     };

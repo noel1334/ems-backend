@@ -188,6 +188,7 @@ export const createEmployeeService = async ({
 
                 gender: data.gender ?? null,
                 dateOfBirth: data.dateOfBirth ?? null,
+                maritalStatus: data.maritalStatus ?? null,
 
                 address: data.address ?? null,
                 city: data.city ?? null,

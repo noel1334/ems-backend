@@ -24,6 +24,9 @@ const employeeInclude = {
             firstName: true,
             lastName: true
         }
+    },
+    user: {
+        select: { id: true }
     }
 };
 

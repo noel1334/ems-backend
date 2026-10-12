@@ -64,7 +64,9 @@ export const createUserSchema =
             .array(z.string().uuid())
             .max(20)
             .optional()
-            .default([])
+            .default([]),
+
+        employeeId: z.string().uuid().optional().nullable()
     });
 
 export const updateUserSchema =
@@ -112,7 +114,9 @@ export const updateUserSchema =
                     "INACTIVE",
                     "SUSPENDED"
                 ])
-                .optional()
+                .optional(),
+
+            employeeId: z.string().uuid().optional().nullable()
         })
         .refine(
             (value) =>
