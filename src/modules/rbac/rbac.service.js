@@ -264,28 +264,40 @@ export const updateRoleService =
                     data.permissionIds !==
                     undefined
                 ) {
-                    const permissions =
-                        await validatePermissions(
-                            data.permissionIds,
-                            tx,
-                            actorUserId,
-                            companyId
-                        );
-
-                    await deleteRolePermissions(
-                        roleId,
-                        tx
+                    // Existing grants may be retained or removed even if the acting
+                    // administrator no longer has delegation rights for them. Only
+                    // newly-added grants require current delegation authority.
+                    const requestedIds = [...new Set(data.permissionIds)];
+                    const existingIds = new Set(
+                        (role.permissions ?? [])
+                            .filter(({ permission }) => permission?.isActive && isTenantAssignablePermission(permission))
+                            .map(({ permissionId }) => permissionId)
                     );
+                    const addedIds = requestedIds.filter((id) => !existingIds.has(id));
+                    const newlyGranted = await validatePermissions(
+                        addedIds,
+                        tx,
+                        actorUserId,
+                        companyId
+                    );
+                    const retainedIds = requestedIds.filter((id) => existingIds.has(id));
+                    const retainedPermissions = retainedIds.length
+                        ? await findPermissionsByIds(retainedIds, tx)
+                        : [];
+                    const permissionsById = new Map(
+                        [...retainedPermissions, ...newlyGranted].map((permission) => [permission.id, permission])
+                    );
+                    const permissions = requestedIds.map((id) => permissionsById.get(id)).filter(Boolean);
+
+                    if (permissions.length !== requestedIds.length) {
+                        throw new AppError("One or more selected permissions are invalid or inactive", 400, "INVALID_PERMISSIONS");
+                    }
+
+                    await deleteRolePermissions(roleId, tx);
 
                     if (permissions.length) {
                         await createRolePermissions(
-                            permissions.map(
-                                (permission) => ({
-                                    roleId,
-                                    permissionId:
-                                        permission.id
-                                })
-                            ),
+                            permissions.map((permission) => ({ roleId, permissionId: permission.id })),
                             tx
                         );
                     }
