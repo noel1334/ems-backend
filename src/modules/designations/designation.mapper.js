@@ -6,6 +6,7 @@ export const mapDesignation = (designation) => {
     return {
         id: designation.id,
         companyId: designation.companyId,
+        departmentId: designation.departmentId ?? designation.department?.id ?? null,
 
         name: designation.name,
         code: designation.code,

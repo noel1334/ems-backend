@@ -3,7 +3,9 @@ import { z } from "zod";
 const optionalString = z.string().trim().min(1).optional().nullable();
 const industrySchema = z.enum([
   "HEALTHCARE", "MANUFACTURING", "EDUCATION", "CONSTRUCTION", "HOSPITALITY",
-  "RETAIL", "LOGISTICS", "FINANCE", "NGO", "CORPORATE", "OTHER",
+  "RETAIL", "LOGISTICS", "FINANCE", "AGRICULTURE", "TECHNOLOGY", "ENERGY",
+  "REAL_ESTATE", "TELECOMMUNICATIONS", "MEDIA", "SECURITY", "MINING", "UTILITIES",
+  "GOVERNMENT", "NGO", "PROFESSIONAL_SERVICES", "CORPORATE", "OTHER",
 ]);
 
 export const createCompanySchema = z.object({
