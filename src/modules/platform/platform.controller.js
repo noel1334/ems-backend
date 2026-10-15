@@ -1,6 +1,6 @@
 import { asyncHandler } from "../../common/utils/asyncHandler.js";
 import * as service from "./platform.service.js";
-import { createTenantSchema, createPlatformUserSchema, updatePlatformUserSchema, updateTenantSchema, createTenantRoleSchema, updateTenantRoleSchema, platformPermissionQuerySchema } from "./platform.validation.js";
+import { createTenantSchema, createPlatformUserSchema, updatePlatformUserSchema, assignPlatformUserRolesSchema, updateTenantSchema, createTenantRoleSchema, updateTenantRoleSchema, platformPermissionQuerySchema } from "./platform.validation.js";
 import { AppError } from "../../common/errors/AppError.js";
 
 export const tenants = asyncHandler(async (req, res) => {
@@ -73,6 +73,12 @@ export const updateTenantUser = asyncHandler(async (req, res) => {
   const input = updatePlatformUserSchema.parse(req.body);
   const user = await service.updateTenantUserStatus(req.user.userId, req.params.id, req.params.userId, input.status, { ipAddress: req.ip, userAgent: req.get("user-agent"), requestId: req.requestId });
   return res.json({ success: true, message: "Company user status updated", data: user });
+});
+
+export const assignTenantUserRoles = asyncHandler(async (req, res) => {
+  const input = assignPlatformUserRolesSchema.parse(req.body);
+  const user = await service.assignTenantUserRoles(req.user.userId, req.params.id, req.params.userId, input.roleIds, { ipAddress: req.ip, userAgent: req.get("user-agent"), requestId: req.requestId });
+  return res.json({ success: true, message: "Company user roles updated", data: user });
 });
 
 export const audit = asyncHandler(async (req, res) => {

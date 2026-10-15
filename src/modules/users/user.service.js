@@ -96,6 +96,16 @@ const validateRoles = async (
     return roles;
 };
 
+const requireCompanyScope = (companyId) => {
+    if (typeof companyId !== "string" || companyId.trim().length === 0) {
+        throw new AppError(
+            "A company scope is required to access user accounts",
+            403,
+            "TENANT_ACCESS_DENIED"
+        );
+    }
+};
+
 export const listUsersService =
     async ({
         companyId,
@@ -104,6 +114,7 @@ export const listUsersService =
         search,
         status
     }) => {
+        requireCompanyScope(companyId);
         const skip =
             (page - 1) * limit;
 
@@ -133,6 +144,7 @@ export const getUserService = async ({
     userId,
     companyId
 }) => {
+    requireCompanyScope(companyId);
     const user =
         await findUserByIdAndCompany(
             userId,

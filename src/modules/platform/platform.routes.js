@@ -20,6 +20,7 @@ router.get("/tenants/:id/designations", controller.tenantDesignations);
 router.get("/tenants/:id/users", controller.tenantUsers);
 router.post("/tenants/:id/users", controller.createTenantUser);
 router.patch("/tenants/:id/users/:userId", controller.updateTenantUser);
+router.put("/tenants/:id/users/:userId/roles", controller.assignTenantUserRoles);
 router.get("/tenants/:id", controller.tenant);
 router.patch("/tenants/:id", controller.update);
 router.get("/audit", controller.audit);

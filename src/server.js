@@ -3,10 +3,12 @@ import { env } from "./config/env.js";
 import { connectDatabase, disconnectDatabase } from "./config/database.js";
 import logger from "./config/logger.js";
 import { bootstrapDemoData } from "./bootstrap/demo-bootstrap.js";
+import { bootstrapRoleDefinitions } from "./bootstrap/role-bootstrap.js";
 
 const startServer = async () => {
   try {
     await connectDatabase();
+    await bootstrapRoleDefinitions();
     await bootstrapDemoData();
 
     const server = app.listen(env.PORT, () => {

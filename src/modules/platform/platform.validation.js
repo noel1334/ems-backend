@@ -45,6 +45,11 @@ export const updatePlatformUserSchema = z.object({
   status: z.enum(["ACTIVE", "INACTIVE", "SUSPENDED", "LOCKED"]),
 });
 
+export const assignPlatformUserRolesSchema = z.object({
+  roleIds: z.array(z.string().uuid()).min(1, "Select at least one company role").max(20)
+    .refine((ids) => new Set(ids).size === ids.length, "Role selections must be unique"),
+});
+
 
 const tenantRoleNameSchema = z.string().trim().min(2, "Role name must contain at least 2 characters").max(100).regex(/^[A-Za-z0-9 _-]+$/, "Role name may contain letters, numbers, spaces, underscores and hyphens only");
 const permissionIdsSchema = z.array(z.string().uuid()).max(200).default([]).refine((ids) => new Set(ids).size === ids.length, "Permission selections must be unique");

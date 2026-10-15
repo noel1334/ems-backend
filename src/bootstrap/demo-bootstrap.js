@@ -5,8 +5,19 @@ import { instantiateTenantSystemRoles } from "../modules/platform/role-template.
 const isEnabled = () =>
   String(process.env.BOOTSTRAP_DEMO_DATA || "").toLowerCase() === "true";
 
+const productionDemoBootstrapAllowed = () =>
+  String(process.env.ALLOW_DEMO_BOOTSTRAP_IN_PRODUCTION || "").toLowerCase() === "true";
+
 export const bootstrapDemoData = async () => {
   if (!isEnabled()) {
+    return;
+  }
+
+  // A demo tenant account is COMPANY_ADMIN, never the platform Super Admin.
+  // Do not recreate demo accounts in a production database unless the operator
+  // has explicitly opted in. Existing demo accounts are not deleted here.
+  if (process.env.NODE_ENV === "production" && !productionDemoBootstrapAllowed()) {
+    console.warn("⚠️ Demo bootstrap skipped in production. Set ALLOW_DEMO_BOOTSTRAP_IN_PRODUCTION=true only for an intentionally public demo environment.");
     return;
   }
 

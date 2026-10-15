@@ -1,0 +1,95 @@
+import prisma from "../config/database.js";
+import { hashPassword } from "../common/utils/crypto.js";
+import { instantiateTenantSystemRoles } from "../modules/platform/role-template.service.js";
+
+/**
+ * Restore missing built-in role records after an accidental role-table reset.
+ * Existing tenant role permissions are never overwritten. User-to-role assignments
+ * cannot be inferred safely once deleted, so only the explicitly configured
+ * platform account is reattached automatically.
+ */
+export const bootstrapRoleDefinitions = async () => {
+  const activePermissions = await prisma.permission.findMany({
+    where: { isActive: true },
+    select: { id: true },
+  });
+  if (!activePermissions.length) {
+    throw new Error("Role bootstrap cannot run because no active permissions exist. Run the database seed first.");
+  }
+
+  let superAdminRole = await prisma.role.findFirst({
+    where: { companyId: null, name: "SUPER_ADMIN", scope: "SYSTEM" },
+  });
+  if (!superAdminRole) {
+    superAdminRole = await prisma.role.create({
+      data: {
+        companyId: null,
+        name: "SUPER_ADMIN",
+        description: "System-wide platform administrator",
+        scope: "SYSTEM",
+        isSystem: true,
+        isActive: true,
+      },
+    });
+  } else if (!superAdminRole.isActive || !superAdminRole.isSystem) {
+    superAdminRole = await prisma.role.update({
+      where: { id: superAdminRole.id },
+      data: { isActive: true, isSystem: true, scope: "SYSTEM" },
+    });
+  }
+
+  await prisma.rolePermission.createMany({
+    data: activePermissions.map(({ id: permissionId }) => ({
+      roleId: superAdminRole.id,
+      permissionId,
+    })),
+    skipDuplicates: true,
+  });
+
+  const companies = await prisma.company.findMany({ select: { id: true } });
+  for (const company of companies) {
+    try {
+      await prisma.$transaction((tx) => instantiateTenantSystemRoles(tx, company.id));
+    } catch (error) {
+      if (error?.code === "SYSTEM_ROLE_TEMPLATE_MISSING") {
+        console.warn("⚠️ Company role templates are not seeded yet. Run `npx prisma db seed` to restore built-in company roles.");
+        break;
+      }
+      throw error;
+    }
+  }
+
+  const email = String(process.env.SUPER_ADMIN_EMAIL || "").trim().toLowerCase();
+  const password = String(process.env.SUPER_ADMIN_PASSWORD || "");
+  if (Boolean(email) !== Boolean(password)) {
+    throw new Error("Set both SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD to bootstrap the platform administrator, or leave both unset.");
+  }
+  if (email && password) {
+    const sameEmailTenantUser = await prisma.user.findFirst({ where: { email, companyId: { not: null } }, select: { id: true } });
+    if (sameEmailTenantUser) {
+      throw new Error("SUPER_ADMIN_EMAIL is already used by a company account. Configure a different platform administrator email to avoid cross-tenant identity ambiguity.");
+    }
+    let platformUser = await prisma.user.findFirst({ where: { email, companyId: null } });
+    if (!platformUser) {
+      platformUser = await prisma.user.create({
+        data: {
+          companyId: null,
+          email,
+          passwordHash: await hashPassword(password),
+          firstName: "Platform",
+          lastName: "Administrator",
+          status: "ACTIVE",
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      console.log(`✅ Platform administrator created from SUPER_ADMIN_EMAIL: ${email}`);
+    }
+    await prisma.userRole.upsert({
+      where: { userId_roleId: { userId: platformUser.id, roleId: superAdminRole.id } },
+      update: {},
+      create: { userId: platformUser.id, roleId: superAdminRole.id },
+    });
+    console.log(`✅ Platform Super Admin role verified: ${email}`);
+  }
+};

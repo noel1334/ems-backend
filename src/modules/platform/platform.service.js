@@ -465,6 +465,53 @@ export const updateTenantUserStatus = async (actorUserId, companyId, userId, sta
   });
 };
 
+/** Platform-only recovery/management endpoint for assigning company-owned roles to an existing user. */
+export const assignTenantUserRoles = async (actorUserId, companyId, userId, roleIds, context = {}) => {
+  return prisma.$transaction(async (tx) => {
+    await requireTenant(companyId, tx);
+    const user = await tx.user.findFirst({ where: { id: userId, companyId }, select: { id: true, companyId: true, email: true } });
+    if (!user) throw new AppError("User not found in this company", 404, "USER_NOT_FOUND");
+
+    const roles = await tx.role.findMany({
+      where: {
+        id: { in: roleIds },
+        companyId,
+        scope: "COMPANY",
+        isActive: true,
+        name: { not: "SUPER_ADMIN" },
+      },
+      include: { permissions: { where: { permission: { isActive: true } }, include: { permission: true } } },
+    });
+    if (roles.length !== roleIds.length) {
+      throw new AppError("One or more selected roles are not active company roles for this tenant", 400, "INVALID_TENANT_ROLES");
+    }
+    if (roles.some((role) => role.permissions.some(({ permission }) => !isTenantAssignablePermission(permission)))) {
+      throw new AppError("A selected role contains platform-only permissions and cannot be assigned to a company user", 403, "PLATFORM_PERMISSION_NOT_ASSIGNABLE");
+    }
+
+    await tx.userRole.deleteMany({ where: { userId } });
+    await tx.userRole.createMany({ data: roles.map((role) => ({ userId, roleId: role.id })), skipDuplicates: true });
+    const updated = await tx.user.findUnique({
+      where: { id: userId },
+      include: { roles: { include: { role: true } }, employee: true },
+    });
+
+    await writeAudit(tx, {
+      companyId: null,
+      actorUserId,
+      action: "UPDATE",
+      module: "platform",
+      resource: "user_roles",
+      resourceId: userId,
+      requestId: context.requestId,
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+      metadata: { companyId, email: user.email, assignedRoles: roles.map((role) => role.name) },
+    });
+    return safePlatformUser(updated);
+  });
+};
+
 export const listPlatformAudit = async (query = {}) => prisma.auditLog.findMany({
   where: { companyId: null, module: "platform" },
   orderBy: { createdAt: "desc" },
