@@ -61,15 +61,32 @@ export const bootstrapRoleDefinitions = async () => {
 
   const email = String(process.env.SUPER_ADMIN_EMAIL || "").trim().toLowerCase();
   const password = String(process.env.SUPER_ADMIN_PASSWORD || "");
-  if (Boolean(email) !== Boolean(password)) {
-    throw new Error("Set both SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD to bootstrap the platform administrator, or leave both unset.");
-  }
-  if (email && password) {
-    const sameEmailTenantUser = await prisma.user.findFirst({ where: { email, companyId: { not: null } }, select: { id: true } });
+  const resetExistingPassword =
+    String(process.env.SUPER_ADMIN_RESET_PASSWORD || "").trim().toLowerCase() === "true";
+
+  if (!email && !password) {
+    console.warn(
+      "ℹ️ Platform administrator bootstrap skipped: set SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD in the Render service Environment to create/restore the platform account.",
+    );
+  } else if (!email || !password) {
+    throw new Error(
+      "Platform administrator bootstrap requires BOTH SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD. Set both in Render Environment.",
+    );
+  } else {
+    const sameEmailTenantUser = await prisma.user.findFirst({
+      where: { email, companyId: { not: null } },
+      select: { id: true },
+    });
     if (sameEmailTenantUser) {
-      throw new Error("SUPER_ADMIN_EMAIL is already used by a company account. Configure a different platform administrator email to avoid cross-tenant identity ambiguity.");
+      throw new Error(
+        "SUPER_ADMIN_EMAIL is already used by a company account. Choose a different email for the platform administrator; company users cannot be promoted by this bootstrap.",
+      );
     }
-    let platformUser = await prisma.user.findFirst({ where: { email, companyId: null } });
+
+    let platformUser = await prisma.user.findFirst({
+      where: { email, companyId: null },
+    });
+
     if (!platformUser) {
       platformUser = await prisma.user.create({
         data: {
@@ -81,10 +98,30 @@ export const bootstrapRoleDefinitions = async () => {
           status: "ACTIVE",
           emailVerified: true,
           emailVerifiedAt: new Date(),
+          failedLoginCount: 0,
+          lockedUntil: null,
         },
       });
       console.log(`✅ Platform administrator created from SUPER_ADMIN_EMAIL: ${email}`);
+    } else if (resetExistingPassword) {
+      platformUser = await prisma.user.update({
+        where: { id: platformUser.id },
+        data: {
+          passwordHash: await hashPassword(password),
+          status: "ACTIVE",
+          emailVerified: true,
+          emailVerifiedAt: platformUser.emailVerifiedAt || new Date(),
+          failedLoginCount: 0,
+          lockedUntil: null,
+        },
+      });
+      console.log(`✅ Platform administrator password reset and account unlocked: ${email}`);
+    } else {
+      console.log(
+        `ℹ️ Platform administrator account found: ${email}. Password was not changed. Set SUPER_ADMIN_RESET_PASSWORD=true temporarily if you need to reset it.`,
+      );
     }
+
     await prisma.userRole.upsert({
       where: { userId_roleId: { userId: platformUser.id, roleId: superAdminRole.id } },
       update: {},

@@ -839,15 +839,77 @@ const seed = async () => {
     AND EXISTS (SELECT 1 FROM "roles" tenantRole WHERE tenantRole."companyId" = u."companyId" AND tenantRole.name = globalRole.name)
   `);
 
-  // Optional platform administrator bootstrap. Only created when both values are supplied.
+  // Optional platform administrator bootstrap. Configure both credentials together.
   const superAdminEmail = String(process.env.SUPER_ADMIN_EMAIL || "").trim().toLowerCase();
   const superAdminPassword = String(process.env.SUPER_ADMIN_PASSWORD || "");
-  if (superAdminEmail && superAdminPassword) {
+  const resetExistingSuperAdminPassword =
+    String(process.env.SUPER_ADMIN_RESET_PASSWORD || "").trim().toLowerCase() === "true";
+
+  if (!superAdminEmail && !superAdminPassword) {
+    console.warn(
+      "ℹ️ Super Admin account bootstrap skipped: SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD were not available to the seed process.",
+    );
+  } else if (!superAdminEmail || !superAdminPassword) {
+    throw new Error(
+      "Super Admin bootstrap requires both SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD. Configure both Render environment variables.",
+    );
+  } else {
+    const tenantAccount = await prisma.user.findFirst({
+      where: { email: superAdminEmail, companyId: { not: null } },
+      select: { id: true },
+    });
+    if (tenantAccount) {
+      throw new Error(
+        "SUPER_ADMIN_EMAIL is already used by a company account. Use a different email for the platform administrator.",
+      );
+    }
+
     const superAdminRole = roleMap.get("SUPER_ADMIN");
-    const existingSuperAdmin = await prisma.user.findFirst({ where: { email: superAdminEmail, companyId: null } });
-    const user = existingSuperAdmin || await prisma.user.create({ data: { companyId: null, email: superAdminEmail, passwordHash: await bcrypt.hash(superAdminPassword, 12), firstName: "Platform", lastName: "Administrator", status: "ACTIVE", emailVerified: true, emailVerifiedAt: new Date() } });
-    await prisma.userRole.upsert({ where: { userId_roleId: { userId: user.id, roleId: superAdminRole.id } }, update: {}, create: { userId: user.id, roleId: superAdminRole.id } });
-    console.log(`✅ Super Admin ready: ${superAdminEmail}`);
+    let user = await prisma.user.findFirst({
+      where: { email: superAdminEmail, companyId: null },
+    });
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          companyId: null,
+          email: superAdminEmail,
+          passwordHash: await bcrypt.hash(superAdminPassword, 12),
+          firstName: "Platform",
+          lastName: "Administrator",
+          status: "ACTIVE",
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+          failedLoginCount: 0,
+          lockedUntil: null,
+        },
+      });
+      console.log(`✅ Super Admin account created: ${superAdminEmail}`);
+    } else if (resetExistingSuperAdminPassword) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash: await bcrypt.hash(superAdminPassword, 12),
+          status: "ACTIVE",
+          emailVerified: true,
+          emailVerifiedAt: user.emailVerifiedAt || new Date(),
+          failedLoginCount: 0,
+          lockedUntil: null,
+        },
+      });
+      console.log(`✅ Super Admin password reset and account unlocked: ${superAdminEmail}`);
+    } else {
+      console.log(`ℹ️ Super Admin account already exists: ${superAdminEmail}; password unchanged.`);
+    }
+
+    await prisma.userRole.upsert({
+      where: {
+        userId_roleId: { userId: user.id, roleId: superAdminRole.id },
+      },
+      update: {},
+      create: { userId: user.id, roleId: superAdminRole.id },
+    });
+    console.log(`✅ Super Admin role verified: ${superAdminEmail}`);
   }
 
 
