@@ -159,13 +159,7 @@ export const findRolesByIds = async (
             },
             scope: "COMPANY",
             isActive: true,
-            OR: [
-                { companyId },
-                {
-                    companyId: null,
-                    scope: "COMPANY"
-                }
-            ]
+            companyId
         },
         include: { permissions: { include: { permission: true } } }
     });
@@ -179,13 +173,7 @@ export const findRoleById = async (
         where: {
             id: roleId,
             scope: "COMPANY",
-            OR: [
-                { companyId },
-                {
-                    companyId: null,
-                    scope: "COMPANY"
-                }
-            ]
+            companyId
         },
         include: roleInclude
     });
@@ -235,15 +223,7 @@ export const listRoles = async (
 ) => {
     const where = {
         scope: "COMPANY",
-        OR: [
-            {
-                companyId
-            },
-            {
-                companyId: null,
-                scope: "COMPANY"
-            }
-        ],
+        companyId,
         ...(search
             ? {
                   name: {

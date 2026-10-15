@@ -30,7 +30,7 @@ const validatePermissions = async (permissionIds, tx, actorUserId, companyId) =>
             select: { id: true, roles: { where: { role: { isActive: true } }, select: { role: { select: { scope: true, companyId: true, permissions: { where: { permission: { isActive: true } }, select: { permissionId: true, permission: true } } } } } } },
         });
         if (!actor) throw new AppError("Active company administrator not found", 403, "ROLE_GRANT_NOT_ALLOWED");
-        const allowed = new Set(actor.roles.filter(({ role }) => role.scope === "COMPANY" && (role.companyId === null || role.companyId === companyId)).flatMap(({ role }) => role.permissions.filter(({ permission }) => isTenantAssignablePermission(permission)).map(({ permissionId }) => permissionId)));
+        const allowed = new Set(actor.roles.filter(({ role }) => role.scope === "COMPANY" && role.companyId === companyId).flatMap(({ role }) => role.permissions.filter(({ permission }) => isTenantAssignablePermission(permission)).map(({ permissionId }) => permissionId)));
         if (permissions.some((permission) => !allowed.has(permission.id))) {
             throw new AppError("You can only assign permissions already granted to your own roles", 403, "PERMISSION_DELEGATION_DENIED");
         }
@@ -209,6 +209,12 @@ export const updateRoleService =
         }
 
         if (data.name && data.name !== role.name) {
+            if (role.sourceTemplateId) {
+                const sourceTemplate = await prisma.roleTemplate.findUnique({ where: { id: role.sourceTemplateId }, select: { key: true } });
+                if (["COMPANY_ADMIN", "HR_ADMIN", "FINANCE_ADMIN", "EMPLOYEE", "STORE_KEEPER"].includes(sourceTemplate?.key)) {
+                    throw new AppError("The name of a core template-based role is fixed. Create a separate custom role for a different title.", 409, "CORE_ROLE_NAME_PROTECTED");
+                }
+            }
             if (isReservedSystemRoleName(data.name)) {
                 throw new AppError("This name is reserved for a protected system role", 400, "RESERVED_ROLE_NAME");
             }
@@ -345,7 +351,7 @@ export const listPermissionsService =
                 select: { roles: { where: { role: { isActive: true } }, select: { role: { select: { scope: true, companyId: true, permissions: { where: { permission: { isActive: true } }, select: { permissionId: true, permission: true } } } } } } },
             });
             if (!actor) throw new AppError("Active company administrator not found", 403, "ROLE_GRANT_NOT_ALLOWED");
-            permissionIds = [...new Set(actor.roles.filter(({ role }) => role.scope === "COMPANY" && (role.companyId === null || role.companyId === companyId)).flatMap(({ role }) => role.permissions.filter(({ permission }) => isTenantAssignablePermission(permission)).map(({ permissionId }) => permissionId)))];
+            permissionIds = [...new Set(actor.roles.filter(({ role }) => role.scope === "COMPANY" && role.companyId === companyId).flatMap(({ role }) => role.permissions.filter(({ permission }) => isTenantAssignablePermission(permission)).map(({ permissionId }) => permissionId)))];
         }
         const result = await listPermissions({ module, action, search, page, limit, permissionIds });
 

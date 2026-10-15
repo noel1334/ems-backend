@@ -16,6 +16,7 @@ describe("tenant RBAC policy", () => {
 
   it("blocks platform settings and tenant creation/deletion capabilities", () => {
     expect(isTenantAssignablePermission({ module: "system", resource: "settings", action: "UPDATE", isActive: true })).toBe(false);
+    expect(isTenantAssignablePermission({ module: "platform", resource: "tenants", action: "DELETE", isActive: true })).toBe(false);
     expect(isTenantAssignablePermission({ module: "company", resource: "company", action: "CREATE", isActive: true })).toBe(false);
     expect(isTenantAssignablePermission({ module: "company", resource: "company", action: "DELETE", isActive: true })).toBe(false);
     expect(isTenantAssignablePermission({ module: "employees", resource: "employees", action: "READ", isActive: false })).toBe(false);

@@ -4,6 +4,7 @@ import { hashPassword } from "../../common/utils/crypto.js";
 import AppError from "../../common/errors/AppError.js";
 import { writeAudit } from "../../common/utils/audit.js";
 import { isReservedSystemRoleName, isTenantAssignablePermission } from "../rbac/rbac.policy.js";
+import { instantiateTenantSystemRoles } from "./role-template.service.js";
 
 const adminSelect = {
   id: true,
@@ -141,8 +142,9 @@ export const createTenant = async (actorUserId, data, context = {}) => {
       status: "ACTIVE",
       isSubscriptionActive: data.plan !== "FREE",
     } });
-    const role = await tx.role.findFirst({ where: { name: "COMPANY_ADMIN", scope: "COMPANY", isSystem: true, isActive: true, companyId: null } });
-    if (!role) throw new AppError("COMPANY_ADMIN system role is missing; run the database seed", 500, "SYSTEM_ROLE_MISSING");
+    await instantiateTenantSystemRoles(tx, company.id);
+    const role = await tx.role.findFirst({ where: { name: "COMPANY_ADMIN", scope: "COMPANY", isActive: true, companyId: company.id } });
+    if (!role) throw new AppError("COMPANY_ADMIN tenant role could not be initialized", 500, "TENANT_ROLE_INITIALIZATION_FAILED");
     const admin = await tx.user.create({ data: {
       companyId: company.id,
       email: data.admin.email.toLowerCase(),
@@ -238,7 +240,7 @@ export const listTenantRoles = async (companyId) => {
       isActive: true,
       scope: "COMPANY",
       name: { not: "SUPER_ADMIN" },
-      OR: [{ companyId: null }, { companyId }],
+      companyId,
     },
     include: tenantRoleInclude,
     orderBy: [{ isSystem: "desc" }, { name: "asc" }],
@@ -373,7 +375,7 @@ export const createTenantUser = async (actorUserId, companyId, data, context = {
         isActive: true,
         scope: "COMPANY",
         name: { not: "SUPER_ADMIN" },
-        OR: [{ companyId: null }, { companyId }],
+        companyId,
       },
     });
     if (roles.length !== data.roleIds.length) {

@@ -1,5 +1,6 @@
 import prisma from "../config/database.js";
 import { hashPassword } from "../common/utils/crypto.js";
+import { instantiateTenantSystemRoles } from "../modules/platform/role-template.service.js";
 
 const isEnabled = () =>
   String(process.env.BOOTSTRAP_DEMO_DATA || "").toLowerCase() === "true";
@@ -44,20 +45,11 @@ export const bootstrapDemoData = async () => {
       },
     });
 
+    await instantiateTenantSystemRoles(tx, company.id);
     const role = await tx.role.findFirst({
-      where: {
-        name: "COMPANY_ADMIN",
-        scope: "COMPANY",
-        isSystem: true,
-        isActive: true,
-      },
+      where: { name: "COMPANY_ADMIN", scope: "COMPANY", isActive: true, companyId: company.id },
     });
-
-    if (!role) {
-      throw new Error(
-        "Demo bootstrap failed: COMPANY_ADMIN system role does not exist. Run the database seed first."
-      );
-    }
+    if (!role) throw new Error("Demo bootstrap failed: the published COMPANY_ADMIN template is missing. Run migrations and seed the database first.");
 
     let user = await tx.user.findFirst({
       where: {

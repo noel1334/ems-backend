@@ -77,15 +77,14 @@ export const updateUser = async (
         }
     });
 
-export const findRoleByName = async (
-    name,
-    tx = prisma
-) =>
+export const findRoleByName = async (name, tx = prisma, companyId = undefined) =>
     tx.role.findFirst({
         where: {
             name,
-            isActive: true
-        }
+            isActive: true,
+            ...(companyId !== undefined ? { companyId, scope: "COMPANY" } : {}),
+        },
+        orderBy: [{ companyId: "desc" }],
     });
 
 export const findSessionById = async (

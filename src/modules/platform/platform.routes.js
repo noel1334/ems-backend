@@ -2,9 +2,13 @@ import { Router } from "express";
 import authenticate from "../../middleware/auth.middleware.js";
 import { requireSuperAdmin } from "../../middleware/super-admin.middleware.js";
 import * as controller from "./platform.controller.js";
+import * as templateController from "./role-template.controller.js";
 
 const router = Router();
 router.use(authenticate, requireSuperAdmin);
+router.get("/role-templates", templateController.list);
+router.post("/role-templates", templateController.create);
+router.post("/role-templates/:id/versions", templateController.publish);
 router.get("/tenants", controller.tenants);
 router.post("/tenants", controller.create);
 router.get("/permissions", controller.permissionCatalog);

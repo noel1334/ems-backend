@@ -100,7 +100,7 @@ export const requirePermission = (moduleName, resource, action) => {
                     const role = userRole.role;
                     const roleBelongsToUserTenant = user.companyId !== null &&
                         role.scope === "COMPANY" &&
-                        (role.companyId === null || role.companyId === user.companyId);
+                        role.companyId === user.companyId;
                     return roleBelongsToUserTenant && role.permissions.some(
                         (rolePermission) => {
                             const permission =

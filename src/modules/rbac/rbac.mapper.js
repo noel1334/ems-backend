@@ -33,6 +33,8 @@ export const mapRole = (role) => {
         scope: role.scope,
         isSystem: role.isSystem,
         isActive: role.isActive,
+        sourceTemplateId: role.sourceTemplateId ?? null,
+        sourceTemplateVersion: role.sourceTemplateVersion ?? null,
         permissions:
             role.permissions?.map(
                 (item) =>

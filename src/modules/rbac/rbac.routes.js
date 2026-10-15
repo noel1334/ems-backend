@@ -3,6 +3,7 @@ import { asyncHandler } from "../../common/utils/asyncHandler.js";
 import { authMiddleware } from "../../middleware/auth.middleware.js";
 import { tenantMiddleware } from "../../middleware/tenant.middleware.js";
 import { requirePermission } from "../../middleware/permission.middleware.js";
+import * as roleTemplateController from "../platform/role-template.controller.js";
 import {
     activateRole,
     createRole,
@@ -20,6 +21,10 @@ router.use(
     authMiddleware,
     tenantMiddleware
 );
+
+router.get("/role-templates", requirePermission("rbac", "roles", "READ"), roleTemplateController.list);
+router.post("/roles/from-template/:templateId", requirePermission("rbac", "roles", "CREATE"), roleTemplateController.createTenantRoleFromTemplate);
+router.post("/roles/:roleId/apply-template-update", requirePermission("rbac", "roles", "UPDATE"), roleTemplateController.applyToTenantRole);
 
 router.get(
     "/roles",

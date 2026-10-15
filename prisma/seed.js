@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import prisma from "../src/config/database.js";
+import { INDUSTRY_ROLE_TEMPLATES, permissionMatchesRules } from "../src/modules/platform/role-template-definitions.js";
 
 const permissions = [
   {
@@ -649,8 +650,8 @@ const seed = async () => {
     );
 
   const isTenantPermission = (permission) =>
-    permission.module !== "system" &&
-    !(permission.module === "company" && permission.resource === "company" && ["CREATE", "DELETE"].includes(permission.action));
+    !["system", "platform"].includes(String(permission.module).toLowerCase()) &&
+    !(String(permission.module).toLowerCase() === "company" && String(permission.resource).toLowerCase() === "company" && ["CREATE", "DELETE"].includes(String(permission.action).toUpperCase()));
 
   const companyAdminPermissionKeys = permissions
     .filter(isTenantPermission)
@@ -716,6 +717,127 @@ const seed = async () => {
   }
 
   console.log("✅ Role permissions assigned");
+
+  // Create initial published global templates only when a template is missing.
+  // Re-running seed never overwrites Super Admin-published template versions.
+  for (const roleName of ["COMPANY_ADMIN", "HR_ADMIN", "FINANCE_ADMIN", "EMPLOYEE", "STORE_KEEPER"]) {
+    let template = await prisma.roleTemplate.findUnique({ where: { key: roleName }, include: { versions: true } });
+    if (!template) {
+      const role = roleMap.get(roleName);
+      const permissionIds = rolePermissionKeys[roleName] ?? [];
+      template = await prisma.roleTemplate.create({
+        data: {
+          key: roleName,
+          name: roleName,
+          description: role?.description ?? roleName,
+          versions: {
+            create: {
+              version: 1,
+              status: "PUBLISHED",
+              publishedAt: new Date(),
+              description: role?.description ?? roleName,
+              permissions: { create: permissionIds.map((permissionId) => ({ permissionId })) },
+            },
+          },
+        },
+        include: { versions: true },
+      });
+    } else if (!(template.versions ?? []).some((version) => version.status === "PUBLISHED")) {
+      // An incomplete draft-only bootstrap can be repaired once; existing published versions are never changed.
+      const role = roleMap.get(roleName);
+      const latestVersion = Math.max(0, ...(template.versions ?? []).map((version) => version.version)) + 1;
+      await prisma.roleTemplateVersion.create({
+        data: {
+          templateId: template.id,
+          version: latestVersion,
+          status: "PUBLISHED",
+          publishedAt: new Date(),
+          description: role?.description ?? roleName,
+          permissions: { create: (rolePermissionKeys[roleName] ?? []).map((permissionId) => ({ permissionId })) },
+        },
+      });
+    }
+  }
+
+  // Seed versioned industry templates from the same server-side permission catalog.
+  // Existing published versions are preserved: re-running seed never overwrites platform changes.
+  for (const definition of INDUSTRY_ROLE_TEMPLATES) {
+    const key = String(definition.key).trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "_");
+    const definitionPermissionIds = Array.from(permissionMap.values())
+      .filter((permission) => isTenantPermission(permission) && permissionMatchesRules(permission, definition.rules))
+      .map((permission) => permission.id);
+    let template = await prisma.roleTemplate.findUnique({ where: { key }, include: { versions: true } });
+    if (!template) {
+      await prisma.roleTemplate.create({
+        data: {
+          key,
+          name: definition.name,
+          description: definition.description,
+          industry: definition.industry,
+          versions: {
+            create: {
+              version: 1,
+              status: "PUBLISHED",
+              publishedAt: new Date(),
+              description: "Initial built-in industry template",
+              permissions: { create: definitionPermissionIds.map((permissionId) => ({ permissionId })) },
+            },
+          },
+        },
+      });
+      continue;
+    }
+    if (!(template.versions ?? []).some((version) => version.status === "PUBLISHED")) {
+      const latestVersion = Math.max(0, ...(template.versions ?? []).map((version) => version.version)) + 1;
+      await prisma.roleTemplateVersion.create({
+        data: {
+          templateId: template.id,
+          version: latestVersion,
+          status: "PUBLISHED",
+          publishedAt: new Date(),
+          description: "Seed repair: first published industry template version",
+          permissions: { create: definitionPermissionIds.map((permissionId) => ({ permissionId })) },
+        },
+      });
+    }
+  }
+
+  // Backfill independent role snapshots for tenants created before this feature was deployed.
+  const companiesForRoleSnapshots = await prisma.company.findMany({ select: { id: true } });
+  for (const company of companiesForRoleSnapshots) {
+    for (const roleName of ["COMPANY_ADMIN", "HR_ADMIN", "FINANCE_ADMIN", "EMPLOYEE", "STORE_KEEPER"]) {
+      const exists = await prisma.role.findFirst({ where: { companyId: company.id, name: roleName } });
+      if (exists) continue;
+      const template = await prisma.roleTemplate.findUnique({
+        where: { key: roleName },
+        include: { versions: { where: { status: "PUBLISHED" }, orderBy: { version: "desc" }, take: 1, include: { permissions: true } } },
+      });
+      const version = template?.versions?.[0];
+      if (!template || !version) continue;
+      const role = await prisma.role.create({ data: {
+        companyId: company.id, name: roleName, description: template.description ?? roleName,
+        scope: "COMPANY", isSystem: false, isActive: true,
+        sourceTemplateId: template.id, sourceTemplateVersion: version.version,
+      } });
+      if (version.permissions.length) await prisma.rolePermission.createMany({ data: version.permissions.map(({ permissionId }) => ({ roleId: role.id, permissionId })), skipDuplicates: true });
+    }
+  }
+  // Re-home existing company users' assignments to their tenant-owned copies and remove shared-company-role assignments.
+  await prisma.$executeRawUnsafe(`
+    INSERT INTO "user_roles" ("userId", "roleId", "assignedAt")
+    SELECT ur."userId", tenantRole.id, ur."assignedAt"
+    FROM "user_roles" ur
+    JOIN "roles" globalRole ON globalRole.id = ur."roleId" AND globalRole."companyId" IS NULL AND globalRole.scope = 'COMPANY'::"RoleScope" AND globalRole."isSystem" = true
+    JOIN "users" u ON u.id = ur."userId" AND u."companyId" IS NOT NULL
+    JOIN "roles" tenantRole ON tenantRole."companyId" = u."companyId" AND tenantRole.name = globalRole.name
+    ON CONFLICT ("userId", "roleId") DO NOTHING
+  `);
+  await prisma.$executeRawUnsafe(`
+    DELETE FROM "user_roles" ur USING "roles" globalRole, "users" u
+    WHERE ur."roleId" = globalRole.id AND globalRole."companyId" IS NULL AND globalRole.scope = 'COMPANY'::"RoleScope" AND globalRole."isSystem" = true
+    AND u.id = ur."userId" AND u."companyId" IS NOT NULL
+    AND EXISTS (SELECT 1 FROM "roles" tenantRole WHERE tenantRole."companyId" = u."companyId" AND tenantRole.name = globalRole.name)
+  `);
 
   // Optional platform administrator bootstrap. Only created when both values are supplied.
   const superAdminEmail = String(process.env.SUPER_ADMIN_EMAIL || "").trim().toLowerCase();

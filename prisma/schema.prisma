@@ -445,10 +445,13 @@ model Role {
   scope       RoleScope @default(COMPANY)
   isSystem    Boolean   @default(false)
   isActive    Boolean   @default(true)
+  sourceTemplateId      String?
+  sourceTemplateVersion Int?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   company     Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  sourceTemplate RoleTemplate? @relation("RoleTemplateCompanyRoles", fields: [sourceTemplateId], references: [id], onDelete: SetNull)
   users       UserRole[]
   permissions RolePermission[]
 
@@ -469,6 +472,7 @@ model Permission {
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
   roles       RolePermission[]
+  templateVersions RoleTemplateVersionPermission[]
 
   @@unique([module, resource, action])
   @@index([module])
@@ -1607,4 +1611,47 @@ model BiometricRecord {
   @@index([status])
   @@index([companyId, type, finger])
   @@map("biometric_records")
+}
+
+
+// Platform-owned role templates are versioned defaults; tenant Role records are independent snapshots.
+model RoleTemplate {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  name        String
+  description String?
+  industry    String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  versions    RoleTemplateVersion[]
+  companyRoles Role[] @relation("RoleTemplateCompanyRoles")
+  @@index([industry, isActive])
+  @@map("role_templates")
+}
+
+model RoleTemplateVersion {
+  id          String   @id @default(uuid())
+  templateId  String
+  version     Int
+  description String?
+  status      String   @default("DRAFT")
+  createdById String?
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+  template    RoleTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  permissions RoleTemplateVersionPermission[]
+  @@unique([templateId, version])
+  @@index([templateId, status])
+  @@map("role_template_versions")
+}
+
+model RoleTemplateVersionPermission {
+  versionId    String
+  permissionId String
+  version      RoleTemplateVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  @@id([versionId, permissionId])
+  @@index([permissionId])
+  @@map("role_template_version_permissions")
 }

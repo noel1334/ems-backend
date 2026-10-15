@@ -159,15 +159,7 @@ export const findRolesByIds = async (
                 in: roleIds
             },
             isActive: true,
-            OR: [
-                {
-                    companyId
-                },
-                {
-                    companyId: null,
-                    scope: "SYSTEM"
-                }
-            ]
+            companyId
         }
     });
 
@@ -179,15 +171,7 @@ export const findRoleById = async (
     tx.role.findFirst({
         where: {
             id: roleId,
-            OR: [
-                {
-                    companyId
-                },
-                {
-                    companyId: null,
-                    scope: "SYSTEM"
-                }
-            ]
+            companyId
         }
     });
 

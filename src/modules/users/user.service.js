@@ -80,7 +80,7 @@ const validateRoles = async (
         });
         if (!actor) throw new AppError("Active company administrator not found", 403, "ROLE_GRANT_NOT_ALLOWED");
         const allowedPermissionIds = new Set(actor.roles
-            .filter(({ role }) => role.scope === "COMPANY" && (role.companyId === null || role.companyId === companyId))
+            .filter(({ role }) => role.scope === "COMPANY" && role.companyId === companyId)
             .flatMap(({ role }) => role.permissions.filter(({ permission }) => isTenantAssignablePermission(permission)).map(({ permissionId }) => permissionId)));
         for (const role of roles) {
             const rolePermissionRows = await tx.rolePermission.findMany({

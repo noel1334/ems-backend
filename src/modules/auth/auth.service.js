@@ -41,6 +41,7 @@ import {
     AUTH_ERRORS
 } from "./auth.constants.js";
 import { writeAudit } from "../../common/utils/audit.js";
+import { instantiateTenantSystemRoles } from "../platform/role-template.service.js";
 
 const getRefreshTokenExpiration = () =>
     new Date(
@@ -236,6 +237,8 @@ export const registerCompanyService =
                         admin.password
                     );
 
+                await instantiateTenantSystemRoles(tx, createdCompany.id);
+
                 const createdUser =
                     await createUser(
                         {
@@ -259,7 +262,8 @@ export const registerCompanyService =
                 const companyAdminRole =
                     await findRoleByName(
                         "COMPANY_ADMIN",
-                        tx
+                        tx,
+                        createdCompany.id
                     );
 
                 if (!companyAdminRole) {

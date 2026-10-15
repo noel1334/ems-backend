@@ -26,7 +26,7 @@ export function isReservedSystemRoleName(name) {
  */
 export function isTenantAssignablePermission(permission) {
   if (!permission || permission.isActive !== true) return false;
-  if (String(permission.module).toLowerCase() === "system") return false;
+  if (["system", "platform"].includes(String(permission.module).toLowerCase())) return false;
   if (
     String(permission.module).toLowerCase() === "company" &&
     String(permission.resource).toLowerCase() === "company" &&
