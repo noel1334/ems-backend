@@ -1,5 +1,6 @@
 import { AppError } from "../common/errors/AppError.js";
 import { verifyAccessToken } from "../common/utils/jwt.js";
+import { hasValidTenantContext } from "./auth-token-policy.js";
 
 export const authMiddleware = (req, res, next) => {
   try {
@@ -30,7 +31,9 @@ export const authMiddleware = (req, res, next) => {
 
     // Platform users (SUPER_ADMIN) intentionally have no tenant/company.
     // Company users must always carry a companyId in their token.
-    if (!payload.companyId && !Array.isArray(payload.roles)?.includes("SUPER_ADMIN")) {
+    // Keep this predicate explicit: negating Array.isArray(...) before
+    // optional-chaining .includes() throws a TypeError for valid role arrays.
+    if (!hasValidTenantContext(payload)) {
       throw new AppError("Invalid tenant authentication token", 401, {
         code: "INVALID_ACCESS_TOKEN",
       });
