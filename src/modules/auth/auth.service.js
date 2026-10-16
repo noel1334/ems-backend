@@ -583,8 +583,19 @@ export const refreshAuthenticationService =
                     );
                 }
 
+                // Platform Super Admin accounts are deliberately company-less.
+                // Do not treat a valid platform account as a deleted company.
+                // The role check is performed against the database and requires
+                // an active SYSTEM-scoped SUPER_ADMIN assignment; a null company
+                // by itself never grants access.
+                const sessionUserIsSuperAdmin =
+                    session.user.companyId === null &&
+                    session.companyId === null &&
+                    await isSuperAdminUser(session.userId, tx);
+
                 if (
-                    !session.user.company
+                    !session.user.company &&
+                    !sessionUserIsSuperAdmin
                 ) {
                     throw new AppError(
                         "Company account no longer exists",
@@ -594,8 +605,8 @@ export const refreshAuthenticationService =
                 }
 
                 if (
-                    session.user.company
-                        .status !== "ACTIVE"
+                    session.user.company &&
+                    session.user.company.status !== "ACTIVE"
                 ) {
                     throw new AppError(
                         "Company account is not active",
