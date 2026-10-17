@@ -194,6 +194,7 @@ const tenantRoleInclude = {
     where: { permission: { isActive: true } },
     include: { permission: true },
   },
+  _count: { select: { users: true } },
 };
 
 const tenantRoleView = (role) => ({
@@ -204,6 +205,9 @@ const tenantRoleView = (role) => ({
   scope: role.scope,
   isSystem: role.isSystem,
   isActive: role.isActive,
+  sourceTemplateId: role.sourceTemplateId ?? null,
+  sourceTemplateVersion: role.sourceTemplateVersion ?? null,
+  assignmentCount: Number(role._count?.users ?? 0),
   permissions: (role.permissions ?? [])
     .map(({ permission }) => permission)
     .filter((permission) => isTenantAssignablePermission(permission))
@@ -237,7 +241,6 @@ export const listTenantRoles = async (companyId) => {
   await requireTenant(companyId);
   const roles = await prisma.role.findMany({
     where: {
-      isActive: true,
       scope: "COMPANY",
       name: { not: "SUPER_ADMIN" },
       companyId,
@@ -275,8 +278,20 @@ export const createTenantRole = async (actorUserId, companyId, data, context = {
   const existing = await tx.role.findFirst({ where: { companyId, name: { equals: name, mode: "insensitive" } } });
   if (existing) throw new AppError("A role with this name already exists in this company", 409, "ROLE_ALREADY_EXISTS");
   const permissions = await validateTenantPermissionIds(data.permissionIds ?? [], tx);
+  let sourceTemplateId = null;
+  let sourceTemplateVersion = null;
+  if (data.sourceTemplateId) {
+    const template = await tx.roleTemplate.findFirst({
+      where: { id: data.sourceTemplateId, isActive: true },
+      include: { versions: { where: { status: "PUBLISHED" }, orderBy: { version: "desc" }, take: 1, select: { version: true } } },
+    });
+    const published = template?.versions?.[0];
+    if (!template || !published) throw new AppError("Published role template not found", 404, "ROLE_TEMPLATE_NOT_FOUND");
+    sourceTemplateId = template.id;
+    sourceTemplateVersion = published.version;
+  }
   const role = await tx.role.create({
-    data: { companyId, name, description: data.description ?? null, scope: "COMPANY", isSystem: false, isActive: true },
+    data: { companyId, name, description: data.description ?? null, scope: "COMPANY", isSystem: false, isActive: true, sourceTemplateId, sourceTemplateVersion },
   });
   if (permissions.length) {
     await tx.rolePermission.createMany({ data: permissions.map((permission) => ({ roleId: role.id, permissionId: permission.id })), skipDuplicates: true });
@@ -292,7 +307,7 @@ export const createTenantRole = async (actorUserId, companyId, data, context = {
     requestId: context.requestId,
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
-    metadata: { roleName: role.name, permissionCount: permissions.length },
+    metadata: { roleName: role.name, permissionCount: permissions.length, sourceTemplateId, sourceTemplateVersion },
   });
   return tenantRoleView(result);
 });
@@ -513,8 +528,17 @@ export const assignTenantUserRoles = async (actorUserId, companyId, userId, role
 };
 
 export const listPlatformAudit = async (query = {}) => prisma.auditLog.findMany({
-  where: { companyId: null, module: "platform" },
+  where: {
+    OR: [
+      { companyId: null, module: "platform" },
+      { module: "platform", resource: "tenant_role" },
+      { companyId: null, module: "rbac", resource: { in: ["role_template", "role_template_version"] } },
+    ],
+  },
   orderBy: { createdAt: "desc" },
   take: Math.min(Number(query.limit) || 100, 200),
-  include: { user: { select: { id: true, email: true, firstName: true, lastName: true } } },
+  include: {
+    user: { select: { id: true, email: true, firstName: true, lastName: true } },
+    company: { select: { id: true, name: true } },
+  },
 });

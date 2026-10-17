@@ -58,6 +58,7 @@ export const createTenantRoleSchema = z.object({
   name: tenantRoleNameSchema,
   description: z.string().trim().max(500).optional().nullable(),
   permissionIds: permissionIdsSchema,
+  sourceTemplateId: z.string().uuid().optional().nullable(),
 });
 
 export const updateTenantRoleSchema = z.object({
