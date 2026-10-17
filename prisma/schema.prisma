@@ -159,6 +159,14 @@ enum DayOfWeek {
   SUNDAY
 }
 
+enum HolidayType {
+  PUBLIC
+  COMPANY
+  OPTIONAL
+  RELIGIOUS
+  OTHER
+}
+
 enum AttendanceStatus {
   PRESENT
   LATE
@@ -955,6 +963,7 @@ model Holiday {
   name        String
   date        DateTime
   description String?
+  holidayType HolidayType @default(COMPANY)
   isRecurring Boolean  @default(false)
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())

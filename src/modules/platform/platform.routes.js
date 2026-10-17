@@ -3,6 +3,7 @@ import authenticate from "../../middleware/auth.middleware.js";
 import { requireSuperAdmin } from "../../middleware/super-admin.middleware.js";
 import * as controller from "./platform.controller.js";
 import * as templateController from "./role-template.controller.js";
+import * as workforceController from "./platform.workforce.controller.js";
 import * as resourcesController from "./platform.resources.controller.js";
 
 const router = Router();
@@ -40,4 +41,35 @@ router.put("/tenants/:id/users/:userId/roles", controller.assignTenantUserRoles)
 router.get("/tenants/:id", controller.tenant);
 router.patch("/tenants/:id", controller.update);
 router.get("/audit", controller.audit);
+
+// Workforce calendar platform endpoints (all protected by requireSuperAdmin above).
+router.get("/tenants/:id/shifts", workforceController.listShifts);
+router.post("/tenants/:id/shifts", workforceController.createShift);
+router.get("/tenants/:id/shifts/:resourceId", workforceController.getShift);
+router.patch("/tenants/:id/shifts/:resourceId", workforceController.updateShift);
+router.delete("/tenants/:id/shifts/:resourceId", workforceController.deleteShift);
+router.post("/tenants/:id/shifts/:resourceId/breaks", workforceController.addShiftBreak);
+router.patch("/tenants/:id/shifts/:resourceId/breaks/:breakId", workforceController.updateShiftBreak);
+router.delete("/tenants/:id/shifts/:resourceId/breaks/:breakId", workforceController.deleteShiftBreak);
+
+router.get("/tenants/:id/schedules", workforceController.listSchedules);
+router.post("/tenants/:id/schedules", workforceController.createSchedule);
+router.get("/tenants/:id/schedules/employees/:employeeId/shifts", workforceController.getEmployeeShifts);
+router.post("/tenants/:id/schedules/employees/:employeeId/shifts", workforceController.assignEmployeeShift);
+router.get("/tenants/:id/schedules/employees/:employeeId", workforceController.getEmployeeSchedules);
+router.post("/tenants/:id/schedules/employees/:employeeId", workforceController.assignEmployeeSchedule);
+router.get("/tenants/:id/schedules/:resourceId", workforceController.getSchedule);
+router.patch("/tenants/:id/schedules/:resourceId", workforceController.updateSchedule);
+router.put("/tenants/:id/schedules/:resourceId/days", workforceController.replaceScheduleDays);
+router.delete("/tenants/:id/schedules/:resourceId", workforceController.deleteSchedule);
+
+router.get("/tenants/:id/holidays", workforceController.listHolidays);
+router.post("/tenants/:id/holidays", workforceController.createHoliday);
+router.get("/tenants/:id/holidays/:resourceId", workforceController.getHoliday);
+router.patch("/tenants/:id/holidays/:resourceId", workforceController.updateHoliday);
+router.delete("/tenants/:id/holidays/:resourceId", workforceController.deleteHoliday);
+
+router.get("/tenants/:id/scheduling/generations", workforceController.listGenerations);
+router.get("/tenants/:id/scheduling/generations/:generationId", workforceController.getGeneration);
+
 export default router;
