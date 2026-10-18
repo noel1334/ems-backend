@@ -4,6 +4,7 @@ import { requireSuperAdmin } from "../../middleware/super-admin.middleware.js";
 import * as controller from "./platform.controller.js";
 import * as templateController from "./role-template.controller.js";
 import * as workforceController from "./platform.workforce.controller.js";
+import * as schedulingController from "./platform.scheduling.controller.js";
 import * as resourcesController from "./platform.resources.controller.js";
 
 const router = Router();
@@ -69,7 +70,16 @@ router.get("/tenants/:id/holidays/:resourceId", workforceController.getHoliday);
 router.patch("/tenants/:id/holidays/:resourceId", workforceController.updateHoliday);
 router.delete("/tenants/:id/holidays/:resourceId", workforceController.deleteHoliday);
 
-router.get("/tenants/:id/scheduling/generations", workforceController.listGenerations);
-router.get("/tenants/:id/scheduling/generations/:generationId", workforceController.getGeneration);
+
+router.get("/tenants/:id/scheduling/policies", schedulingController.listPolicies);
+router.post("/tenants/:id/scheduling/policies", schedulingController.createPolicy);
+router.get("/tenants/:id/scheduling/policies/:policyId", schedulingController.getPolicy);
+router.patch("/tenants/:id/scheduling/policies/:policyId", schedulingController.updatePolicy);
+router.get("/tenants/:id/scheduling/generations", schedulingController.listGenerations);
+router.post("/tenants/:id/scheduling/generations", schedulingController.generate);
+router.get("/tenants/:id/scheduling/generations/:generationId", schedulingController.getGeneration);
+router.patch("/tenants/:id/scheduling/generations/:generationId/assignments", schedulingController.updateDraft);
+router.post("/tenants/:id/scheduling/generations/:generationId/approve", schedulingController.approve);
+router.post("/tenants/:id/scheduling/generations/:generationId/publish", schedulingController.publish);
 
 export default router;

@@ -308,162 +308,98 @@ export async function getRequest(req) {
 }
 export async function createRequest(req) {
   const cid = companyId(req),
-    p = req.validated?.body ?? req.body,
+    p = req.validated?.body ?? req.body ?? {},
     start = parseDateOnly(p.startDate),
     end = parseDateOnly(p.endDate);
-  if (yearOf(start) !== yearOf(end))
-    throw new AppError("Leave requests cannot cross calendar years", 400);
-  return prisma.$transaction(
-    async (tx) => {
-      const e = await repo.findEmployee(cid, p.employeeId, tx);
-      if (!e) throw new AppError("Employee not found", 404);
-      if (e.employmentStatus !== "ACTIVE")
-        throw new AppError(
-          "Leave can only be requested for an active employee",
-          400
-        );
-      const t = await repo.findType(cid, p.leaveTypeId, tx);
-      if (!t || !t.isActive)
-        throw new AppError("Active leave type not found", 404);
-      await noOverlap(
-        cid,
-        p.employeeId,
-        start,
-        end,
-        p.durationType,
-        p.halfDayPeriod,
-        null,
-        tx
-      );
-      let days =
-        p.durationType === "HALF_DAY"
-          ? D(0.5)
-          : await workingDays(cid, p.employeeId, start, end, tx);
-      if (days.isZero())
-        throw new AppError("Leave period contains no working days", 400);
-      const b = await ensureBalance(cid, p.employeeId, t, yearOf(start), tx);
-      if (available(b).lt(days))
-        throw new AppError(
-          `Insufficient leave balance. Available: ${available(b).toFixed(2)}, requested: ${days.toFixed(2)}`,
-          400
-        );
-      const status = t.requiresApproval ? "PENDING" : "APPROVED";
-      const r = await tx.leaveRequest.create({
-        data: {
-          companyId: cid,
-          employeeId: p.employeeId,
-          leaveTypeId: p.leaveTypeId,
-          startDate: start,
-          endDate: end,
-          durationType: p.durationType,
-          halfDayPeriod: p.halfDayPeriod ?? null,
-          totalDays: days,
-          reason: p.reason,
-          status,
-          currentApprovalLevel: 1,
-          ...(status === "APPROVED" ? { approvedAt: new Date() } : {}),
-        },
-      });
-      if (status === "PENDING") {
-        await tx.leaveApproval.create({
-          data: { leaveRequestId: r.id, level: 1, status: "PENDING" },
-        });
-        await tx.leaveBalance.update({
-          where: { id: b.id },
-          data: { pending: D(b.pending).plus(days) },
-        });
-      } else {
-        const nb = await tx.leaveBalance.update({
-          where: { id: b.id },
-          data: { used: D(b.used).plus(days) },
-        });
-        await tx.leaveBalanceTransaction.create({
-          data: {
-            companyId: cid,
-            employeeId: p.employeeId,
-            leaveTypeId: p.leaveTypeId,
-            leaveRequestId: r.id,
-            type: "DEDUCTION",
-            amount: days.neg(),
-            balanceAfter: available(nb),
-            note: "Automatic approval",
-            createdById: req.user?.id ?? null,
-          },
-        });
-      }
-      return repo.findRequest(cid, r.id, tx);
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
-  );
+  if (!p.employeeId || !p.leaveTypeId) throw new AppError("Choose an employee and an active leave type", 400);
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) throw new AppError("Enter valid leave start and end dates", 400);
+  if (end < start) throw new AppError("Leave end date must be on or after the start date", 400);
+  if (yearOf(start) !== yearOf(end)) throw new AppError("Leave requests cannot cross calendar years", 400);
+  const duration = p.durationType ?? "FULL_DAY";
+  if (!["FULL_DAY", "HALF_DAY"].includes(duration)) throw new AppError("Choose a valid leave duration", 400);
+  if (duration === "HALF_DAY" && start.getTime() !== end.getTime()) throw new AppError("Half-day leave must be one day", 400);
+  if (duration === "HALF_DAY" && !["MORNING", "AFTERNOON"].includes(p.halfDayPeriod)) throw new AppError("Choose morning or afternoon for half-day leave", 400);
+  if (duration === "FULL_DAY" && p.halfDayPeriod) throw new AppError("Half-day period is only valid for half-day leave", 400);
+
+  return prisma.$transaction(async (tx) => {
+    const e = await repo.findEmployee(cid, p.employeeId, tx);
+    if (!e) throw new AppError("Employee not found in this company", 404);
+    if (e.employmentStatus !== "ACTIVE") throw new AppError("Leave can only be requested for an active employee", 400);
+    const t = await repo.findType(cid, p.leaveTypeId, tx);
+    if (!t || !t.isActive) throw new AppError("Active leave type not found in this company", 404);
+
+    await noOverlap(cid, p.employeeId, start, end, duration, p.halfDayPeriod ?? null, null, tx);
+    const days = duration === "HALF_DAY" ? D(0.5) : await workingDays(cid, p.employeeId, start, end, tx);
+    if (days.isZero() || days.isNegative()) throw new AppError("Leave period contains no working days", 400);
+
+    // Unpaid leave does not consume paid entitlement. Previously the service
+    // compared unpaid requests against a zero-day balance, making them impossible.
+    const tracksBalance = t.isPaid !== false;
+    let b = null;
+    if (tracksBalance) {
+      b = await ensureBalance(cid, p.employeeId, t, yearOf(start), tx);
+      if (available(b).lt(days)) throw new AppError(`Insufficient leave balance. Available: ${available(b).toFixed(2)}, requested: ${days.toFixed(2)}`, 400);
+    }
+
+    const status = t.requiresApproval ? "PENDING" : "APPROVED";
+    const r = await tx.leaveRequest.create({
+      data: {
+        companyId: cid, employeeId: p.employeeId, leaveTypeId: t.id,
+        startDate: start, endDate: end, durationType: duration,
+        halfDayPeriod: duration === "HALF_DAY" ? p.halfDayPeriod : null,
+        totalDays: days, reason: String(p.reason ?? "").trim() || null,
+        status, currentApprovalLevel: 1,
+        ...(status === "APPROVED" ? { approvedAt: new Date() } : {}),
+      },
+    });
+    if (status === "PENDING") {
+      await tx.leaveApproval.create({ data: { leaveRequestId: r.id, level: 1, status: "PENDING" } });
+      if (tracksBalance && b) await tx.leaveBalance.update({ where: { id: b.id }, data: { pending: D(b.pending).plus(days) } });
+    } else if (tracksBalance && b) {
+      const nb = await tx.leaveBalance.update({ where: { id: b.id }, data: { used: D(b.used).plus(days) } });
+      await tx.leaveBalanceTransaction.create({ data: {
+        companyId: cid, employeeId: p.employeeId, leaveTypeId: t.id, leaveRequestId: r.id,
+        type: "DEDUCTION", amount: days.neg(), balanceAfter: available(nb),
+        note: "Automatic approval", createdById: req.user?.userId ?? req.user?.id ?? null,
+      } });
+    }
+    return repo.findRequest(cid, r.id, tx);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 export async function updateRequest(req) {
-  const cid = companyId(req),
-    p = req.validated?.body ?? req.body;
-  return prisma.$transaction(
-    async (tx) => {
-      const r = await repo.findRequest(cid, req.params.id, tx);
-      if (!r) throw new AppError("Leave request not found", 404);
-      if (r.status !== "PENDING")
-        throw new AppError("Only pending requests can be edited", 400);
-      const start = parseDateOnly(
-          p.startDate ?? r.startDate.toISOString().slice(0, 10)
-        ),
-        end = parseDateOnly(p.endDate ?? r.endDate.toISOString().slice(0, 10)),
-        duration = p.durationType ?? r.durationType,
-        half =
-          p.halfDayPeriod !== undefined ? p.halfDayPeriod : r.halfDayPeriod;
-      if (yearOf(start) !== yearOf(end))
-        throw new AppError("Leave requests cannot cross calendar years", 400);
-      if (duration === "HALF_DAY" && start.getTime() !== end.getTime())
-        throw new AppError("Half-day leave must be one day", 400);
-      if (duration === "HALF_DAY" && !half)
-        throw new AppError("halfDayPeriod is required", 400);
-      if (duration === "FULL_DAY" && half)
-        throw new AppError(
-          "halfDayPeriod is only valid for half-day leave",
-          400
-        );
-      await noOverlap(cid, r.employeeId, start, end, duration, half, r.id, tx);
-      const days =
-        duration === "HALF_DAY"
-          ? D(0.5)
-          : await workingDays(cid, r.employeeId, start, end, tx);
-      if (days.isZero())
-        throw new AppError("Leave period contains no working days", 400);
-      const b = await repo.findBalance(
-        cid,
-        r.employeeId,
-        r.leaveTypeId,
-        yearOf(start),
-        tx
-      );
-      if (!b) throw new AppError("Leave balance not found", 409);
-      if (available(b).plus(r.totalDays).lt(days))
-        throw new AppError(
-          "Insufficient leave balance for updated request",
-          400
-        );
-      const delta = days.minus(r.totalDays);
-      const u = await tx.leaveRequest.update({
-        where: { id: r.id },
-        data: {
-          startDate: start,
-          endDate: end,
-          durationType: duration,
-          halfDayPeriod: duration === "HALF_DAY" ? half : null,
-          totalDays: days,
-          ...(p.reason !== undefined ? { reason: p.reason } : {}),
-        },
-      });
-      if (!delta.isZero())
-        await tx.leaveBalance.update({
-          where: { id: b.id },
-          data: { pending: D(b.pending).plus(delta) },
-        });
-      return u;
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
-  );
+  const cid = companyId(req), p = req.validated?.body ?? req.body ?? {};
+  return prisma.$transaction(async (tx) => {
+    const r = await repo.findRequest(cid, req.params.id, tx);
+    if (!r) throw new AppError("Leave request not found", 404);
+    if (r.status !== "PENDING") throw new AppError("Only pending requests can be edited", 400);
+    const start = parseDateOnly(p.startDate ?? r.startDate.toISOString().slice(0, 10));
+    const end = parseDateOnly(p.endDate ?? r.endDate.toISOString().slice(0, 10));
+    const duration = p.durationType ?? r.durationType;
+    const half = p.halfDayPeriod !== undefined ? p.halfDayPeriod : r.halfDayPeriod;
+    if (end < start) throw new AppError("Leave end date must be on or after the start date", 400);
+    if (yearOf(start) !== yearOf(end)) throw new AppError("Leave requests cannot cross calendar years", 400);
+    if (duration === "HALF_DAY" && start.getTime() !== end.getTime()) throw new AppError("Half-day leave must be one day", 400);
+    if (duration === "HALF_DAY" && !["MORNING", "AFTERNOON"].includes(half)) throw new AppError("Choose morning or afternoon for half-day leave", 400);
+    if (duration === "FULL_DAY" && half) throw new AppError("Half-day period is only valid for half-day leave", 400);
+    await noOverlap(cid, r.employeeId, start, end, duration, half, r.id, tx);
+    const days = duration === "HALF_DAY" ? D(0.5) : await workingDays(cid, r.employeeId, start, end, tx);
+    if (days.isZero() || days.isNegative()) throw new AppError("Leave period contains no working days", 400);
+    const tracksBalance = r.leaveType?.isPaid !== false;
+    let b = null;
+    if (tracksBalance) {
+      b = await repo.findBalance(cid, r.employeeId, r.leaveTypeId, yearOf(start), tx);
+      if (!b) throw new AppError("Leave balance not found. Initialize the employee's leave balance first.", 409);
+      if (available(b).plus(r.totalDays).lt(days)) throw new AppError("Insufficient leave balance for updated request", 400);
+    }
+    const delta = days.minus(r.totalDays);
+    const u = await tx.leaveRequest.update({ where: { id: r.id }, data: {
+      startDate: start, endDate: end, durationType: duration,
+      halfDayPeriod: duration === "HALF_DAY" ? half : null, totalDays: days,
+      ...(p.reason !== undefined ? { reason: String(p.reason ?? "").trim() || null } : {}),
+    } });
+    if (tracksBalance && b && !delta.isZero()) await tx.leaveBalance.update({ where: { id: b.id }, data: { pending: D(b.pending).plus(delta) } });
+    return u;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 export async function approveRequest(req) {
   const cid = companyId(req);
@@ -500,34 +436,19 @@ export async function approveRequest(req) {
         });
         return { request: u, completed: false, nextApprovalLevel: next };
       }
-      const b = await repo.findBalance(
-        cid,
-        r.employeeId,
-        r.leaveTypeId,
-        yearOf(r.startDate),
-        tx
-      );
-      if (!b) throw new AppError("Leave balance not found", 409);
-      const pending = D(b.pending).minus(r.totalDays);
-      if (pending.isNegative())
-        throw new AppError("Leave balance pending amount is inconsistent", 409);
-      const nb = await tx.leaveBalance.update({
-        where: { id: b.id },
-        data: { pending, used: D(b.used).plus(r.totalDays) },
-      });
-      await tx.leaveBalanceTransaction.create({
-        data: {
-          companyId: cid,
-          employeeId: r.employeeId,
-          leaveTypeId: r.leaveTypeId,
-          leaveRequestId: r.id,
-          type: "DEDUCTION",
-          amount: D(r.totalDays).neg(),
-          balanceAfter: available(nb),
-          note: "Leave fully approved",
-          createdById: req.user?.id ?? null,
-        },
-      });
+      if (r.leaveType?.isPaid !== false) {
+        const b = await repo.findBalance(cid, r.employeeId, r.leaveTypeId, yearOf(r.startDate), tx);
+        if (!b) throw new AppError("Leave balance not found", 409);
+        const pending = D(b.pending).minus(r.totalDays);
+        if (pending.isNegative()) throw new AppError("Leave balance pending amount is inconsistent", 409);
+        const nb = await tx.leaveBalance.update({ where: { id: b.id }, data: { pending, used: D(b.used).plus(r.totalDays) } });
+        await tx.leaveBalanceTransaction.create({ data: {
+          companyId: cid, employeeId: r.employeeId, leaveTypeId: r.leaveTypeId,
+          leaveRequestId: r.id, type: "DEDUCTION", amount: D(r.totalDays).neg(),
+          balanceAfter: available(nb), note: "Leave fully approved",
+          createdById: req.user?.userId ?? req.user?.id ?? null,
+        } });
+      }
       const u = await tx.leaveRequest.update({
         where: { id: r.id },
         data: { status: "APPROVED", approvedAt: new Date() },
@@ -562,21 +483,13 @@ export async function rejectRequest(req) {
           actedAt: new Date(),
         },
       });
-      const b = await repo.findBalance(
-        cid,
-        r.employeeId,
-        r.leaveTypeId,
-        yearOf(r.startDate),
-        tx
-      );
-      if (!b) throw new AppError("Leave balance not found", 409);
-      const pending = D(b.pending).minus(r.totalDays);
-      if (pending.isNegative())
-        throw new AppError("Leave balance pending amount is inconsistent", 409);
-      const nb = await tx.leaveBalance.update({
-        where: { id: b.id },
-        data: { pending },
-      });
+      if (r.leaveType?.isPaid !== false) {
+        const b = await repo.findBalance(cid, r.employeeId, r.leaveTypeId, yearOf(r.startDate), tx);
+        if (!b) throw new AppError("Leave balance not found", 409);
+        const pending = D(b.pending).minus(r.totalDays);
+        if (pending.isNegative()) throw new AppError("Leave balance pending amount is inconsistent", 409);
+        await tx.leaveBalance.update({ where: { id: b.id }, data: { pending } });
+      }
       const u = await tx.leaveRequest.update({
         where: { id: r.id },
         data: {
@@ -585,70 +498,42 @@ export async function rejectRequest(req) {
           rejectionReason: p.comment,
         },
       });
-      return { request: u, balance: nb };
+      return { request: u };
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
   );
 }
 export async function cancelRequest(req) {
   const cid = companyId(req);
-  return prisma.$transaction(
-    async (tx) => {
-      const r = await repo.findRequest(cid, req.params.id, tx);
-      if (!r) throw new AppError("Leave request not found", 404);
-      if (!["PENDING", "APPROVED"].includes(r.status))
-        throw new AppError(
-          "Only pending or approved leave can be cancelled",
-          400
-        );
-      const b = await repo.findBalance(
-        cid,
-        r.employeeId,
-        r.leaveTypeId,
-        yearOf(r.startDate),
-        tx
-      );
+  return prisma.$transaction(async (tx) => {
+    const r = await repo.findRequest(cid, req.params.id, tx);
+    if (!r) throw new AppError("Leave request not found", 404);
+    if (!["PENDING", "APPROVED"].includes(r.status)) throw new AppError("Only pending or approved leave can be cancelled", 400);
+    let nb = null;
+    if (r.leaveType?.isPaid !== false) {
+      const b = await repo.findBalance(cid, r.employeeId, r.leaveTypeId, yearOf(r.startDate), tx);
       if (!b) throw new AppError("Leave balance not found", 409);
-      let nb;
       if (r.status === "PENDING") {
-        nb = await tx.leaveBalance.update({
-          where: { id: b.id },
-          data: { pending: D(b.pending).minus(r.totalDays) },
-        });
+        const pending = D(b.pending).minus(r.totalDays);
+        if (pending.isNegative()) throw new AppError("Leave balance pending amount is inconsistent", 409);
+        nb = await tx.leaveBalance.update({ where: { id: b.id }, data: { pending } });
       } else {
         const used = D(b.used).minus(r.totalDays);
-        if (used.isNegative())
-          throw new AppError("Leave balance is inconsistent", 409);
-        nb = await tx.leaveBalance.update({
-          where: { id: b.id },
-          data: { used },
-        });
-        await tx.leaveBalanceTransaction.create({
-          data: {
-            companyId: cid,
-            employeeId: r.employeeId,
-            leaveTypeId: r.leaveTypeId,
-            leaveRequestId: r.id,
-            type: "RESTORATION",
-            amount: r.totalDays,
-            balanceAfter: available(nb),
-            note: "Approved leave cancelled",
-            createdById: req.user?.id ?? null,
-          },
-        });
+        if (used.isNegative()) throw new AppError("Leave balance is inconsistent", 409);
+        nb = await tx.leaveBalance.update({ where: { id: b.id }, data: { used } });
+        await tx.leaveBalanceTransaction.create({ data: {
+          companyId: cid, employeeId: r.employeeId, leaveTypeId: r.leaveTypeId,
+          leaveRequestId: r.id, type: "RESTORATION", amount: r.totalDays,
+          balanceAfter: available(nb), note: "Approved leave cancelled",
+          createdById: req.user?.userId ?? req.user?.id ?? null,
+        } });
       }
-      const u = await tx.leaveRequest.update({
-        where: { id: r.id },
-        data: {
-          status: "CANCELLED",
-          cancelledAt: new Date(),
-          cancelledById: req.user?.id ?? null,
-        },
-      });
-      return { request: u, balance: nb };
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
-  );
+    }
+    const u = await tx.leaveRequest.update({ where: { id: r.id }, data: {
+      status: "CANCELLED", cancelledAt: new Date(), cancelledById: req.user?.userId ?? req.user?.id ?? null,
+    } });
+    return { request: u, ...(nb ? { balance: nb } : {}) };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 export async function employeeHistory(req) {
   const cid = companyId(req),
