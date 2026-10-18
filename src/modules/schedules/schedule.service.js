@@ -507,6 +507,7 @@ export const assignToEmployee = async (
 
   const conflict =
     await findScheduleAssignmentConflict({
+      companyId,
       employeeId,
       effectiveFrom:
         input.effectiveFrom,
@@ -526,9 +527,7 @@ export const assignToEmployee = async (
       if (input.isPrimary) {
         await tx.employeeScheduleAssignment.updateMany(
           {
-            where: {
-              employeeId,
-              isActive: true,
+            where: { companyId, employeeId, isActive: true,
             },
             data: {
               isPrimary: false,
@@ -537,8 +536,8 @@ export const assignToEmployee = async (
         );
       }
 
-      return createEmployeeScheduleAssignment(
-        {
+      return createEmployeeScheduleAssignment({
+          companyId,
           employeeId,
           scheduleId: input.scheduleId,
           effectiveFrom:
@@ -617,6 +616,7 @@ export const assignShiftToEmployee = async (
 
   const conflict =
     await findShiftAssignmentConflict({
+      companyId,
       employeeId,
       effectiveFrom:
         input.effectiveFrom,
@@ -636,9 +636,7 @@ export const assignShiftToEmployee = async (
       if (input.isPrimary) {
         await tx.employeeShiftAssignment.updateMany(
           {
-            where: {
-              employeeId,
-              isActive: true,
+            where: { companyId, employeeId, isActive: true,
             },
             data: {
               isPrimary: false,
@@ -647,8 +645,8 @@ export const assignShiftToEmployee = async (
         );
       }
 
-      return createEmployeeShiftAssignment(
-        {
+      return createEmployeeShiftAssignment({
+          companyId,
           employeeId,
           shiftId: input.shiftId,
           effectiveFrom:

@@ -104,31 +104,19 @@ async function noOverlap(
 }
 
 export async function listTypes(req) {
-  const cid = companyId(req),
-    q = req.validated?.query ?? req.query,
-    page = Number(q.page ?? 1),
-    limit = Number(q.limit ?? 20);
+  const cid = companyId(req);
+  const q = req.validated?.query ?? req.query ?? {};
+  const page = Math.max(1, Number.parseInt(q.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(q.limit, 10) || 20));
   const where = {
-    ...(q.search
-      ? {
-          OR: [
-            { name: { contains: q.search, mode: "insensitive" } },
-            { code: { contains: q.search, mode: "insensitive" } },
-          ],
-        }
-      : {}),
-    ...(q.isActive !== undefined ? { isActive: q.isActive } : {}),
+    ...(q.search ? { OR: [
+      { name: { contains: String(q.search), mode: "insensitive" } },
+      { code: { contains: String(q.search), mode: "insensitive" } },
+    ] } : {}),
+    ...(typeof q.isActive === "boolean" ? { isActive: q.isActive } : {}),
   };
-  const [items, total] = await repo.listTypes(
-    cid,
-    where,
-    (page - 1) * limit,
-    limit
-  );
-  return {
-    items,
-    pagination: { page, limit, total, pages: Math.ceil(total / limit) },
-  };
+  const [items, total] = await repo.listTypes(cid, where, (page - 1) * limit, limit);
+  return { items, pagination: { page, limit, total, pages: Math.ceil(total / limit), totalPages: Math.ceil(total / limit) } };
 }
 export async function getType(req) {
   const x = await repo.findType(companyId(req), req.params.id);
