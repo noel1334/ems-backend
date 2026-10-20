@@ -6,6 +6,7 @@ import * as templateController from "./role-template.controller.js";
 import * as workforceController from "./platform.workforce.controller.js";
 import * as schedulingController from "./platform.scheduling.controller.js";
 import * as resourcesController from "./platform.resources.controller.js";
+import * as platformLeaveTypesController from "./platform.leave-types.controller.js";
 
 const router = Router();
 router.use(authenticate, requireSuperAdmin);
@@ -70,6 +71,12 @@ router.get("/tenants/:id/holidays/:resourceId", workforceController.getHoliday);
 router.patch("/tenants/:id/holidays/:resourceId", workforceController.updateHoliday);
 router.delete("/tenants/:id/holidays/:resourceId", workforceController.deleteHoliday);
 
+
+router.get("/tenants/:id/leave/types", platformLeaveTypesController.listTypes);
+router.post("/tenants/:id/leave/types", platformLeaveTypesController.createType);
+router.get("/tenants/:id/leave/types/:resourceId", platformLeaveTypesController.getType);
+router.patch("/tenants/:id/leave/types/:resourceId", platformLeaveTypesController.updateType);
+router.delete("/tenants/:id/leave/types/:resourceId", platformLeaveTypesController.deleteType);
 
 router.get("/tenants/:id/scheduling/policies", schedulingController.listPolicies);
 router.post("/tenants/:id/scheduling/policies", schedulingController.createPolicy);

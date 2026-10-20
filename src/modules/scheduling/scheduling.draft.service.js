@@ -25,6 +25,21 @@ export async function updateGenerationAssignments(companyId, userId, generationI
     const byId = new Map(generation.assignments.map((item) => [item.id, item]));
     if (assignments.some((item) => !byId.has(item.id))) throw new AppError("One or more assignments do not belong to this draft", 400);
 
+    const effectivePolicy = generation.policySnapshot && typeof generation.policySnapshot === "object"
+      ? { ...generation.policy, ...generation.policySnapshot }
+      : generation.policy;
+    const allowedShiftIds = new Set((Array.isArray(effectivePolicy.shiftIds) ? effectivePolicy.shiftIds : []).map(String));
+    for (const item of assignments) {
+      if (item.status === "WORK" && effectivePolicy.shiftEnabled && !item.shiftId) {
+        throw new AppError("Choose a shift for every WORK assignment in a shift-enabled policy", 400);
+      }
+      if (item.status === "WORK" && !effectivePolicy.shiftEnabled && item.shiftId) {
+        throw new AppError("This schedule policy does not allow shift assignments", 400);
+      }
+      if (item.status === "WORK" && effectivePolicy.shiftEnabled && item.shiftId && !allowedShiftIds.has(String(item.shiftId))) {
+        throw new AppError("The selected shift is not part of this schedule policy", 400);
+      }
+    }
     const shiftIds = [...new Set(assignments.filter((item) => item.status === "WORK" && item.shiftId).map((item) => item.shiftId))];
     if (shiftIds.length) {
       const count = await tx.shift.count({ where: { companyId, id: { in: shiftIds }, isActive: true } });
@@ -35,9 +50,6 @@ export async function updateGenerationAssignments(companyId, userId, generationI
     for (const item of assignments) {
       if (!ALLOWED_STATUS.has(item.status)) throw new AppError(`Unsupported schedule status: ${item.status}`, 400);
       const shiftId = item.status === "WORK" ? (item.shiftId ?? null) : null;
-      if (item.status === "WORK" && generation.policy.shiftEnabled && !shiftId) {
-        throw new AppError("Choose a shift for every WORK assignment in a shift-enabled policy", 400);
-      }
       normalized.push({
         id: item.id,
         status: item.status,

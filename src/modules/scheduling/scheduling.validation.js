@@ -126,6 +126,12 @@ const policyFields = {
         .boolean()
         .default(false),
 
+    holidayWorkingMode: z.enum([
+        "RESPECT_PUBLIC_AND_COMPANY",
+        "RESPECT_ALL",
+        "WORK_AS_NORMAL"
+    ]).default("RESPECT_PUBLIC_AND_COMPANY"),
+
     isActive: z
         .boolean()
         .default(true)
@@ -134,6 +140,9 @@ const policyFields = {
 const policyBaseSchema = z.object(policyFields);
 
 const validatePolicy = (v, ctx) => {
+    if (v.shiftEnabled && (!Array.isArray(v.shiftIds) || v.shiftIds.length === 0)) {
+        ctx.addIssue({ code: "custom", path: ["shiftIds"], message: "shiftEnabled requires at least one active shift" });
+    }
     if (
         v.rotationEnabled &&
         !v.rotationDays
@@ -212,6 +221,10 @@ export const policyUpdateSchema =
                     message:
                         "leaveDurationDays must be greater than zero for automatic leave"
                 });
+            }
+
+            if (v.shiftEnabled === true && v.shiftIds !== undefined && (!Array.isArray(v.shiftIds) || v.shiftIds.length === 0)) {
+                ctx.addIssue({ code: "custom", path: ["shiftIds"], message: "shiftEnabled updates require selected shift IDs" });
             }
 
             if (

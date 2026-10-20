@@ -13,16 +13,340 @@ export async function createPolicy(companyId,input){await validateDepartment(com
 export async function listPolicies(companyId,q){const page=Math.max(1,Number.parseInt(q.page,10)||1),limit=Math.min(200,Math.max(1,Number.parseInt(q.limit,10)||20)),where={companyId,...(q.departmentId?{departmentId:q.departmentId}:{})};const [data,total]=await Promise.all([prisma.schedulingPolicy.findMany({where,orderBy:[{departmentId:"asc"},{name:"asc"}],skip:(page-1)*limit,take:limit,include:{department:true}}),prisma.schedulingPolicy.count({where})]);return{data,pagination:{page,limit,total,totalPages:Math.ceil(total/limit)}};}
 export const getPolicy=async(companyId,id)=>getPolicyRecord(companyId,id);
 export async function updatePolicy(companyId,id,input){await getPolicyRecord(companyId,id);if(input.departmentId!==undefined)await validateDepartment(companyId,input.departmentId);await validateShifts(companyId,input.shiftIds);return prisma.schedulingPolicy.update({where:{id},data:input,include:{department:true}});}
-export async function generate(companyId,userId,input,meta={}){const policy=await getPolicyRecord(companyId,input.policyId);if(!policy.isActive)throw new AppError("Scheduling policy is inactive",409);if(!policy.departmentId)throw new AppError("A generation policy must target a department",400);
-return prisma.$transaction(async tx=>{const employees=await tx.employee.findMany({where:{companyId,departmentId:policy.departmentId,employmentStatus:"ACTIVE"},orderBy:[{employeeNumber:"asc"},{id:"asc"}]});if(!employees.length)throw new AppError("No active employees found in the selected department",409);
-let shifts=[];if(policy.shiftEnabled){shifts=await tx.shift.findMany({where:{companyId,isActive:true,...(asArray(policy.shiftIds).length?{id:{in:asArray(policy.shiftIds).map(String)}}:{})},orderBy:{code:"asc"}});if(!shifts.length)throw new AppError("Shift scheduling is enabled but no active shifts are configured",409);}
-const generation=await tx.scheduleGeneration.create({data:{companyId,policyId:policy.id,startDate:dateKey(input.startDate),endDate:dateKey(input.endDate),generatedById:userId,status:"DRAFT"}});
-const total=employees.length,maxPct=policy.maxLeavePercent==null?total:Math.max(1,pct(policy.maxLeavePercent,total)),minByPct=policy.minStaffingPercent==null?total:Math.max(0,total-Math.ceil(pct(policy.minStaffingPercent,total))),minByCount=policy.minStaffingCount==null?total:Math.max(0,total-policy.minStaffingCount),maxLeave=Math.max(0,Math.min(maxPct,minByPct,minByCount));
-const leaveEnabled=policy.leaveSchedulingMode!=="MANUAL"&&policy.leaveDurationDays>0&&maxLeave>0;const groupSize=Math.max(1,maxLeave),groups=Math.ceil(total/groupSize),leaveRanges=new Map();
-if(leaveEnabled){let cursor=addDays(dateKey(input.startDate),policy.leaveCycleAfterDays??0);for(let g=0;g<groups;g++){let start=cursor,guard=0;while(start<=dateKey(input.endDate)&&guard++<370&&(blocked(start,policy)||!preferred(start,policy)))start=addDays(start,1);const end=addDays(start,policy.leaveDurationDays-1);const members=employees.filter((_,i)=>i%groups===g);if(start<=dateKey(input.endDate)){for(const e of members)leaveRanges.set(e.id,{start,end,g});cursor=addDays(end,1);}}}
-const rows=[];for(let d=dateKey(input.startDate);d<=dateKey(input.endDate);d=addDays(d,1)){if(!working(d,policy))continue;const cycle=policy.rotationEnabled&&policy.rotationDays?Math.floor(daysBetween(dateKey(input.startDate),d)/policy.rotationDays):0;for(let i=0;i<employees.length;i++){const e=employees[i],r=leaveRanges.get(e.id),onLeave=r&&d>=r.start&&d<=r.end;const shiftId=!onLeave&&policy.shiftEnabled?shifts[(i+cycle)%shifts.length].id:null;rows.push({companyId,generationId:generation.id,employeeId:e.id,departmentId:e.departmentId,workDate:d,status:onLeave?"LEAVE":"WORK",shiftId,shiftCycle:cycle,leaveGroup:onLeave?r.g:null,reason:onLeave?"Automatic leave allocation":null});}}
-if(!rows.length)throw new AppError("The selected period contains no working days under this policy",400);await tx.scheduleGenerationAssignment.createMany({data:rows});await writeAudit(tx,{companyId,actorUserId:userId,action:"CREATE",resource:"schedule_generation",resourceId:generation.id,requestId:meta.requestId,ipAddress:meta.ipAddress,userAgent:meta.userAgent,metadata:{policyId:policy.id,employees:employees.length,rows:rows.length}});return tx.scheduleGeneration.findUnique({where:{id:generation.id},include:{policy:true,assignments:{include:{employee:true,shift:true},orderBy:[{workDate:"asc"},{employeeId:"asc"}]}}});},{isolationLevel:Prisma.TransactionIsolationLevel.Serializable});}
+export async function generate(companyId, userId, input, meta = {}) {
+  const policy = await getPolicyRecord(companyId, input.policyId);
+  if (!policy.isActive) throw new AppError("Scheduling policy is inactive", 409);
+  if (!policy.departmentId) throw new AppError("A generation policy must target a department", 400);
+
+  const start = dateKey(input.startDate);
+  const end = dateKey(input.endDate);
+  if (end < start) throw new AppError("Schedule end date must be on or after its start date", 400);
+  const calendarDays = daysBetween(start, end) + 1;
+  if (calendarDays > 366) throw new AppError("A schedule generation cannot exceed 366 calendar days", 400);
+
+  return prisma.$transaction(async (tx) => {
+    const employees = await tx.employee.findMany({
+      where: { companyId, departmentId: policy.departmentId, employmentStatus: "ACTIVE" },
+      orderBy: [{ employeeNumber: "asc" }, { id: "asc" }],
+    });
+    if (!employees.length) throw new AppError("No active employees found in the selected department", 409);
+    const assignmentCount = employees.length * calendarDays;
+    if (assignmentCount > 50000) throw new AppError("This schedule would create more than 50,000 employee-day records. Reduce the date range or split the schedule into smaller periods.", 413);
+
+    let shifts = [];
+    if (policy.shiftEnabled) {
+      const selectedShiftIds = asArray(policy.shiftIds).map(String);
+      if (!selectedShiftIds.length) throw new AppError("Shift scheduling is enabled but no shifts are selected in the saved policy", 409);
+      shifts = await tx.shift.findMany({
+        where: { companyId, isActive: true, id: { in: selectedShiftIds } },
+        orderBy: { code: "asc" },
+      });
+      if (shifts.length !== new Set(selectedShiftIds).size) throw new AppError("One or more selected shifts are inactive or belong to another company", 409);
+      if (!shifts.length) throw new AppError("Shift scheduling is enabled but no selected active shifts are available", 409);
+    }
+
+    const holidays = await tx.holiday.findMany({
+      where: { companyId, isActive: true, OR: [{ date: { gte: start, lte: end } }, { isRecurring: true }] },
+      orderBy: { date: "asc" },
+    });
+    const holidayMode = policy.holidayWorkingMode || "RESPECT_PUBLIC_AND_COMPANY";
+    const holidayIsObserved = (holiday) => {
+      if (holidayMode === "WORK_AS_NORMAL") return false;
+      if (holidayMode === "RESPECT_ALL") return true;
+      return ["PUBLIC", "COMPANY"].includes(holiday.holidayType);
+    };
+    const holidayForDate = (date) => {
+      const key = dateString(date);
+      const monthDay = key.slice(5);
+      return holidays.find((holiday) => {
+        if (!holidayIsObserved(holiday)) return false;
+        const holidayKey = dateString(holiday.date);
+        return holiday.isRecurring ? holidayKey.slice(5) === monthDay : holidayKey === key;
+      });
+    };
+
+    const employeeIds = employees.map((employee) => employee.id);
+    const approvedLeaves = await tx.leaveRequest.findMany({
+      where: { companyId, employeeId: { in: employeeIds }, status: "APPROVED", startDate: { lte: end }, endDate: { gte: start } },
+      include: { leaveType: { select: { name: true, code: true } } },
+      orderBy: [{ startDate: "asc" }, { endDate: "asc" }],
+    });
+    const leavesByEmployee = new Map();
+    for (const leave of approvedLeaves) {
+      if (!leavesByEmployee.has(leave.employeeId)) leavesByEmployee.set(leave.employeeId, []);
+      leavesByEmployee.get(leave.employeeId).push(leave);
+    }
+    const approvedLeaveForDate = (employeeId, date) => {
+      const key = dateString(date);
+      return (leavesByEmployee.get(employeeId) || []).find((leave) => dateString(leave.startDate) <= key && dateString(leave.endDate) >= key);
+    };
+
+    const total = employees.length;
+    const maxByLeavePercent = policy.maxLeavePercent == null ? total : Math.floor(Number(policy.maxLeavePercent) * total / 100);
+    const maxByMinimumStaffPercent = policy.minStaffingPercent == null ? total : Math.max(0, total - Math.ceil(Number(policy.minStaffingPercent) * total / 100));
+    const maxByMinimumStaffCount = policy.minStaffingCount == null ? total : Math.max(0, total - Number(policy.minStaffingCount));
+    const maxLeave = Math.max(0, Math.min(maxByLeavePercent, maxByMinimumStaffPercent, maxByMinimumStaffCount));
+    const leaveEnabled = policy.leaveSchedulingMode !== "MANUAL" && policy.leaveDurationDays > 0 && maxLeave > 0;
+    const groupSize = Math.max(1, maxLeave);
+    const groups = Math.ceil(total / groupSize);
+    const leaveRanges = new Map();
+    if (leaveEnabled) {
+      let cursor = addDays(start, policy.leaveCycleAfterDays ?? 0);
+      for (let group = 0; group < groups; group++) {
+        let blockStart = cursor;
+        let guard = 0;
+        while (blockStart <= end && guard++ < 370 && (blocked(blockStart, policy) || !preferred(blockStart, policy))) blockStart = addDays(blockStart, 1);
+        if (blockStart <= end) {
+          const blockEnd = addDays(blockStart, policy.leaveDurationDays - 1);
+          const members = employees.filter((_, index) => index % groups === group);
+          for (const employee of members) leaveRanges.set(employee.id, { start: blockStart, end: blockEnd, group });
+          cursor = addDays(blockEnd, 1);
+        }
+      }
+    }
+
+    const isNightShift = (shift) => {
+      const startTime = String(shift.startTime || "").slice(0, 5);
+      return Boolean(shift.isOvernight) || startTime >= "18:00" || (!!startTime && startTime < "06:00");
+    };
+    const lastWorkShift = new Map();
+    const rows = [];
+    let holidaySlots = 0;
+    let approvedLeaveSlots = 0;
+    let automaticLeaveSlots = 0;
+    let nightAdjustments = 0;
+
+    // Persist a row for every active employee on every calendar day so the reviewer can
+    // distinguish work, leave, rest and holiday days rather than guessing from missing rows.
+    for (let date = start; date <= end; date = addDays(date, 1)) {
+      const scheduledWorkingDay = working(date, policy);
+      const cycle = policy.rotationEnabled && policy.rotationDays ? Math.floor(daysBetween(start, date) / policy.rotationDays) : 0;
+      const holiday = holidayForDate(date);
+      for (let index = 0; index < employees.length; index++) {
+        const employee = employees[index];
+        let status = "REST";
+        let shiftId = null;
+        let reason = "Scheduled rest day";
+        let leaveGroup = null;
+        if (holiday) {
+          status = "OFF";
+          reason = `Holiday: ${holiday.name}`;
+          holidaySlots++;
+        } else if (!scheduledWorkingDay) {
+          status = "REST";
+          reason = "Scheduled rest day";
+        } else {
+          const approvedLeave = approvedLeaveForDate(employee.id, date);
+          const automaticRange = leaveRanges.get(employee.id);
+          const onAutomaticLeave = automaticRange && date >= automaticRange.start && date <= automaticRange.end;
+          if (approvedLeave) {
+            status = "LEAVE";
+            reason = `Approved leave: ${approvedLeave.leaveType?.name || approvedLeave.leaveType?.code || "approved leave"}`;
+            approvedLeaveSlots++;
+          } else if (onAutomaticLeave) {
+            status = "LEAVE";
+            reason = "Automatic staggered leave allocation";
+            leaveGroup = automaticRange.group;
+            automaticLeaveSlots++;
+          } else {
+            status = "WORK";
+            reason = null;
+            if (policy.shiftEnabled) {
+              const baseShift = shifts[(index + cycle) % shifts.length];
+              let chosenShift = baseShift;
+              const previous = lastWorkShift.get(employee.id);
+              if (policy.preventConsecutiveNightShifts && previous && daysBetween(previous.date, date) === 1 && previous.isNight && isNightShift(baseShift)) {
+                const alternative = shifts.find((candidate) => !isNightShift(candidate));
+                if (alternative) {
+                  chosenShift = alternative;
+                  nightAdjustments++;
+                  reason = "Shift adjusted to avoid consecutive night shifts";
+                }
+              }
+              shiftId = chosenShift.id;
+              lastWorkShift.set(employee.id, { date, isNight: isNightShift(chosenShift) });
+            }
+          }
+        }
+        rows.push({ companyId, employeeId: employee.id, departmentId: employee.departmentId, workDate: date, status, shiftId, shiftCycle: cycle, leaveGroup, reason });
+      }
+    }
+
+    const notes = [
+      `Generated ${calendarDays} calendar days for ${employees.length} active employees (${rows.length} employee-day records).`,
+      `${holidaySlots} holiday OFF slots; ${approvedLeaveSlots} approved-leave slots; ${automaticLeaveSlots} automatically staggered leave slots.`,
+      nightAdjustments ? `${nightAdjustments} assignments adjusted to reduce consecutive night shifts.` : null,
+      holidayMode === "WORK_AS_NORMAL" ? "Holiday policy treats all listed holidays as normal workdays." : null,
+    ].filter(Boolean).join("\n");
+    const policySnapshot = {
+      name: policy.name,
+      departmentId: policy.departmentId,
+      mode: policy.mode,
+      shiftEnabled: policy.shiftEnabled,
+      rotationEnabled: policy.rotationEnabled,
+      rotationDays: policy.rotationDays,
+      leaveSchedulingMode: policy.leaveSchedulingMode,
+      leaveDurationDays: policy.leaveDurationDays,
+      leaveCycleAfterDays: policy.leaveCycleAfterDays,
+      maxLeavePercent: policy.maxLeavePercent == null ? null : Number(policy.maxLeavePercent),
+      minStaffingPercent: policy.minStaffingPercent == null ? null : Number(policy.minStaffingPercent),
+      minStaffingCount: policy.minStaffingCount,
+      preferredLeaveDays: asArray(policy.preferredLeaveDays),
+      blockedDates: asArray(policy.blockedDates),
+      preferredLeaveDates: asArray(policy.preferredLeaveDates),
+      shiftIds: asArray(policy.shiftIds).map(String),
+      workingDays: asArray(policy.workingDays),
+      autoApproveLeave: policy.autoApproveLeave,
+      preventConsecutiveNightShifts: policy.preventConsecutiveNightShifts,
+      holidayWorkingMode: holidayMode,
+    };
+    const generation = await tx.scheduleGeneration.create({
+      data: { companyId, policyId: policy.id, startDate: start, endDate: end, generatedById: userId, status: "DRAFT", notes, policySnapshot },
+    });
+    await tx.scheduleGenerationAssignment.createMany({ data: rows.map((row) => ({ ...row, generationId: generation.id })) });
+    await writeAudit(tx, {
+      companyId, actorUserId: userId, action: "CREATE", resource: "schedule_generation", resourceId: generation.id,
+      requestId: meta.requestId, ipAddress: meta.ipAddress, userAgent: meta.userAgent,
+      metadata: { policyId: policy.id, employees: employees.length, calendarDays, assignments: rows.length, holidaySlots, approvedLeaveSlots, automaticLeaveSlots, nightAdjustments },
+    });
+    return tx.scheduleGeneration.findUnique({
+      where: { id: generation.id },
+      include: { policy: { include: { department: true } }, assignments: { include: { employee: true, shift: true }, orderBy: [{ workDate: "asc" }, { employeeId: "asc" }] } },
+    });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
 export async function listGenerations(companyId,q){const page=Math.max(1,Number.parseInt(q.page,10)||1),limit=Math.min(200,Math.max(1,Number.parseInt(q.limit,10)||20)),where={companyId,...(q.status?{status:q.status}:{}),...(q.policyId?{policyId:q.policyId}:{})};const[data,total]=await Promise.all([prisma.scheduleGeneration.findMany({where,orderBy:{createdAt:"desc"},skip:(page-1)*limit,take:limit,include:{policy:{include:{department:true}},_count:{select:{assignments:true}}}}),prisma.scheduleGeneration.count({where})]);return{data,pagination:{page,limit,total,totalPages:Math.ceil(total/limit)}};}
 export async function getGeneration(companyId,id){const r=await prisma.scheduleGeneration.findFirst({where:{companyId,id},include:{policy:{include:{department:true}},assignments:{include:{employee:true,shift:true},orderBy:[{workDate:"asc"},{employeeId:"asc"}]}}});if(!r)throw new AppError("Schedule generation not found",404);return r;}
 export async function approve(companyId,userId,id,meta={}){const g=await getGeneration(companyId,id);if(g.status!=="DRAFT")throw new AppError("Only draft generations can be approved",409);return prisma.$transaction(async tx=>{const u=await tx.scheduleGeneration.update({where:{id},data:{status:"APPROVED",approvedById:userId}});await writeAudit(tx,{companyId,actorUserId:userId,action:"APPROVE",resource:"schedule_generation",resourceId:id,requestId:meta.requestId,metadata:{status:"APPROVED"}});return u;});}
-export async function publish(companyId,userId,id,meta={}){const g=await getGeneration(companyId,id);if(!["DRAFT","APPROVED"].includes(g.status))throw new AppError("Only draft or approved generations can be published",409);return prisma.$transaction(async tx=>{const ids=[...new Set(g.assignments.map(x=>x.employeeId))];await tx.employeeShiftAssignment.updateMany({where:{companyId,employeeId:{in:ids},isActive:true,effectiveFrom:{lte:g.endDate},OR:[{effectiveTo:null},{effectiveTo:{gte:g.startDate}}]},data:{isActive:false,effectiveTo:new Date(g.startDate.getTime()-1000)}});const byEmployee=new Map();for(const r of g.assignments.filter(x=>x.status==="WORK"&&x.shiftId)){if(!byEmployee.has(r.employeeId))byEmployee.set(r.employeeId,[]);byEmployee.get(r.employeeId).push(r);}let created=0;for(const [employeeId,rows] of byEmployee){rows.sort((a,b)=>a.workDate-b.workDate);let current=null;for(const r of rows){if(!current||current.shiftId!==r.shiftId||daysBetween(current.to,r.workDate)!==1){if(current){await tx.employeeShiftAssignment.create({data:{companyId,employeeId,shiftId:current.shiftId,effectiveFrom:current.from,effectiveTo:current.to,isPrimary:true,isActive:true}});created++;}current={shiftId:r.shiftId,from:r.workDate,to:r.workDate};}else current.to=r.workDate;}if(current){await tx.employeeShiftAssignment.create({data:{companyId,employeeId,shiftId:current.shiftId,effectiveFrom:current.from,effectiveTo:current.to,isPrimary:true,isActive:true}});created++;}}const u=await tx.scheduleGeneration.update({where:{id},data:{status:"PUBLISHED",publishedAt:new Date()}});await writeAudit(tx,{companyId,actorUserId:userId,action:"UPDATE",resource:"schedule_generation",resourceId:id,requestId:meta.requestId,metadata:{status:"PUBLISHED",shiftAssignmentsCreated:created,plannedLeaveDays:g.assignments.filter(x=>x.status==="LEAVE").length}});return u;},{isolationLevel:Prisma.TransactionIsolationLevel.Serializable});}
+export async function publish(companyId, userId, id, meta = {}) {
+  const generation = await getGeneration(companyId, id);
+  if (generation.status !== "APPROVED") throw new AppError("Approve the schedule before publishing it", 409);
+  const schedulePolicy = generation.policySnapshot && typeof generation.policySnapshot === "object"
+    ? { ...generation.policy, ...generation.policySnapshot }
+    : generation.policy;
+  if (schedulePolicy?.shiftEnabled) {
+    const scheduledShiftIds = [...new Set(generation.assignments.filter((row) => row.status === "WORK" && row.shiftId).map((row) => row.shiftId))];
+    if (generation.assignments.some((row) => row.status === "WORK" && !row.shiftId)) throw new AppError("Every WORK assignment in this shift schedule must have a shift", 409);
+    const policyShiftIds = Array.isArray(schedulePolicy.shiftIds) ? schedulePolicy.shiftIds.map(String) : [];
+    if (scheduledShiftIds.some((shiftId) => !policyShiftIds.includes(String(shiftId)))) throw new AppError("One or more shifts used in this draft are not part of the saved policy. Review and regenerate the draft.", 409);
+    const activeShiftCount = scheduledShiftIds.length ? await prisma.shift.count({ where: { companyId, isActive: true, id: { in: scheduledShiftIds } } }) : 0;
+    if (activeShiftCount !== scheduledShiftIds.length) throw new AppError("One or more shifts used in this draft are no longer active. Reactivate them or generate a new draft.", 409);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const employeeIds = [...new Set(generation.assignments.map((row) => row.employeeId))];
+    const start = dateKey(generation.startDate);
+    const end = dateKey(generation.endDate);
+    const previousDay = addDays(start, -1);
+    const resumeDay = addDays(end, 1);
+    let preservedContinuations = 0;
+    let shiftAssignmentsCreated = 0;
+
+    // Only a shift-enabled policy rewrites shift assignment intervals. Office/day-plan
+    // policies must never deactivate an employee's existing shift records.
+    if (schedulePolicy?.shiftEnabled && employeeIds.length) {
+      const overlapping = await tx.employeeShiftAssignment.findMany({
+        where: {
+          companyId,
+          employeeId: { in: employeeIds },
+          isActive: true,
+          effectiveFrom: { lte: end },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: start } }],
+        },
+      });
+
+      // Preserve the before/after portions of any existing interval around the
+      // published range rather than leaving invalid intervals or deleting future cover.
+      for (const assignment of overlapping) {
+        const from = dateKey(assignment.effectiveFrom);
+        const to = assignment.effectiveTo ? dateKey(assignment.effectiveTo) : null;
+        const startsBeforeRange = from < start;
+        const continuesAfterRange = !to || to > end;
+
+        if (startsBeforeRange && continuesAfterRange) {
+          await tx.employeeShiftAssignment.update({
+            where: { id: assignment.id },
+            data: { effectiveTo: previousDay },
+          });
+          await tx.employeeShiftAssignment.create({
+            data: {
+              companyId,
+              employeeId: assignment.employeeId,
+              shiftId: assignment.shiftId,
+              effectiveFrom: resumeDay,
+              effectiveTo: assignment.effectiveTo,
+              isPrimary: assignment.isPrimary,
+              isActive: assignment.isActive,
+            },
+          });
+          preservedContinuations++;
+        } else if (startsBeforeRange) {
+          await tx.employeeShiftAssignment.update({
+            where: { id: assignment.id },
+            data: { effectiveTo: previousDay },
+          });
+        } else if (continuesAfterRange) {
+          await tx.employeeShiftAssignment.update({
+            where: { id: assignment.id },
+            data: { effectiveFrom: resumeDay },
+          });
+        } else {
+          // Fully replaced by this published period; retain history but deactivate it.
+          await tx.employeeShiftAssignment.update({
+            where: { id: assignment.id },
+            data: { isActive: false },
+          });
+        }
+      }
+
+      const byEmployee = new Map();
+      for (const row of generation.assignments.filter((item) => item.status === "WORK" && item.shiftId)) {
+        if (!byEmployee.has(row.employeeId)) byEmployee.set(row.employeeId, []);
+        byEmployee.get(row.employeeId).push(row);
+      }
+
+      for (const [employeeId, rows] of byEmployee) {
+        rows.sort((a, b) => a.workDate - b.workDate);
+        let current = null;
+        for (const row of rows) {
+          if (!current || current.shiftId !== row.shiftId || daysBetween(current.to, row.workDate) !== 1) {
+            if (current) {
+              await tx.employeeShiftAssignment.create({
+                data: { companyId, employeeId, shiftId: current.shiftId, effectiveFrom: current.from, effectiveTo: current.to, isPrimary: true, isActive: true },
+              });
+              shiftAssignmentsCreated++;
+            }
+            current = { shiftId: row.shiftId, from: row.workDate, to: row.workDate };
+          } else {
+            current.to = row.workDate;
+          }
+        }
+        if (current) {
+          await tx.employeeShiftAssignment.create({
+            data: { companyId, employeeId, shiftId: current.shiftId, effectiveFrom: current.from, effectiveTo: current.to, isPrimary: true, isActive: true },
+          });
+          shiftAssignmentsCreated++;
+        }
+      }
+    }
+
+    const updated = await tx.scheduleGeneration.update({ where: { id }, data: { status: "PUBLISHED", publishedAt: new Date() } });
+    await writeAudit(tx, {
+      companyId,
+      actorUserId: userId,
+      action: "UPDATE",
+      resource: "schedule_generation",
+      resourceId: id,
+      requestId: meta.requestId,
+      ipAddress: meta.ipAddress,
+      userAgent: meta.userAgent,
+      metadata: {
+        status: "PUBLISHED",
+        shiftAssignmentsCreated,
+        preservedContinuations,
+        plannedLeaveDays: generation.assignments.filter((row) => row.status === "LEAVE").length,
+      },
+    });
+    return updated;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}

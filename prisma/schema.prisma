@@ -1102,6 +1102,7 @@ model SchedulingPolicy {
   workingDays                   Json?
   autoApproveLeave              Boolean              @default(false)
   preventConsecutiveNightShifts Boolean              @default(false)
+  holidayWorkingMode            String               @default("RESPECT_PUBLIC_AND_COMPANY")
   isActive                      Boolean              @default(true)
   createdAt                     DateTime             @default(now())
   updatedAt                     DateTime             @updatedAt
@@ -1125,6 +1126,7 @@ model ScheduleGeneration {
   approvedById  String?
   publishedAt   DateTime?
   notes         String?
+  policySnapshot Json?
   createdAt     DateTime                       @default(now())
   updatedAt     DateTime                       @updatedAt
   company       Company                        @relation(fields: [companyId], references: [id], onDelete: Cascade)

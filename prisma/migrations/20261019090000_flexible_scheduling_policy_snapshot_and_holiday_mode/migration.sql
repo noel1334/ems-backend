@@ -1,0 +1,2 @@
+ALTER TABLE "scheduling_policies" ADD COLUMN IF NOT EXISTS "holidayWorkingMode" TEXT NOT NULL DEFAULT 'RESPECT_PUBLIC_AND_COMPANY';
+ALTER TABLE "schedule_generations" ADD COLUMN IF NOT EXISTS "policySnapshot" JSONB;
