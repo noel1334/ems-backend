@@ -3,6 +3,17 @@ import prisma from "../../config/database.js";
 import AppError from "../../common/errors/AppError.js";
 import { writeAudit } from "../../common/utils/audit.js";
 const DAY=86400000, dateKey=d=>new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())), addDays=(d,n)=>new Date(d.getTime()+n*DAY), daysBetween=(a,b)=>Math.floor((dateKey(b)-dateKey(a))/DAY), asArray=v=>Array.isArray(v)?v:[], pct=(v,t)=>Math.floor(Number(v||0)*t/100), dateString=d=>dateKey(d).toISOString().slice(0,10);
+const SERIALIZABLE_OPTIONS = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10_000, timeout: 30_000 };
+async function runSerializableTransaction(work, maxRetries = 2) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await prisma.$transaction(work, SERIALIZABLE_OPTIONS);
+    } catch (error) {
+      if (error?.code !== "P2034" || attempt >= maxRetries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+}
 const blocked=(d,p)=>asArray(p.blockedDates).map(String).includes(dateString(d));
 const preferred=(d,p)=>{const a=asArray(p.preferredLeaveDays);return !a.length||a.includes(d.getUTCDay())||a.includes(String(d.getUTCDay()));};
 const working=(d,p)=>{const a=asArray(p.workingDays);return !a.length||a.includes(d.getUTCDay())||a.includes(String(d.getUTCDay()));};
@@ -24,7 +35,7 @@ export async function generate(companyId, userId, input, meta = {}) {
   const calendarDays = daysBetween(start, end) + 1;
   if (calendarDays > 366) throw new AppError("A schedule generation cannot exceed 366 calendar days", 400);
 
-  return prisma.$transaction(async (tx) => {
+  return runSerializableTransaction(async (tx) => {
     const employees = await tx.employee.findMany({
       where: { companyId, departmentId: policy.departmentId, employmentStatus: "ACTIVE" },
       orderBy: [{ employeeNumber: "asc" }, { id: "asc" }],
@@ -213,7 +224,7 @@ export async function generate(companyId, userId, input, meta = {}) {
       where: { id: generation.id },
       include: { policy: { include: { department: true } }, assignments: { include: { employee: true, shift: true }, orderBy: [{ workDate: "asc" }, { employeeId: "asc" }] } },
     });
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  });
 }
 export async function listGenerations(companyId,q){const page=Math.max(1,Number.parseInt(q.page,10)||1),limit=Math.min(200,Math.max(1,Number.parseInt(q.limit,10)||20)),where={companyId,...(q.status?{status:q.status}:{}),...(q.policyId?{policyId:q.policyId}:{})};const[data,total]=await Promise.all([prisma.scheduleGeneration.findMany({where,orderBy:{createdAt:"desc"},skip:(page-1)*limit,take:limit,include:{policy:{include:{department:true}},_count:{select:{assignments:true}}}}),prisma.scheduleGeneration.count({where})]);return{data,pagination:{page,limit,total,totalPages:Math.ceil(total/limit)}};}
 export async function getGeneration(companyId,id){const r=await prisma.scheduleGeneration.findFirst({where:{companyId,id},include:{policy:{include:{department:true}},assignments:{include:{employee:true,shift:true},orderBy:[{workDate:"asc"},{employeeId:"asc"}]}}});if(!r)throw new AppError("Schedule generation not found",404);return r;}
@@ -335,7 +346,7 @@ export async function publish(companyId, userId, id, meta = {}) {
     if (activeShiftCount !== scheduledShiftIds.length) throw new AppError("One or more shifts used in this draft are no longer active. Reactivate them or generate a new draft.", 409);
   }
 
-  return prisma.$transaction(async (tx) => {
+  return runSerializableTransaction(async (tx) => {
     const employeeIds = [...new Set(generation.assignments.map((row) => row.employeeId))];
     const start = dateKey(generation.startDate);
     const end = dateKey(generation.endDate);
@@ -407,29 +418,39 @@ export async function publish(companyId, userId, id, meta = {}) {
         byEmployee.get(row.employeeId).push(row);
       }
 
+      // Build the effective-dated intervals in memory and insert them in one
+      // database operation. The old per-interval await loop made large rotating
+      // rosters vulnerable to Prisma's default interactive-transaction timeout.
+      const intervalsToCreate = [];
       for (const [employeeId, rows] of byEmployee) {
         rows.sort((a, b) => a.workDate - b.workDate);
         let current = null;
+        const flushCurrent = () => {
+          if (!current) return;
+          intervalsToCreate.push({
+            companyId,
+            employeeId,
+            shiftId: current.shiftId,
+            effectiveFrom: current.from,
+            effectiveTo: current.to,
+            isPrimary: true,
+            isActive: true,
+          });
+        };
         for (const row of rows) {
           if (!current || current.shiftId !== row.shiftId || daysBetween(current.to, row.workDate) !== 1) {
-            if (current) {
-              await tx.employeeShiftAssignment.create({
-                data: { companyId, employeeId, shiftId: current.shiftId, effectiveFrom: current.from, effectiveTo: current.to, isPrimary: true, isActive: true },
-              });
-              shiftAssignmentsCreated++;
-            }
+            flushCurrent();
             current = { shiftId: row.shiftId, from: row.workDate, to: row.workDate };
           } else {
             current.to = row.workDate;
           }
         }
-        if (current) {
-          await tx.employeeShiftAssignment.create({
-            data: { companyId, employeeId, shiftId: current.shiftId, effectiveFrom: current.from, effectiveTo: current.to, isPrimary: true, isActive: true },
-          });
-          shiftAssignmentsCreated++;
-        }
+        flushCurrent();
       }
+      if (intervalsToCreate.length) {
+        await tx.employeeShiftAssignment.createMany({ data: intervalsToCreate });
+      }
+      shiftAssignmentsCreated = intervalsToCreate.length;
     }
 
     const updated = await tx.scheduleGeneration.update({ where: { id }, data: { status: "PUBLISHED", publishedAt: new Date() } });
@@ -450,5 +471,5 @@ export async function publish(companyId, userId, id, meta = {}) {
       },
     });
     return updated;
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  });
 }

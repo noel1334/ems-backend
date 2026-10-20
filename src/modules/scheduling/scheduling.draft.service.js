@@ -4,6 +4,25 @@ import AppError from "../../common/errors/AppError.js";
 import { writeAudit } from "../../common/utils/audit.js";
 
 const ALLOWED_STATUS = new Set(["WORK", "LEAVE", "REST", "OFF"]);
+const SERIALIZABLE_OPTIONS = {
+  isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+  maxWait: 10_000,
+  timeout: 30_000,
+};
+
+async function retrySerializable(work, maxRetries = 2) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await work();
+    } catch (error) {
+      // Concurrent roster writes can abort a serializable transaction (P2034).
+      // The whole operation is rolled back before retrying, so there are no
+      // partially committed changes or duplicate audit records.
+      if (error?.code !== "P2034" || attempt >= maxRetries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+}
 
 /**
  * Update a draft generation only. Published schedules can never be changed by
@@ -11,7 +30,7 @@ const ALLOWED_STATUS = new Set(["WORK", "LEAVE", "REST", "OFF"]);
  * assignments. Every id is scoped to the specified company and generation.
  */
 export async function updateGenerationAssignments(companyId, userId, generationId, assignments, meta = {}) {
-  return prisma.$transaction(async (tx) => {
+  return retrySerializable(() => prisma.$transaction(async (tx) => {
     const generation = await tx.scheduleGeneration.findFirst({
       where: { id: generationId, companyId },
       include: { policy: true, assignments: { select: { id: true, employeeId: true, status: true, shiftId: true } } },
@@ -69,6 +88,7 @@ export async function updateGenerationAssignments(companyId, userId, generationI
       companyId,
       actorUserId: userId,
       action: "UPDATE",
+      module: "scheduling",
       resource: "schedule_generation_draft",
       resourceId: generationId,
       requestId: meta.requestId,
@@ -87,5 +107,5 @@ export async function updateGenerationAssignments(companyId, userId, generationI
         },
       },
     });
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }, SERIALIZABLE_OPTIONS));
 }
