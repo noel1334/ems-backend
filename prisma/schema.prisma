@@ -1172,6 +1172,10 @@ model LeaveType {
   name                String
   code                String
   annualEntitlement   Decimal                   @default(0) @db.Decimal(10, 2)
+  minNoticeDays       Int                       @default(0)
+  maxConsecutiveDays  Int?
+  requiresReason      Boolean                   @default(false)
+  allowHalfDay        Boolean                   @default(true)
   carryForwardAllowed Boolean                   @default(false)
   maxCarryForward     Decimal                   @default(0) @db.Decimal(10, 2)
   requiresApproval    Boolean                   @default(true)

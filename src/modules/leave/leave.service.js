@@ -25,6 +25,29 @@ const available = (b) =>
     .minus(b.pending);
 const yearOf = (d) => d.getFullYear();
 
+function assertLeavePolicy(type, { start, days, duration, reason }) {
+  if (duration === "HALF_DAY" && type.allowHalfDay === false) {
+    throw new AppError("Half-day leave is not allowed for this leave type", 400);
+  }
+  if (type.requiresReason && !String(reason ?? "").trim()) {
+    throw new AppError("A reason is required for this leave type", 400);
+  }
+  const noticeDays = Number(type.minNoticeDays ?? 0);
+  if (noticeDays > 0) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const requestedStart = new Date(start);
+    requestedStart.setHours(0, 0, 0, 0);
+    const daysNotice = Math.floor((requestedStart.getTime() - today.getTime()) / 86400000 + 0.5);
+    if (daysNotice < noticeDays) {
+      throw new AppError(`This leave type requires at least ${noticeDays} calendar day(s) of advance notice`, 400);
+    }
+  }
+  if (type.maxConsecutiveDays != null && D(days).gt(type.maxConsecutiveDays)) {
+    throw new AppError(`This leave type allows a maximum of ${type.maxConsecutiveDays} working day(s) per request`, 400);
+  }
+}
+
 async function workingDays(companyId, employeeId, start, end, tx) {
   let total = D(0);
   for (const date of dateRange(start, end)) {
@@ -331,6 +354,7 @@ export async function createRequest(req) {
     await noOverlap(cid, p.employeeId, start, end, duration, p.halfDayPeriod ?? null, null, tx);
     const days = duration === "HALF_DAY" ? D(0.5) : await workingDays(cid, p.employeeId, start, end, tx);
     if (days.isZero() || days.isNegative()) throw new AppError("Leave period contains no working days", 400);
+    assertLeavePolicy(t, { start, days, duration, reason: p.reason });
 
     // Unpaid leave does not consume paid entitlement. Previously the service
     // compared unpaid requests against a zero-day balance, making them impossible.
@@ -384,6 +408,7 @@ export async function updateRequest(req) {
     await noOverlap(cid, r.employeeId, start, end, duration, half, r.id, tx);
     const days = duration === "HALF_DAY" ? D(0.5) : await workingDays(cid, r.employeeId, start, end, tx);
     if (days.isZero() || days.isNegative()) throw new AppError("Leave period contains no working days", 400);
+    assertLeavePolicy(r.leaveType, { start, days, duration, reason: p.reason !== undefined ? p.reason : r.reason });
     const tracksBalance = r.leaveType?.isPaid !== false;
     let b = null;
     if (tracksBalance) {
