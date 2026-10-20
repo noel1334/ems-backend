@@ -8,6 +8,10 @@ router.get("/policies",requirePermission("scheduling","policies","READ"),c.listP
 router.post("/policies",requirePermission("scheduling","policies","CREATE"),c.createPolicy);
 router.get("/policies/:id",requirePermission("scheduling","policies","READ"),c.getPolicy);
 router.patch("/policies/:id",requirePermission("scheduling","policies","UPDATE"),c.updatePolicy);
+router.get("/timetable",requirePermission("scheduling","generations","READ"),c.departmentTimetable);
+// Employees can only query their own published assignments; the service derives
+// the employee link from the authenticated token and revalidates it in the DB.
+router.get("/me",c.myPublishedSchedule);
 router.get("/generations",requirePermission("scheduling","generations","READ"),c.listGenerations);
 router.post("/generations",requirePermission("scheduling","generations","CREATE"),c.generate);
 router.get("/generations/:id",requirePermission("scheduling","generations","READ"),c.getGeneration);

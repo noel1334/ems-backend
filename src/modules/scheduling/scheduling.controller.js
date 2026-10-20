@@ -10,6 +10,8 @@ export const getPolicy=asyncHandler(async(req,res)=>res.json({success:true,data:
 export const updatePolicy=asyncHandler(async(req,res)=>res.json({success:true,data:await service.updatePolicy(cid(req),req.params.id,parse(policyUpdateSchema,req.body))}));
 export const listGenerations=asyncHandler(async(req,res)=>res.json({success:true,...await service.listGenerations(cid(req),parse(generationListSchema,req.query))}));
 export const getGeneration=asyncHandler(async(req,res)=>res.json({success:true,data:await service.getGeneration(cid(req),req.params.id)}));
+export const departmentTimetable=asyncHandler(async(req,res)=>res.json({success:true,data:await service.getPublishedDepartmentTimetable(cid(req),req.query)}));
+export const myPublishedSchedule=asyncHandler(async(req,res)=>res.json({success:true,data:await service.getMyPublishedSchedule(cid(req),actor(req),req.user?.employeeId,req.query)}));
 export const generate=asyncHandler(async(req,res)=>res.status(201).json({success:true,message:"Schedule generated as a draft",data:await service.generate(cid(req),actor(req),parse(generateSchema,req.body),meta(req))}));
 export const approve=asyncHandler(async(req,res)=>res.json({success:true,message:"Schedule generation approved",data:await service.approve(cid(req),actor(req),req.params.id,meta(req))}));
 export const publish=asyncHandler(async(req,res)=>res.json({success:true,message:"Schedule published successfully",data:await service.publish(cid(req),actor(req),req.params.id,meta(req))}));

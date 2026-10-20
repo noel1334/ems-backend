@@ -217,6 +217,108 @@ export async function generate(companyId, userId, input, meta = {}) {
 }
 export async function listGenerations(companyId,q){const page=Math.max(1,Number.parseInt(q.page,10)||1),limit=Math.min(200,Math.max(1,Number.parseInt(q.limit,10)||20)),where={companyId,...(q.status?{status:q.status}:{}),...(q.policyId?{policyId:q.policyId}:{})};const[data,total]=await Promise.all([prisma.scheduleGeneration.findMany({where,orderBy:{createdAt:"desc"},skip:(page-1)*limit,take:limit,include:{policy:{include:{department:true}},_count:{select:{assignments:true}}}}),prisma.scheduleGeneration.count({where})]);return{data,pagination:{page,limit,total,totalPages:Math.ceil(total/limit)}};}
 export async function getGeneration(companyId,id){const r=await prisma.scheduleGeneration.findFirst({where:{companyId,id},include:{policy:{include:{department:true}},assignments:{include:{employee:true,shift:true},orderBy:[{workDate:"asc"},{employeeId:"asc"}]}}});if(!r)throw new AppError("Schedule generation not found",404);return r;}
+
+function parsePublishedScheduleRange(query = {}, maximumDays = 366) {
+  const parseDate = (value, label) => {
+    if (value == null || value === "") return null;
+    const text = String(value).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) throw new AppError(`${label} must use YYYY-MM-DD format`, 400);
+    const parsed = new Date(`${text}T00:00:00.000Z`);
+    if (Number.isNaN(parsed.getTime()) || dateString(parsed) !== text) throw new AppError(`${label} is not a valid calendar date`, 400);
+    return dateKey(parsed);
+  };
+  const start = parseDate(query.startDate, "Start date") || dateKey(new Date());
+  const end = parseDate(query.endDate, "End date") || addDays(start, 30);
+  const days = daysBetween(start, end) + 1;
+  if (days < 1) throw new AppError("End date must be on or after start date", 400);
+  if (days > maximumDays) throw new AppError(`Choose a schedule range of ${maximumDays} days or less`, 400);
+  return { start, end, startText: dateString(start), endText: dateString(end) };
+}
+
+async function publishedAssignmentRows(companyId, range, { departmentId, employeeId } = {}) {
+  const where = {
+    companyId,
+    workDate: { gte: range.start, lte: range.end },
+    ...(employeeId ? { employeeId } : {}),
+    generation: {
+      is: {
+        companyId,
+        status: "PUBLISHED",
+        ...(departmentId ? { policy: { is: { departmentId } } } : {}),
+      },
+    },
+  };
+  // A department can have overlapping historic generations. Read a bounded set,
+  // then keep the most recently published assignment for each employee/date.
+  const records = await prisma.scheduleGenerationAssignment.findMany({
+    where,
+    include: {
+      employee: { select: { id: true, firstName: true, lastName: true, employeeNumber: true, departmentId: true } },
+      shift: { select: { id: true, name: true, code: true, startTime: true, endTime: true, isOvernight: true } },
+      generation: {
+        select: {
+          id: true,
+          status: true,
+          publishedAt: true,
+          startDate: true,
+          endDate: true,
+          policy: { select: { id: true, name: true, departmentId: true, department: { select: { id: true, name: true, code: true } } } },
+        },
+      },
+    },
+    orderBy: [{ workDate: "asc" }, { employeeId: "asc" }],
+    take: 50001,
+  });
+  records.sort((a, b) => {
+    const byDate = dateString(a.workDate).localeCompare(dateString(b.workDate));
+    if (byDate) return byDate;
+    const byEmployee = String(a.employeeId).localeCompare(String(b.employeeId));
+    if (byEmployee) return byEmployee;
+    return new Date(b.generation?.publishedAt || 0).getTime() - new Date(a.generation?.publishedAt || 0).getTime();
+  });
+  const unique = new Map();
+  for (const record of records.slice(0, 50000)) {
+    const key = `${record.employeeId}:${dateString(record.workDate)}`;
+    if (!unique.has(key)) unique.set(key, record);
+  }
+  const items = [...unique.values()].sort((a, b) =>
+    dateString(a.workDate).localeCompare(dateString(b.workDate)) ||
+    String(a.employee?.lastName || "").localeCompare(String(b.employee?.lastName || "")) ||
+    String(a.employee?.firstName || "").localeCompare(String(b.employee?.firstName || "")),
+  );
+  return {
+    items,
+    truncated: records.length > 50000,
+    generationCount: new Set(items.map((row) => row.generation?.id).filter(Boolean)).size,
+  };
+}
+
+export async function getPublishedDepartmentTimetable(companyId, query = {}) {
+  const departmentId = String(query.departmentId || "").trim();
+  if (!departmentId) throw new AppError("Choose a department to view its published timetable", 400);
+  const range = parsePublishedScheduleRange(query, 62);
+  const department = await prisma.department.findFirst({
+    where: { id: departmentId, companyId },
+    select: { id: true, name: true, code: true, isActive: true },
+  });
+  if (!department) throw new AppError("Department not found in this company", 404);
+  const result = await publishedAssignmentRows(companyId, range, { departmentId });
+  return { department, startDate: range.startText, endDate: range.endText, ...result };
+}
+
+export async function getMyPublishedSchedule(companyId, userId, employeeId, query = {}) {
+  if (!companyId || !userId || !employeeId) throw new AppError("This account is not linked to an employee record", 403);
+  const range = parsePublishedScheduleRange(query, 366);
+  // Revalidate the signed-in user's link so a stale token cannot read another
+  // employee record after an administrator changes the account association.
+  const link = await prisma.user.findFirst({
+    where: { id: userId, companyId, employeeId, status: "ACTIVE" },
+    select: { employeeId: true },
+  });
+  if (!link) throw new AppError("This account is not linked to an active employee record in this company", 403);
+  const result = await publishedAssignmentRows(companyId, range, { employeeId });
+  return { startDate: range.startText, endDate: range.endText, ...result };
+}
 export async function approve(companyId,userId,id,meta={}){const g=await getGeneration(companyId,id);if(g.status!=="DRAFT")throw new AppError("Only draft generations can be approved",409);return prisma.$transaction(async tx=>{const u=await tx.scheduleGeneration.update({where:{id},data:{status:"APPROVED",approvedById:userId}});await writeAudit(tx,{companyId,actorUserId:userId,action:"APPROVE",resource:"schedule_generation",resourceId:id,requestId:meta.requestId,metadata:{status:"APPROVED"}});return u;});}
 export async function publish(companyId, userId, id, meta = {}) {
   const generation = await getGeneration(companyId, id);

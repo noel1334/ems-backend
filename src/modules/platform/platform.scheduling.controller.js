@@ -37,6 +37,11 @@ export const updatePolicy = asyncHandler(async (req, res) => {
   const result = await schedulingService.updatePolicy(cid, req.params.policyId, parse(policyUpdateSchema, req.body));
   return res.json({ success: true, message: "Scheduling policy updated", data: result });
 });
+export const timetable = asyncHandler(async (req, res) => {
+  const cid = await companyId(req);
+  const result = await schedulingService.getPublishedDepartmentTimetable(cid, req.query);
+  return res.json({ success: true, data: result });
+});
 export const listGenerations = asyncHandler(async (req, res) => {
   const cid = await companyId(req);
   return res.json({ success: true, ...await schedulingService.listGenerations(cid, parse(generationListSchema, req.query)) });

@@ -82,6 +82,7 @@ router.get("/tenants/:id/scheduling/policies", schedulingController.listPolicies
 router.post("/tenants/:id/scheduling/policies", schedulingController.createPolicy);
 router.get("/tenants/:id/scheduling/policies/:policyId", schedulingController.getPolicy);
 router.patch("/tenants/:id/scheduling/policies/:policyId", schedulingController.updatePolicy);
+router.get("/tenants/:id/scheduling/timetable", schedulingController.timetable);
 router.get("/tenants/:id/scheduling/generations", schedulingController.listGenerations);
 router.post("/tenants/:id/scheduling/generations", schedulingController.generate);
 router.get("/tenants/:id/scheduling/generations/:generationId", schedulingController.getGeneration);
