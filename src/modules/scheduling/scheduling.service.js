@@ -3,6 +3,7 @@ import prisma from "../../config/database.js";
 import AppError from "../../common/errors/AppError.js";
 import { writeAudit } from "../../common/utils/audit.js";
 import { assignBalancedDailyShifts } from "./shift-balancer.js";
+import { completedLeaveRotations, mergeLeaveIntervals } from "./shift-rotation.js";
 const DAY=86400000, dateKey=d=>new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())), addDays=(d,n)=>new Date(d.getTime()+n*DAY), daysBetween=(a,b)=>Math.floor((dateKey(b)-dateKey(a))/DAY), asArray=v=>Array.isArray(v)?v:[], pct=(v,t)=>Math.floor(Number(v||0)*t/100), dateString=d=>dateKey(d).toISOString().slice(0,10);
 const SERIALIZABLE_OPTIONS = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10_000, timeout: 30_000 };
 async function runSerializableTransaction(work, maxRetries = 2) {
@@ -55,6 +56,15 @@ export async function generate(companyId, userId, input, meta = {}) {
       });
       if (shifts.length !== new Set(selectedShiftIds).size) throw new AppError("One or more selected shifts are inactive or belong to another company", 409);
       if (!shifts.length) throw new AppError("Shift scheduling is enabled but no selected active shifts are available", 409);
+      // Use working-time order for post-leave rotation (morning -> evening -> night).
+      // Overnight shifts starting after midnight sort after evening shifts, not first.
+      const shiftStartOrder = (shift) => {
+        const [hour = "0", minute = "0"] = String(shift.startTime || "00:00").slice(0, 5).split(":");
+        let value = Number(hour) * 60 + Number(minute);
+        if (shift.isOvernight && value < 6 * 60) value += 24 * 60;
+        return value;
+      };
+      shifts.sort((a, b) => shiftStartOrder(a) - shiftStartOrder(b) || String(a.code || a.name || a.id).localeCompare(String(b.code || b.name || b.id)));
     }
 
     const holidays = await tx.holiday.findMany({
@@ -117,6 +127,19 @@ export async function generate(companyId, userId, input, meta = {}) {
       }
     }
 
+    // A single continuous absence (automatic or approved leave) advances an employee
+    // by one shift when they return. Overlapping/adjacent leave records count as one.
+    const leaveIntervalsByEmployee = new Map();
+    for (const employee of employees) {
+      const intervals = [];
+      const automaticRange = leaveRanges.get(employee.id);
+      if (automaticRange) intervals.push(automaticRange);
+      for (const leave of leavesByEmployee.get(employee.id) || []) {
+        intervals.push({ start: leave.startDate, end: leave.endDate });
+      }
+      leaveIntervalsByEmployee.set(employee.id, mergeLeaveIntervals(intervals));
+    }
+
     const isNightShift = (shift) => {
       const startTime = String(shift.startTime || "").slice(0, 5);
       return Boolean(shift.isOvernight) || startTime >= "18:00" || (!!startTime && startTime < "06:00");
@@ -134,11 +157,8 @@ export async function generate(companyId, userId, input, meta = {}) {
     // distinguish work, leave, rest and holiday days rather than guessing from missing rows.
     for (let date = start; date <= end; date = addDays(date, 1)) {
       const scheduledWorkingDay = working(date, policy);
-      // Keep shift assignments stable for a full rotation block. A configured
-      // rotationDays of 14 means fortnightly rotation; otherwise use weekly blocks.
-      // Daily shift switching is unsafe for night workers and makes the roster hard to follow.
-      const shiftRotationDays = Number(policy.rotationDays) >= 14 ? 14 : 7;
-      const cycle = policy.rotationEnabled ? Math.floor(daysBetween(start, date) / shiftRotationDays) : 0;
+      // Shift assignment is stable for the entire schedule. Rotation is triggered by
+      // completing a leave block, not by the passage of a day or week.
       const holiday = holidayForDate(date);
       for (let index = 0; index < employees.length; index++) {
         const employee = employees[index];
@@ -176,7 +196,10 @@ export async function generate(companyId, userId, input, meta = {}) {
             if (policy.shiftEnabled) shiftId = null;
           }
         }
-        rows.push({ companyId, employeeId: employee.id, departmentId: employee.departmentId, workDate: date, status, shiftId, shiftCycle: cycle, leaveGroup, reason });
+        const shiftCycle = policy.rotationEnabled
+          ? completedLeaveRotations(leaveIntervalsByEmployee.get(employee.id), date)
+          : 0;
+        rows.push({ companyId, employeeId: employee.id, departmentId: employee.departmentId, workDate: date, status, shiftId, shiftCycle, leaveGroup, reason });
       }
 
       if (policy.shiftEnabled && shifts.length) {
@@ -185,14 +208,14 @@ export async function generate(companyId, userId, input, meta = {}) {
         const preferredShiftByEmployee = new Map();
         for (let index = 0; index < employees.length; index++) {
           const employee = employees[index];
-          const automaticRange = leaveRanges.get(employee.id);
-          // After an employee completes their automatic-leave block, rotate them
-          // to the next shift instead of returning them to the same night shift.
-          const returnedFromAutomaticLeave = Boolean(automaticRange && date > automaticRange.end);
-          const leaveRotation = returnedFromAutomaticLeave ? 1 : 0;
+          const completedLeaveCount = policy.rotationEnabled
+            ? completedLeaveRotations(leaveIntervalsByEmployee.get(employee.id), date)
+            : 0;
+          // Keep the same shift before and throughout leave; move to the next selected
+          // shift only on return. This applies equally to two-shift and three-shift teams.
           preferredShiftByEmployee.set(
             employee.id,
-            shifts[(index + cycle + leaveRotation) % shifts.length].id,
+            shifts[(index + completedLeaveCount) % shifts.length].id,
           );
         }
         const balanced = assignBalancedDailyShifts({
@@ -204,9 +227,9 @@ export async function generate(companyId, userId, input, meta = {}) {
           lastWorkShift,
           employeeShiftCounts,
           shiftTotals,
-          // Consecutive night assignments are permitted inside a stable 7/14-day
-          // block. The employee rotates off nights at the block boundary or after
-          // their automatic-leave block; daily forced swaps cause unsafe roster churn.
+          // Preserve each employee's preferred shift instead of rebalancing them onto
+          // another shift when colleagues are on leave. Review coverage separately.
+          preservePreferredAssignments: true,
           preventConsecutiveNightShifts: false,
           isNightShift,
           daysBetween,
@@ -218,6 +241,8 @@ export async function generate(companyId, userId, input, meta = {}) {
     const notes = [
       `Generated ${calendarDays} calendar days for ${employees.length} active employees (${rows.length} employee-day records).`,
       `${holidaySlots} holiday OFF slots; ${approvedLeaveSlots} approved-leave slots; ${automaticLeaveSlots} automatically staggered leave slots.`,
+      policy.shiftEnabled && policy.rotationEnabled ? "Stable shift assignments enabled: employees move to the next selected shift only after completing a leave block. Daily/weekly rotation does not force shift changes." : null,
+      policy.shiftEnabled && policy.rotationEnabled ? "Shift headcounts may be uneven while employees are on leave; review coverage before approving or publishing." : null,
       nightAdjustments ? `${nightAdjustments} assignments adjusted to reduce consecutive night shifts.` : null,
       holidayMode === "WORK_AS_NORMAL" ? "Holiday policy treats all listed holidays as normal workdays." : null,
     ].filter(Boolean).join("\n");

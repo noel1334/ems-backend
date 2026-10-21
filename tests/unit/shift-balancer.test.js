@@ -9,7 +9,7 @@ const shifts = [
 ];
 const isNightShift = (shift) => Boolean(shift.isOvernight) || String(shift.startTime || "").slice(0, 5) >= "18:00" || (!!shift.startTime && String(shift.startTime).slice(0, 5) < "06:00");
 
-function allocate({ workEmployeeIds, preferred, lastWorkShift = new Map(), preventConsecutiveNightShifts = false, dayIndex = 0 }) {
+function allocate({ workEmployeeIds, preferred, lastWorkShift = new Map(), preventConsecutiveNightShifts = false, preservePreferredAssignments = false, dayIndex = 0 }) {
   const rows = workEmployeeIds.map((employeeId) => ({ employeeId, status: "WORK", shiftId: null, reason: null }));
   const shiftTotals = new Map(shifts.map((shift) => [shift.id, 0]));
   const employeeShiftCounts = new Map();
@@ -23,6 +23,7 @@ function allocate({ workEmployeeIds, preferred, lastWorkShift = new Map(), preve
     employeeShiftCounts,
     shiftTotals,
     preventConsecutiveNightShifts,
+    preservePreferredAssignments,
     isNightShift,
     daysBetween,
   });
@@ -38,6 +39,22 @@ describe("balanced daily shift allocation", () => {
     const preferred = new Map([["e1", "day"], ["e2", "day"], ["e3", "day"], ["e4", "night"], ["e5", "night"]]);
     const { rows } = allocate({ workEmployeeIds: ["e1", "e2", "e3", "e4", "e5"], preferred });
     expect(counts(rows)).toEqual({ night: 2, day: 3 });
+  });
+
+  it("keeps each employee on their preferred shift instead of moving them to rebalance leave gaps", () => {
+    const preferred = new Map([["e1", "day"], ["e2", "day"], ["e3", "day"], ["e4", "night"], ["e5", "night"]]);
+    const { rows } = allocate({
+      workEmployeeIds: ["e1", "e2", "e3", "e4"],
+      preferred,
+      preservePreferredAssignments: true,
+      dayIndex: 22,
+    });
+    expect(Object.fromEntries(rows.map((row) => [row.employeeId, row.shiftId]))).toEqual({
+      e1: "day", e2: "day", e3: "day", e4: "night",
+    });
+    // Stable shift assignment intentionally allows 3/1 coverage rather than
+    // moving a day-shift employee onto nights only to force a 2/2 balance.
+    expect(counts(rows)).toEqual({ day: 3, night: 1 });
   });
 
   it("rebalances when one usual day-shift employee is on leave", () => {

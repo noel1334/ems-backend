@@ -16,10 +16,32 @@ export function assignBalancedDailyShifts({
   employeeShiftCounts,
   shiftTotals,
   preventConsecutiveNightShifts,
+  preservePreferredAssignments = false,
   isNightShift,
   daysBetween,
 }) {
   if (!workRows.length || !shifts.length) return { nightAdjustments: 0 };
+
+  if (preservePreferredAssignments) {
+    const shiftById = new Map(shifts.map((shift) => [shift.id, shift]));
+    for (let index = 0; index < workRows.length; index++) {
+      const row = workRows[index];
+      const preferredId = preferredShiftByEmployee.get(row.employeeId);
+      const shift = shiftById.get(preferredId) || shifts[index % shifts.length];
+      row.shiftId = shift.id;
+      const previous = lastWorkShift.get(row.employeeId);
+      if (previous && previous.shiftId !== shift.id) {
+        // The change should only be requested by the leave-return rotation in the service.
+        row.reason = row.reason || "Shift rotation after leave return";
+      }
+      lastWorkShift.set(row.employeeId, { date, isNight: isNightShift(shift), shiftId: shift.id });
+      const history = employeeShiftCounts.get(row.employeeId) || new Map();
+      history.set(shift.id, (history.get(shift.id) || 0) + 1);
+      employeeShiftCounts.set(row.employeeId, history);
+      shiftTotals.set(shift.id, (shiftTotals.get(shift.id) || 0) + 1);
+    }
+    return { nightAdjustments: 0 };
+  }
 
   const countByPreferredShift = new Map(shifts.map((shift) => [shift.id, 0]));
   for (const row of workRows) {
