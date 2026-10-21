@@ -1,5 +1,6 @@
 import prisma from "../../config/database.js";
 import AppError from "../../common/errors/AppError.js";
+import { checkIn as recordCheckIn, checkOut as recordCheckOut, startBreak as recordBreakStart, endBreak as recordBreakEnd } from "../attendance/attendance.service.js";
 import { addDays, endOfDay, startOfDay } from "date-fns";
 import {
   checkIn as recordAttendanceCheckIn,
@@ -19,7 +20,7 @@ const employeeForUser = async (userId, companyId) => {
 
 const range = (from, to) => {
   const start = from ? new Date(from) : new Date(Date.now() - 30 * 86400000);
-  const end = to ? new Date(to) : new Date(Date.now() + 30 * 86400000);
+  const end = to ? new Date(to) : new Date();
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
     throw new AppError("Invalid date range", 400, "INVALID_DATE_RANGE");
   }
@@ -125,4 +126,37 @@ export const startMyAttendanceBreak = async ({ userId, companyId, breakName }) =
 export const endMyAttendanceBreak = async ({ userId, companyId }) => {
   const record = await myOpenAttendance({ userId, companyId });
   return endAttendanceBreak({ companyId, attendanceId: record.id, source: "WEB" });
+};
+
+
+// Employee clock actions resolve the linked employee from the authenticated user.
+// The client never supplies an employeeId, preventing attendance spoofing across staff.
+export const checkInForMe = async ({ userId, companyId, ipAddress, userAgent }) => {
+  const employeeId = await employeeForUser(userId, companyId);
+  return recordCheckIn({ companyId, employeeId, occurredAt: new Date(), source: "WEB", ipAddress, userAgent });
+};
+
+export const checkOutForMe = async ({ userId, companyId, ipAddress, userAgent }) => {
+  const employeeId = await employeeForUser(userId, companyId);
+  return recordCheckOut({ companyId, employeeId, occurredAt: new Date(), source: "WEB", ipAddress, userAgent });
+};
+
+const assertOwnAttendance = async ({ userId, companyId, attendanceId }) => {
+  const employeeId = await employeeForUser(userId, companyId);
+  const attendance = await prisma.attendance.findFirst({
+    where: { id: attendanceId, companyId, employeeId },
+    select: { id: true },
+  });
+  if (!attendance) throw new AppError("Attendance record not found for your account", 404, "ATTENDANCE_NOT_FOUND");
+  return attendance.id;
+};
+
+export const startMyBreak = async ({ userId, companyId, attendanceId, breakName }) => {
+  const ownAttendanceId = await assertOwnAttendance({ userId, companyId, attendanceId });
+  return recordBreakStart({ companyId, attendanceId: ownAttendanceId, breakName: String(breakName || "Break").slice(0, 100), occurredAt: new Date(), source: "WEB" });
+};
+
+export const endMyBreak = async ({ userId, companyId, attendanceId }) => {
+  const ownAttendanceId = await assertOwnAttendance({ userId, companyId, attendanceId });
+  return recordBreakEnd({ companyId, attendanceId: ownAttendanceId, occurredAt: new Date(), source: "WEB" });
 };

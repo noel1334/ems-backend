@@ -40,3 +40,8 @@ export const endAttendanceBreak = async (req, res, next) => {
     res.status(200).json({ success: true, message: "Break ended", data });
   } catch (error) { next(error); }
 };
+
+export const checkIn = async (req, res, next) => { try { res.status(200).json({ success: true, message: "You are checked in", data: await service.checkInForMe({ ...context(req), ipAddress: req.ip, userAgent: req.get("user-agent") }) }); } catch (e) { next(e); } };
+export const checkOut = async (req, res, next) => { try { res.status(200).json({ success: true, message: "You are checked out", data: await service.checkOutForMe({ ...context(req), ipAddress: req.ip, userAgent: req.get("user-agent") }) }); } catch (e) { next(e); } };
+export const startBreak = async (req, res, next) => { try { res.status(200).json({ success: true, message: "Break started", data: await service.startMyBreak({ ...context(req), attendanceId: req.params.attendanceId, breakName: req.body?.breakName }) }); } catch (e) { next(e); } };
+export const endBreak = async (req, res, next) => { try { res.status(200).json({ success: true, message: "Break ended", data: await service.endMyBreak({ ...context(req), attendanceId: req.params.attendanceId }) }); } catch (e) { next(e); } };
