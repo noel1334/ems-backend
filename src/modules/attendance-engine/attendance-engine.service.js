@@ -38,6 +38,10 @@ const employeesForCompany = (companyId, tx) =>
 
 export const processAttendanceRange = async ({ companyId, from, to, employeeId }) => {
   const { start, end } = dayRange(from, to);
+  const today = startOfDay(new Date());
+  if (end > today) {
+    throw new AppError("Attendance can only be processed through today; future dates cannot be processed", 400, "FUTURE_ATTENDANCE_RANGE");
+  }
   const employees = employeeId
     ? await prisma.employee.findMany({
         where: { companyId, id: employeeId, employmentStatus: "ACTIVE" },

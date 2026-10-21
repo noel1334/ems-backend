@@ -9,6 +9,7 @@ import {
     endBreakController,
     getAttendanceController,
     listAttendanceController,
+    listAttendanceEventsController,
     getEmployeeAttendanceController,
     correctAttendanceController,
     approveAttendanceController,
@@ -86,6 +87,12 @@ router.get(
         "READ",
     ),
     attendanceReportController,
+);
+
+router.get(
+    "/events",
+    permissionMiddleware("attendance", "attendance", "READ"),
+    listAttendanceEventsController,
 );
 
 router.get(

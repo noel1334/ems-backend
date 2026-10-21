@@ -272,3 +272,51 @@ export const findEmployeeById = async (employeeId, companyId, tx = prisma) =>
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           },
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               ],
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 });
+
+/** List tenant-scoped attendance events for the audit timeline. */
+export const listAttendanceEvents = async ({
+  companyId,
+  where = {},
+  skip = 0,
+  take = 20,
+  orderBy = { occurredAt: "desc" },
+}) => {
+  const scopedWhere = {
+    ...where,
+    attendance: {
+      ...(where.attendance ?? {}),
+      companyId,
+    },
+  };
+
+  const [items, total] = await prisma.$transaction([
+    prisma.attendanceEvent.findMany({
+      where: scopedWhere,
+      include: {
+        attendance: {
+          select: {
+            id: true,
+            employeeId: true,
+            attendanceDate: true,
+            status: true,
+            employee: {
+              select: {
+                id: true,
+                employeeNumber: true,
+                firstName: true,
+                middleName: true,
+                lastName: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy,
+      skip,
+      take,
+    }),
+    prisma.attendanceEvent.count({ where: scopedWhere }),
+  ]);
+
+  return { items, total };
+};

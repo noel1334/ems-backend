@@ -46,6 +46,17 @@ export const listAttendanceSchema = z.object({
     sortOrder: z.enum(["asc", "desc"]).default("desc"),
 });
 
+export const attendanceEventQuerySchema = z.object({
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    employeeId: uuidSchema.optional(),
+    from: dateSchema.optional(),
+    to: dateSchema.optional(),
+    type: z.enum(["CHECK_IN", "CHECK_OUT", "BREAK_START", "BREAK_END", "CORRECTION"]).optional(),
+    source: z.enum(["WEB", "MOBILE", "ADMIN", "HR", "TERMINAL", "BIOMETRIC", "SYSTEM"]).optional(),
+    sortOrder: z.enum(["asc", "desc"]).default("desc"),
+});
+
 export const checkInSchema = z.object({
     employeeId: uuidSchema.optional(),
 

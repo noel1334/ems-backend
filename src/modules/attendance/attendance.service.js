@@ -27,6 +27,7 @@ import {
     listAttendances,
     findAttendanceForEmployeeRange,
     findAttendanceRange,
+    listAttendanceEvents as listAttendanceEventsRepository,
 } from "./attendance.repository.js";
 
 const DEFAULT_GRACE_MINUTES = 0;
@@ -726,37 +727,26 @@ export const checkOut = async ({
     userAgent,
 }) => {
     return prisma.$transaction(async (tx) => {
-        const today =
-            startOfDay(occurredAt);
+        const today = startOfDay(occurredAt);
+        const yesterday = startOfDay(addDays(occurredAt, -1));
 
-        let attendance =
-            await findAttendanceByEmployeeAndDate(
-                employeeId,
-                today,
-                tx,
-            );
-
-        /*
-             * Overnight shift:
-                  * If today's record does not exist, inspect
-                       * yesterday's attendance for an open shift.
-                            */
-        if (!attendance) {
-            attendance =
-                await findAttendanceByEmployeeAndDate(
-                    employeeId,
-                    startOfDay(
-                        addDays(occurredAt, -1),
-                    ),
-                    tx,
-                );
-        }
+        // Prefer an actually open shift, not merely today's date row. A generated
+        // REST_DAY/ABSENT row for today must not hide an overnight shift started yesterday.
+        const [todayRecord, yesterdayRecord] = await Promise.all([
+            findAttendanceByEmployeeAndDate(employeeId, today, tx),
+            findAttendanceByEmployeeAndDate(employeeId, yesterday, tx),
+        ]);
+        const candidates = [todayRecord, yesterdayRecord].filter(Boolean);
+        let attendance = candidates.find((record) => record.checkInAt && !record.checkOutAt) ?? null;
 
         if (!attendance) {
-            throw new AppError(
-                "No active attendance record found for checkout",
-                404,
-            );
+            if (candidates.some((record) => record.checkInAt && record.checkOutAt)) {
+                throw new AppError("Employee has already checked out", 409);
+            }
+            if (candidates.length) {
+                throw new AppError("Employee has not checked in", 409);
+            }
+            throw new AppError("No active attendance record found for checkout", 404);
         }
 
         if (attendance.isLocked) {
@@ -790,6 +780,11 @@ export const checkOut = async ({
                 "Checkout time cannot be before check-in time",
                 400,
             );
+        }
+
+        const openBreak = await findOpenBreak(attendance.id, tx);
+        if (openBreak) {
+            throw new AppError("End the active break before checking out", 409);
         }
 
         await updateAttendance(
@@ -1135,6 +1130,59 @@ export const listAttendance = async ({
     };
 };
 
+export const listAttendanceEvents = async ({
+    companyId,
+    page = 1,
+    limit = 20,
+    employeeId,
+    type,
+    source,
+    from,
+    to,
+    sortOrder = "desc",
+}) => {
+    const where = {};
+    if (type) where.type = type;
+    if (source) where.source = source;
+    if (from || to) {
+        where.occurredAt = {};
+        if (from) {
+            if (Number.isNaN(new Date(from).getTime())) {
+                throw new AppError("Invalid event start date", 400);
+            }
+            where.occurredAt.gte = startOfDay(new Date(from));
+        }
+        if (to) {
+            if (Number.isNaN(new Date(to).getTime())) {
+                throw new AppError("Invalid event end date", 400);
+            }
+            where.occurredAt.lte = endOfDay(new Date(to));
+        }
+    }
+    if (from && to && new Date(from) > new Date(to)) {
+        throw new AppError("The event start date must be on or before the end date", 400);
+    }
+    if (employeeId) {
+        where.attendance = { employeeId };
+    }
+
+    const skip = (page - 1) * limit;
+    const result = await listAttendanceEventsRepository({
+        companyId,
+        where,
+        skip,
+        take: limit,
+        orderBy: { occurredAt: sortOrder },
+    });
+
+    return {
+        ...result,
+        page,
+        limit,
+        totalPages: Math.ceil(result.total / limit),
+    };
+};
+
 export const correctAttendance = async ({
     companyId,
     id,
@@ -1164,6 +1212,12 @@ export const correctAttendance = async ({
                 );
             }
 
+            const nextCheckInAt = data.checkInAt !== undefined ? data.checkInAt : attendance.checkInAt;
+            const nextCheckOutAt = data.checkOutAt !== undefined ? data.checkOutAt : attendance.checkOutAt;
+            if (nextCheckInAt && nextCheckOutAt && new Date(nextCheckOutAt) < new Date(nextCheckInAt)) {
+                throw new AppError("Checkout time cannot be before check-in time", 400);
+            }
+
             const updated =
                 await updateAttendance(
                     attendance.id,
@@ -1188,10 +1242,8 @@ export const correctAttendance = async ({
                             }
                             : {}),
 
-                        status:
-                            data.status ??
-                            "CORRECTED",
-
+                        correctionReason: data.reason,
+                        status: data.status ?? "CORRECTED",
                         approvalStatus: "PENDING",
                     },
                     tx,
@@ -1383,7 +1435,11 @@ export const generateEmployeeAttendance = async ({
                                         .scheduledStartAt,
                                 )
                                 : null,
-                        status: "ABSENT",
+                        // A missing record is ABSENT only after the scheduled shift/day has ended.
+                        // Processing today's attendance before shift end must not prematurely mark staff absent.
+                        status: new Date() > (context.shiftWindow?.scheduledEndAt ?? endOfDay(current))
+                            ? "ABSENT"
+                            : "INCOMPLETE",
                     });
             }
         }

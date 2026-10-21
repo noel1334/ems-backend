@@ -1,5 +1,12 @@
 import prisma from "../../config/database.js";
 import AppError from "../../common/errors/AppError.js";
+import { addDays, endOfDay, startOfDay } from "date-fns";
+import {
+  checkIn as recordAttendanceCheckIn,
+  checkOut as recordAttendanceCheckOut,
+  startBreak as startAttendanceBreak,
+  endBreak as endAttendanceBreak,
+} from "../attendance/attendance.service.js";
 
 const employeeForUser = async (userId, companyId) => {
   const user = await prisma.user.findFirst({
@@ -41,7 +48,7 @@ export const getMyAttendance = async ({ userId, companyId, from, to, page = 1, l
   const take = Math.min(Math.max(Number(limit) || 31, 1), 100);
   const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
   const [items, total] = await prisma.$transaction([
-    prisma.attendance.findMany({ where, orderBy: { attendanceDate: "desc" }, skip, take, include: { shift: { select: { id: true, name: true, code: true } } } }),
+    prisma.attendance.findMany({ where, orderBy: { attendanceDate: "desc" }, skip, take, include: { shift: { select: { id: true, name: true, code: true } }, breaks: { orderBy: { breakStartAt: "asc" } } } }),
     prisma.attendance.count({ where }),
   ]);
   return { items, pagination: { page: Math.floor(skip / take) + 1, limit: take, total, pages: Math.ceil(total / take) } };
@@ -79,4 +86,43 @@ export const getMyPayslips = async ({ userId, companyId, page = 1, limit = 12 })
     prisma.payrollItem.count({ where }),
   ]);
   return { items, pagination: { page: Math.floor(skip / take) + 1, limit: take, total, pages: Math.ceil(total / take) } };
+};
+
+
+const myOpenAttendance = async ({ userId, companyId }) => {
+  const employeeId = await employeeForUser(userId, companyId);
+  const now = new Date();
+  const record = await prisma.attendance.findFirst({
+    where: {
+      companyId,
+      employeeId,
+      attendanceDate: { gte: startOfDay(addDays(now, -1)), lte: endOfDay(now) },
+      checkInAt: { not: null },
+      checkOutAt: null,
+      isLocked: false,
+    },
+    orderBy: { attendanceDate: "desc" },
+  });
+  if (!record) throw new AppError("No open attendance session was found. Check in first.", 409, "NO_OPEN_ATTENDANCE");
+  return record;
+};
+
+export const checkInMyAttendance = async ({ userId, companyId, ipAddress, userAgent }) => {
+  const employeeId = await employeeForUser(userId, companyId);
+  return recordAttendanceCheckIn({ companyId, employeeId, source: "WEB", ipAddress, userAgent });
+};
+
+export const checkOutMyAttendance = async ({ userId, companyId, ipAddress, userAgent }) => {
+  const employeeId = await employeeForUser(userId, companyId);
+  return recordAttendanceCheckOut({ companyId, employeeId, source: "WEB", ipAddress, userAgent });
+};
+
+export const startMyAttendanceBreak = async ({ userId, companyId, breakName }) => {
+  const record = await myOpenAttendance({ userId, companyId });
+  return startAttendanceBreak({ companyId, attendanceId: record.id, breakName: breakName || "Break", source: "WEB" });
+};
+
+export const endMyAttendanceBreak = async ({ userId, companyId }) => {
+  const record = await myOpenAttendance({ userId, companyId });
+  return endAttendanceBreak({ companyId, attendanceId: record.id, source: "WEB" });
 };

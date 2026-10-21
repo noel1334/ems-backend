@@ -10,11 +10,14 @@ import {
     getAttendance,
     getEmployeeAttendance,
     listAttendance,
+    listAttendanceEvents,
     correctAttendance,
     approveAttendance,
     generateEmployeeAttendance,
     getAttendanceReport,
 } from "./attendance.service.js";
+import { attendanceEventQuerySchema } from "./attendance.validation.js";
+import AppError from "../../common/errors/AppError.js";
 
 export const checkInController =
     asyncHandler(async (req, res) => {
@@ -158,6 +161,25 @@ export const endBreakController =
             message: "Break ended",
             data: result,
         });
+    });
+
+export const listAttendanceEventsController =
+    asyncHandler(async (req, res) => {
+        // Validate query values without assigning to req.query (a getter in Express 5).
+        const parsed = attendanceEventQuerySchema.safeParse(req.query);
+        if (!parsed.success) {
+            throw new AppError("Invalid attendance event filters", 400, {
+                code: "VALIDATION_ERROR",
+                details: parsed.error.flatten(),
+            });
+        }
+
+        const result = await listAttendanceEvents({
+            companyId: req.user.companyId,
+            ...parsed.data,
+        });
+
+        return res.status(200).json({ success: true, data: result });
     });
 
 export const getAttendanceController =
