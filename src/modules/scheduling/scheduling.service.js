@@ -134,7 +134,11 @@ export async function generate(companyId, userId, input, meta = {}) {
     // distinguish work, leave, rest and holiday days rather than guessing from missing rows.
     for (let date = start; date <= end; date = addDays(date, 1)) {
       const scheduledWorkingDay = working(date, policy);
-      const cycle = policy.rotationEnabled && policy.rotationDays ? Math.floor(daysBetween(start, date) / policy.rotationDays) : 0;
+      // Keep shift assignments stable for a full rotation block. A configured
+      // rotationDays of 14 means fortnightly rotation; otherwise use weekly blocks.
+      // Daily shift switching is unsafe for night workers and makes the roster hard to follow.
+      const shiftRotationDays = Number(policy.rotationDays) >= 14 ? 14 : 7;
+      const cycle = policy.rotationEnabled ? Math.floor(daysBetween(start, date) / shiftRotationDays) : 0;
       const holiday = holidayForDate(date);
       for (let index = 0; index < employees.length; index++) {
         const employee = employees[index];
@@ -180,7 +184,16 @@ export async function generate(companyId, userId, input, meta = {}) {
         const workingRows = dailyRows.filter((row) => row.status === "WORK");
         const preferredShiftByEmployee = new Map();
         for (let index = 0; index < employees.length; index++) {
-          preferredShiftByEmployee.set(employees[index].id, shifts[(index + cycle) % shifts.length].id);
+          const employee = employees[index];
+          const automaticRange = leaveRanges.get(employee.id);
+          // After an employee completes their automatic-leave block, rotate them
+          // to the next shift instead of returning them to the same night shift.
+          const returnedFromAutomaticLeave = Boolean(automaticRange && date > automaticRange.end);
+          const leaveRotation = returnedFromAutomaticLeave ? 1 : 0;
+          preferredShiftByEmployee.set(
+            employee.id,
+            shifts[(index + cycle + leaveRotation) % shifts.length].id,
+          );
         }
         const balanced = assignBalancedDailyShifts({
           workRows: workingRows,
@@ -191,7 +204,10 @@ export async function generate(companyId, userId, input, meta = {}) {
           lastWorkShift,
           employeeShiftCounts,
           shiftTotals,
-          preventConsecutiveNightShifts: Boolean(policy.preventConsecutiveNightShifts),
+          // Consecutive night assignments are permitted inside a stable 7/14-day
+          // block. The employee rotates off nights at the block boundary or after
+          // their automatic-leave block; daily forced swaps cause unsafe roster churn.
+          preventConsecutiveNightShifts: false,
           isNightShift,
           daysBetween,
         });
