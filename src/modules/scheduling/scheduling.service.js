@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "../../config/database.js";
 import AppError from "../../common/errors/AppError.js";
 import { writeAudit } from "../../common/utils/audit.js";
+import { assignBalancedDailyShifts } from "./shift-balancer.js";
 const DAY=86400000, dateKey=d=>new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())), addDays=(d,n)=>new Date(d.getTime()+n*DAY), daysBetween=(a,b)=>Math.floor((dateKey(b)-dateKey(a))/DAY), asArray=v=>Array.isArray(v)?v:[], pct=(v,t)=>Math.floor(Number(v||0)*t/100), dateString=d=>dateKey(d).toISOString().slice(0,10);
 const SERIALIZABLE_OPTIONS = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10_000, timeout: 30_000 };
 async function runSerializableTransaction(work, maxRetries = 2) {
@@ -121,6 +122,8 @@ export async function generate(companyId, userId, input, meta = {}) {
       return Boolean(shift.isOvernight) || startTime >= "18:00" || (!!startTime && startTime < "06:00");
     };
     const lastWorkShift = new Map();
+    const employeeShiftCounts = new Map();
+    const shiftTotals = new Map((shifts || []).map((shift) => [shift.id, 0]));
     const rows = [];
     let holidaySlots = 0;
     let approvedLeaveSlots = 0;
@@ -162,24 +165,37 @@ export async function generate(companyId, userId, input, meta = {}) {
           } else {
             status = "WORK";
             reason = null;
-            if (policy.shiftEnabled) {
-              const baseShift = shifts[(index + cycle) % shifts.length];
-              let chosenShift = baseShift;
-              const previous = lastWorkShift.get(employee.id);
-              if (policy.preventConsecutiveNightShifts && previous && daysBetween(previous.date, date) === 1 && previous.isNight && isNightShift(baseShift)) {
-                const alternative = shifts.find((candidate) => !isNightShift(candidate));
-                if (alternative) {
-                  chosenShift = alternative;
-                  nightAdjustments++;
-                  reason = "Shift adjusted to avoid consecutive night shifts";
-                }
-              }
-              shiftId = chosenShift.id;
-              lastWorkShift.set(employee.id, { date, isNight: isNightShift(chosenShift) });
-            }
+            // Keep the policy's normal rotation as the preferred assignment. Once
+            // leave/rest/holiday statuses are known for this date, rebalance the WORK
+            // employees so one shift is not left understaffed just because its usual
+            // members are on leave.
+            if (policy.shiftEnabled) shiftId = null;
           }
         }
         rows.push({ companyId, employeeId: employee.id, departmentId: employee.departmentId, workDate: date, status, shiftId, shiftCycle: cycle, leaveGroup, reason });
+      }
+
+      if (policy.shiftEnabled && shifts.length) {
+        const dailyRows = rows.slice(-employees.length);
+        const workingRows = dailyRows.filter((row) => row.status === "WORK");
+        const preferredShiftByEmployee = new Map();
+        for (let index = 0; index < employees.length; index++) {
+          preferredShiftByEmployee.set(employees[index].id, shifts[(index + cycle) % shifts.length].id);
+        }
+        const balanced = assignBalancedDailyShifts({
+          workRows: workingRows,
+          shifts,
+          preferredShiftByEmployee,
+          date,
+          dayIndex: daysBetween(start, date),
+          lastWorkShift,
+          employeeShiftCounts,
+          shiftTotals,
+          preventConsecutiveNightShifts: Boolean(policy.preventConsecutiveNightShifts),
+          isNightShift,
+          daysBetween,
+        });
+        nightAdjustments += balanced.nightAdjustments;
       }
     }
 
