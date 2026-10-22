@@ -11,6 +11,7 @@ import {
     getEmployeeSchedules,
     assignShift,
     getEmployeeShifts,
+    getAttendanceCalendar,
 } from "./schedule.controller.js";
 
 import { authenticate } from "../../middleware/auth.middleware.js";
@@ -44,6 +45,16 @@ router.post(
         "CREATE"
     ),
     createSchedule
+);
+
+router.get(
+    "/calendar",
+    requirePermission(
+        "schedules",
+        "schedule",
+        "READ"
+    ),
+    getAttendanceCalendar
 );
 
 router.get(
