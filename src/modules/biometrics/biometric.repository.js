@@ -37,3 +37,35 @@ export const findActiveByEmployeeType = (companyId, employeeId, type, tx = prism
 
 export const findByTemplateHash = (companyId, type, templateHash, tx = prisma) =>
   tx.biometricRecord.findFirst({ where: { companyId, type, templateHash, status: "ACTIVE" }, include: { employee: true } });
+
+export const findActiveFacesByCompany = (companyId, tx = prisma) =>
+  tx.biometricRecord.findMany({
+    where: { companyId, type: "FACE", status: "ACTIVE", provider: "face-api.js" },
+    select: {
+      id: true,
+      companyId: true,
+      employeeId: true,
+      metadata: true,
+      employee: { select: { id: true, employeeNumber: true, firstName: true, middleName: true, lastName: true } },
+    },
+  });
+
+export const revokeFaceRecord = (id, companyId, employeeId, tx = prisma) =>
+  tx.$transaction(async (transaction) => {
+    // The current schema permits only one record per employee/type/status.
+    // Older revoked FACE records have no descriptor and may be removed when a later
+    // enrollment is revoked, avoiding a unique-index conflict without touching attendance.
+    await transaction.biometricRecord.deleteMany({
+      where: {
+        companyId,
+        employeeId,
+        type: "FACE",
+        status: "REVOKED",
+        id: { not: id },
+      },
+    });
+    return transaction.biometricRecord.updateMany({
+      where: { id, companyId },
+      data: { status: "REVOKED", metadata: null, templateHash: null, templateReference: null },
+    });
+  });

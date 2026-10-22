@@ -86,7 +86,11 @@ export const get = async (companyId, id) => {
 export const revoke = async (companyId, id) => {
   const record = await repository.findById(companyId, id);
   if (!record) throw new AppError("Biometric record not found", 404);
-  await repository.update(id, companyId, { status: "REVOKED" });
+  if (record.type === "FACE") {
+    await repository.revokeFaceRecord(id, companyId, record.employeeId);
+  } else {
+    await repository.update(id, companyId, { status: "REVOKED" });
+  }
   return { ...publicRecord(record), status: "REVOKED" };
 };
 

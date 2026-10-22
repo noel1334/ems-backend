@@ -1,29 +1,20 @@
-# Stage 21 — Facial Recognition Attendance
+# EMS Face Recognition Setup (face-api.js)
 
-This stage uses **CompreFace**, a free/open-source facial-recognition REST API, instead of a paid cloud recognition API.
+EMS now uses `face-api.js` in the React browser for detection and descriptor generation. The Node.js backend compares the submitted 128-value descriptor only against active face enrollments for the authenticated tenant. CompreFace and its Docker service are no longer required by this integration.
 
-## Architecture
+## Render environment variables
 
-1. HR enrolls an employee's face through `POST /api/v1/biometrics/face/enroll`.
-2. The backend sends the enrollment image to CompreFace.
-3. CompreFace stores the face representation under a tenant-scoped subject.
-4. EMS stores only the provider subject/reference in `BiometricRecord`.
-5. At attendance, the camera/client sends a face image to `POST /api/v1/biometrics/face/recognize-and-attend`.
-6. CompreFace returns candidate subjects and similarity.
-7. EMS applies the configured threshold, verifies the subject belongs to the requesting company, validates the attendance device, and records attendance.
+Set the following variables on the EMS backend web service in Render:
 
-## Environment
+- `BIOMETRIC_ENCRYPTION_KEY`: exactly 64 hexadecimal characters (32 random bytes). Generate in Termux with `openssl rand -hex 32`. Keep the value secret, do not commit it, and keep a secure backup. Losing this key means existing encrypted face descriptors cannot be decrypted.
+- `FACE_API_DISTANCE_THRESHOLD`: start with `0.52` and tune using consented, representative tests. A lower face-api.js Euclidean distance indicates a closer match. Do not assume this value guarantees a particular false-match rate.
 
-```env
-COMPRE_FACE_URL="http://localhost:8000"
-COMPRE_FACE_API_KEY="your-recognition-service-api-key"
-COMPRE_FACE_THRESHOLD=0.80
-```
+No Prisma migration is required: encrypted descriptors are stored in the existing `BiometricRecord.metadata` JSON field and the existing employee/company relations are reused.
 
-Never expose `COMPRE_FACE_API_KEY` to the frontend.
+## Security and operational notes
 
-## Important
-
-CompreFace is self-hosted/open-source; it is not a hosted unlimited free SaaS. The recognition service must run somewhere you control. This keeps the EMS backend independent of a paid recognition vendor.
-
-The current API accepts JPEG/PNG/WebP images up to the existing upload limit. Raw face images are not stored in the EMS database.
+- Enrollment requires an explicit consent confirmation in the frontend. No camera images are sent to the backend or stored; only the numerical descriptor is sent over HTTPS and encrypted with AES-256-GCM before storage.
+- The matching query is scoped by the backend-derived company ID and only reads active `face-api.js` records.
+- `CHECK_IN` and `CHECK_OUT` are passed to the existing schedule-aware attendance service explicitly.
+- Recognition itself is not liveness detection. A photograph/video replay or a modified browser can spoof client-generated descriptors. Use supervised pilot operation with a manual fallback; do not rely on this alone for access control, payroll disputes, or unattended security decisions.
+- Face matching uses an older face-api.js release. Test camera compatibility and accuracy on the actual phones and lighting conditions before production use.
