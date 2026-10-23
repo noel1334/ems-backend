@@ -38,17 +38,11 @@ const getCompanyId = (req) => {
 };
 
 export const createStructure = async (companyId, data) => {
+  const { components = [], ...structureData } = data;
   const existing = await prisma.payrollStructure.findFirst({
     where: {
       companyId,
-      OR: [
-        {
-          name: data.name,
-        },
-        {
-          code: data.code,
-        },
-      ],
+      OR: [{ name: structureData.name }, { code: structureData.code }],
     },
   });
 
@@ -56,16 +50,36 @@ export const createStructure = async (companyId, data) => {
     throw new AppError("Payroll structure name or code already exists.", 409);
   }
 
+  // Nested component creation is atomic: a template is never saved half-configured.
   return prisma.payrollStructure.create({
     data: {
       companyId,
-      name: data.name,
-      code: data.code,
-      description: data.description,
+      name: structureData.name,
+      code: structureData.code,
+      description: structureData.description,
+      isActive: structureData.isActive ?? true,
+      components: components.length
+        ? {
+            create: components.map((component) => ({
+              name: component.name,
+              code: component.code,
+              type: component.type,
+              calculation: component.calculation,
+              amount: money(component.amount).toFixed(2),
+              percentage:
+                component.percentage === undefined || component.percentage === null
+                  ? null
+                  : money(component.percentage).toFixed(4),
+              isTaxable: component.isTaxable,
+              isPensionable: component.isPensionable,
+              isActive: component.isActive,
+            })),
+          }
+        : undefined,
     },
+    include: { components: true },
   });
 };
-
 export const listStructures = async (companyId, query) => {
   const where = {
     companyId,
@@ -121,24 +135,27 @@ export const listStructures = async (companyId, query) => {
 
 export const updateStructure = async (companyId, structureId, data) => {
   const structure = await prisma.payrollStructure.findFirst({
-    where: {
-      id: structureId,
-      companyId,
-    },
+    where: { id: structureId, companyId },
   });
+  if (!structure) throw new AppError("Payroll structure not found.", 404);
 
-  if (!structure) {
-    throw new AppError("Payroll structure not found.", 404);
+  const duplicateFields = [];
+  if (data.name && data.name !== structure.name) duplicateFields.push({ name: data.name });
+  if (data.code && data.code !== structure.code) duplicateFields.push({ code: data.code });
+  if (duplicateFields.length) {
+    const duplicate = await prisma.payrollStructure.findFirst({
+      where: { companyId, id: { not: structureId }, OR: duplicateFields },
+      select: { id: true },
+    });
+    if (duplicate) throw new AppError("Payroll structure name or code already exists.", 409);
   }
 
   return prisma.payrollStructure.update({
-    where: {
-      id: structureId,
-    },
+    where: { id: structureId },
     data,
+    include: { components: true },
   });
 };
-
 export const deactivateStructure = async (companyId, structureId) => {
   const structure = await prisma.payrollStructure.findFirst({
     where: {
@@ -193,7 +210,7 @@ export const addComponent = async (companyId, structureId, data) => {
       calculation: data.calculation,
       amount: money(data.amount).toFixed(2),
       percentage:
-        data.percentage === undefined
+        (data.percentage === undefined || data.percentage === null)
           ? null
           : money(data.percentage).toFixed(4),
       isTaxable: data.isTaxable,
@@ -203,6 +220,60 @@ export const addComponent = async (companyId, structureId, data) => {
   });
 };
 
+export const updateComponent = async (companyId, structureId, componentId, data) => {
+  const structure = await prisma.payrollStructure.findFirst({
+    where: { id: structureId, companyId },
+    select: { id: true },
+  });
+  if (!structure) throw new AppError("Payroll structure not found.", 404);
+
+  const component = await prisma.payrollStructureComponent.findFirst({
+    where: { id: componentId, structureId },
+  });
+  if (!component) throw new AppError("Payroll component not found.", 404);
+
+  if (data.code && data.code !== component.code) {
+    const duplicate = await prisma.payrollStructureComponent.findFirst({
+      where: { structureId, code: data.code, NOT: { id: componentId } },
+      select: { id: true },
+    });
+    if (duplicate) throw new AppError("Payroll component code already exists in this structure.", 409);
+  }
+
+  const update = { ...data };
+  if (Object.hasOwn(update, "amount")) update.amount = money(update.amount).toFixed(2);
+  if (Object.hasOwn(update, "percentage")) {
+    update.percentage = update.percentage === null || update.percentage === undefined
+      ? null
+      : money(update.percentage).toFixed(4);
+  }
+
+  return prisma.payrollStructureComponent.update({
+    where: { id: componentId },
+    data: update,
+  });
+};
+
+export const deactivateComponent = async (companyId, structureId, componentId) => {
+  const structure = await prisma.payrollStructure.findFirst({
+    where: { id: structureId, companyId },
+    select: { id: true },
+  });
+  if (!structure) throw new AppError("Payroll structure not found.", 404);
+
+  const component = await prisma.payrollStructureComponent.findFirst({
+    where: { id: componentId, structureId },
+    select: { id: true, isActive: true },
+  });
+  if (!component) throw new AppError("Payroll component not found.", 404);
+  if (!component.isActive) return component;
+
+  // Keep the component record for auditability and historical payroll context.
+  return prisma.payrollStructureComponent.update({
+    where: { id: componentId },
+    data: { isActive: false },
+  });
+};
 export const assignSalary = async (companyId, data) => {
   const employee = await prisma.employee.findFirst({
     where: {

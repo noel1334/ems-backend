@@ -8,6 +8,7 @@ import asyncHandler from "../../common/utils/asyncHandler.js";
 
 import {
   componentSchema,
+  componentUpdateSchema,
   employeeSalarySchema,
   listSchema,
   payrollPeriodSchema,
@@ -60,6 +61,20 @@ router.post(
   requirePermission("payroll", "structures", "UPDATE"),
   validate(componentSchema),
   asyncHandler(controller.createComponent)
+);
+
+router.patch(
+  "/structures/:structureId/components/:componentId",
+  requirePermission("payroll", "structures", "UPDATE"),
+  validate(componentUpdateSchema),
+  asyncHandler(controller.updateComponent)
+);
+
+// Keep component history: DELETE deactivates rather than physically removing a row.
+router.delete(
+  "/structures/:structureId/components/:componentId",
+  requirePermission("payroll", "structures", "UPDATE"),
+  asyncHandler(controller.deleteComponent)
 );
 
 /*

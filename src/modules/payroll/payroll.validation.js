@@ -4,62 +4,77 @@ const dateOnly = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Date must use YYYY-MM-DD.");
 
-export const structureSchema = z.object({
+const componentFields = z.object({
   name: z.string().trim().min(2).max(100),
-  code: z
-    .string()
-    .trim()
-    .min(2)
-    .max(30)
-    .transform((value) => value.toUpperCase()),
-  description: z.string().trim().max(500).optional(),
+  code: z.string().trim().min(2).max(30).transform((value) => value.toUpperCase()),
+  type: z.enum(["EARNING", "DEDUCTION"]),
+  calculation: z.enum([
+    "FIXED",
+    "PERCENTAGE_OF_BASIC",
+    "PERCENTAGE_OF_GROSS",
+    "ATTENDANCE_DEDUCTION",
+  ]),
+  amount: z.coerce.number().min(0).default(0),
+  percentage: z.union([z.null(), z.coerce.number().min(0).max(100)]).optional(),
+  isTaxable: z.boolean().default(false),
+  isPensionable: z.boolean().default(false),
+  isActive: z.boolean().default(true),
 });
 
-export const structureUpdateSchema = structureSchema.partial();
+const createComponentFields = componentFields.superRefine((value, ctx) => {
+  if (
+    value.calculation !== "FIXED" &&
+    value.calculation !== "ATTENDANCE_DEDUCTION" &&
+    (value.percentage === undefined || value.percentage === null)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["percentage"],
+      message: "Percentage is required for percentage-based components.",
+    });
+  }
+});
 
-export const componentSchema = z
-  .object({
-    name: z.string().trim().min(2).max(100),
+export const componentSchema = createComponentFields;
 
-    code: z
-      .string()
-      .trim()
-      .min(2)
-      .max(30)
-      .transform((value) => value.toUpperCase()),
+export const componentUpdateSchema = componentFields.partial().superRefine((value, ctx) => {
+  if (
+    value.calculation !== undefined &&
+    value.calculation !== "FIXED" &&
+    value.calculation !== "ATTENDANCE_DEDUCTION" &&
+    (value.percentage === undefined || value.percentage === null)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["percentage"],
+      message: "Provide a percentage when changing to a percentage-based calculation.",
+    });
+  }
+});
 
-    type: z.enum(["EARNING", "DEDUCTION"]),
+const structureFields = z.object({
+  name: z.string().trim().min(2).max(100),
+  code: z.string().trim().min(2).max(30).transform((value) => value.toUpperCase()),
+  description: z.string().trim().max(500).optional(),
+  isActive: z.boolean().default(true),
+});
 
-    calculation: z.enum([
-      "FIXED",
-      "PERCENTAGE_OF_BASIC",
-      "PERCENTAGE_OF_GROSS",
-      "ATTENDANCE_DEDUCTION",
-    ]),
+export const structureSchema = structureFields.extend({
+  // Optional nested components are created in the same database operation as the structure.
+  components: z.array(createComponentFields).max(50).optional().default([]),
+}).superRefine((value, ctx) => {
+  const codes = value.components.map((item) => item.code.toUpperCase());
+  const duplicates = codes.filter((code, index) => codes.indexOf(code) !== index);
+  if (duplicates.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["components"],
+      message: `Component codes must be unique within a structure: ${[...new Set(duplicates)].join(", ")}`,
+    });
+  }
+});
 
-    amount: z.coerce.number().min(0).default(0),
-
-    percentage: z.coerce.number().min(0).max(100).optional(),
-
-    isTaxable: z.boolean().default(false),
-
-    isPensionable: z.boolean().default(false),
-
-    isActive: z.boolean().default(true),
-  })
-  .superRefine((value, ctx) => {
-    if (
-      value.calculation !== "FIXED" &&
-      value.calculation !== "ATTENDANCE_DEDUCTION" &&
-      value.percentage === undefined
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["percentage"],
-        message: "Percentage is required.",
-      });
-    }
-  });
+export const structureUpdateSchema = structureFields.partial();
 
 export const employeeSalarySchema = z.object({
   employeeId: z.string().uuid(),
@@ -67,49 +82,39 @@ export const employeeSalarySchema = z.object({
   basicSalary: z.coerce.number().positive(),
   effectiveFrom: dateOnly,
   effectiveTo: dateOnly.optional(),
+}).superRefine((value, ctx) => {
+  if (value.effectiveTo && value.effectiveTo < value.effectiveFrom) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["effectiveTo"], message: "Effective-to date cannot be before effective-from date." });
+  }
 });
 
-export const payrollPeriodSchema = z
-  .object({
-    name: z.string().trim().min(2).max(100),
-    startDate: dateOnly,
-    endDate: dateOnly,
-    payDate: dateOnly.optional(),
-  })
-  .superRefine((value, ctx) => {
-    if (value.endDate < value.startDate) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["endDate"],
-        message: "End date cannot be before start date.",
-      });
-    }
-  });
+export const payrollPeriodSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  startDate: dateOnly,
+  endDate: dateOnly,
+  payDate: dateOnly.optional(),
+}).superRefine((value, ctx) => {
+  if (value.endDate < value.startDate) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endDate"], message: "End date cannot be before start date." });
+  }
+});
 
 export const listSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
-
   limit: z.coerce.number().int().min(1).max(100).default(20),
-
   search: z.string().trim().max(100).optional(),
-
   status: z.string().optional(),
 });
 
-export const validate = (schema, source = "body") => {
-  return (req, res, next) => {
-    const result = schema.safeParse(req[source]);
-
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Validation failed.",
-        errors: result.error.flatten(),
-      });
-    }
-
-    req[source] = result.data;
-
-    next();
-  };
+export const validate = (schema, source = "body") => (req, res, next) => {
+  const result = schema.safeParse(req[source]);
+  if (!result.success) {
+    return res.status(400).json({
+      success: false,
+      message: "Validation failed.",
+      errors: result.error.flatten(),
+    });
+  }
+  req[source] = result.data;
+  next();
 };

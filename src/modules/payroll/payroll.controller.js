@@ -1,5 +1,7 @@
 import {
   addComponent,
+  updateComponent as updatePayrollComponent,
+  deactivateComponent,
   approvePayroll,
   assignSalary,
   calculatePayroll,
@@ -49,6 +51,29 @@ export const createComponent = async (req, res) => {
     res,
     await addComponent(getCompanyId(req), req.params.structureId, req.body),
     201
+  );
+};
+
+export const updateComponent = async (req, res) => {
+  return success(
+    res,
+    await updatePayrollComponent(
+      getCompanyId(req),
+      req.params.structureId,
+      req.params.componentId,
+      req.body
+    )
+  );
+};
+
+export const deleteComponent = async (req, res) => {
+  return success(
+    res,
+    await deactivateComponent(
+      getCompanyId(req),
+      req.params.structureId,
+      req.params.componentId
+    )
   );
 };
 
