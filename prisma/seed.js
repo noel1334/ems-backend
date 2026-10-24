@@ -434,6 +434,8 @@ const permissions = [
   { module: "payroll", resource: "runs", action: "READ", description: "View payroll runs" },
   { module: "payroll", resource: "runs", action: "UPDATE", description: "Update payroll runs" },
   { module: "payroll", resource: "salaries", action: "CREATE", description: "Create employee salary records" },
+  { module: "payroll", resource: "salaries", action: "READ", description: "View employee salary assignments" },
+  { module: "payroll", resource: "salaries", action: "UPDATE", description: "Update employee salary assignment status" },
   { module: "payroll", resource: "structures", action: "CREATE", description: "Create payroll structures" },
   { module: "payroll", resource: "structures", action: "DELETE", description: "Delete payroll structures" },
   { module: "payroll", resource: "structures", action: "READ", description: "View payroll structures" },
