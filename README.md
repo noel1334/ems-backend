@@ -1,60 +1,42 @@
-# EMS Backend — Stage 14 Payments
+# EMS Leave Policy Management — Backend V1
 
-Production-oriented multi-tenant EMS backend using Node.js, Express, Prisma and PostgreSQL.
+Patch for the existing EMS backend. It preserves the existing leave-request, approval, balance, and tenant-scope flows and adds configurable per-leave-type policy enforcement.
 
-## Stage 14 scope
+## Added policy fields
+- `minNoticeDays`: minimum calendar-day notice before the leave start date (default `0`).
+- `maxConsecutiveDays`: maximum working days in one request; `null` means no limit.
+- `requiresReason`: rejects requests without a non-empty reason (default `false`).
+- `allowHalfDay`: controls whether half-day requests are accepted (default `true`).
 
-- Payment records and provider references
-- Paystack initialization and verification
-- Flutterwave initialization and verification
-- Paystack HMAC-SHA512 webhook validation
-- Flutterwave `verif-hash` validation
-- Provider-side amount/currency/reference verification
-- Idempotent wallet funding through a unique ledger reference
-- Atomic payment completion + wallet ledger credit
-- Wallet ledger and funding modules nested under `src/modules/wallet/`
-- Central route registration in `src/route/index.js`
+Policy rules are enforced on the server when requests are created or edited. Tenant isolation continues to use the request's company context and company-scoped repository queries. No separate SQL migration is included because this deployment uses `prisma db push`.
 
-## Important
-
-Do not mark a payment successful based only on a browser callback or webhook payload. The backend re-verifies the transaction with the provider before crediting the wallet.
-
-For Paystack, amounts sent to the provider are converted from NGN to kobo. Paystack documents that transaction amounts are supplied in the currency subunit. https://paystack.com/docs/api/transaction/
-
-Flutterwave webhook events are also re-verified before value is delivered. https://developer.flutterwave.com/docs/webhooks
-
-## Development
+## Apply in Termux
+Extract this ZIP into `~/work/ems-backend`, then run from the backend root:
 
 ```bash
-npm install
-npm run prisma:generate
+node apply-leave-policy-backend-v1.mjs
 npm run prisma:validate
-npm run prisma:format
-npm run prisma:migrate
-npm run dev
+npm run prisma:generate
+node --check src/modules/leave/leave.service.js
+node --check src/modules/leave/leave.validators.js
+npm test
 ```
 
-## Required payment environment variables
-
-See `.env.example`.
-
-Never expose provider secret keys to the frontend.
-
-## Runtime verification
-
-The repository includes a local PostgreSQL/Redis environment in `docker-compose.yml`. After installing dependencies:
+Review before commit:
 
 ```bash
-npm install
-npm run db:up
-cp .env.test.example .env
-npx prisma generate
-npx prisma validate
-npx prisma migrate dev --name init
-npx prisma db seed
-npm run runtime:check
-npm test
-npm run lint
+git diff --check
+git diff -- prisma/schema.prisma src/modules/leave/leave.validators.js src/modules/leave/leave.service.js
 ```
 
-For CI/production deployments, use `npx prisma migrate deploy` rather than `migrate dev`. Do not commit real JWT or payment-provider secrets.
+Stage only the intended files:
+
+```bash
+git add prisma/schema.prisma src/modules/leave/leave.validators.js src/modules/leave/leave.service.js
+git diff --cached --check
+git commit -m "feat: enforce configurable leave policies"
+git fetch origin
+git push origin HEAD:main
+```
+
+Ensure Render's build/start sequence runs `prisma db push` and `prisma generate` against the intended database before the new application version handles requests. Do not run schema synchronization against a production database until the target `DATABASE_URL` is verified.
