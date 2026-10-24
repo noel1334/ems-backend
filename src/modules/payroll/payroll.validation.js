@@ -116,7 +116,7 @@ export const validate = (schema, source = "body") => (req, res, next) => {
     });
   }
   // Express 5 exposes req.query through a getter without a setter.
-  // Storing the parsed query separately avoids a 500 on payroll list endpoints.
+  // Store validated query values separately; body and params remain assignable.
   if (source === "query") {
     req.validatedQuery = result.data;
   } else {

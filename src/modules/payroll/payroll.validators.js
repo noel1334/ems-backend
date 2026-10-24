@@ -76,16 +76,37 @@ export const structureSchema = structureFields.extend({
 
 export const structureUpdateSchema = structureFields.partial();
 
+export const salaryComponentOverrideSchema = z.object({
+  amount: z.coerce.number().min(0).optional(),
+  percentage: z.coerce.number().min(0).max(100).optional(),
+  isActive: z.boolean().optional(),
+}).strict();
+
 export const employeeSalarySchema = z.object({
   employeeId: z.string().uuid(),
   structureId: z.string().uuid(),
   basicSalary: z.coerce.number().positive(),
   effectiveFrom: dateOnly,
   effectiveTo: dateOnly.optional(),
+  componentOverrides: z.record(z.string(), salaryComponentOverrideSchema).optional().default({}),
 }).superRefine((value, ctx) => {
   if (value.effectiveTo && value.effectiveTo < value.effectiveFrom) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["effectiveTo"], message: "Effective-to date cannot be before effective-from date." });
   }
+});
+
+export const salaryListSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  search: z.string().trim().max(100).optional(),
+  status: z.enum(["ACTIVE", "INACTIVE"]).optional(),
+  employeeId: z.string().uuid().optional(),
+  structureId: z.string().uuid().optional(),
+  departmentId: z.string().uuid().optional(),
+});
+
+export const salaryStatusSchema = z.object({
+  status: z.enum(["ACTIVE", "INACTIVE"]),
 });
 
 export const payrollPeriodSchema = z.object({
@@ -116,7 +137,7 @@ export const validate = (schema, source = "body") => (req, res, next) => {
     });
   }
   // Express 5 exposes req.query through a getter without a setter.
-  // Storing the parsed query separately avoids a 500 on payroll list endpoints.
+  // Store validated query values separately; body and params remain assignable.
   if (source === "query") {
     req.validatedQuery = result.data;
   } else {

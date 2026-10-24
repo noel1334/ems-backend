@@ -86,6 +86,7 @@ export const mapEmployeeSalary = (salary) => {
     structureId: salary.structureId,
 
     basicSalary: decimalToString(salary.basicSalary),
+    componentOverrides: salary.componentOverrides ?? {},
 
     effectiveFrom: dateToISO(salary.effectiveFrom),
     effectiveTo: dateToISO(salary.effectiveTo),
@@ -104,6 +105,8 @@ export const mapEmployeeSalary = (salary) => {
           email: salary.employee.email,
           departmentId: salary.employee.departmentId,
           designationId: salary.employee.designationId,
+          department: salary.employee.department ? { id: salary.employee.department.id, name: salary.employee.department.name } : null,
+          designation: salary.employee.designation ? { id: salary.employee.designation.id, name: salary.employee.designation.name } : null,
         }
       : null,
 

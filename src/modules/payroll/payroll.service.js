@@ -178,6 +178,35 @@ export const deactivateStructure = async (companyId, structureId) => {
   });
 };
 
+export const deleteStructurePermanently = async (companyId, structureId) => {
+  const structure = await prisma.payrollStructure.findFirst({
+    where: { id: structureId, companyId },
+    select: { id: true, name: true },
+  });
+  if (!structure) throw new AppError("Payroll structure not found.", 404);
+
+  const assignmentCount = await prisma.employeeSalary.count({
+    where: { companyId, structureId },
+  });
+  if (assignmentCount > 0) {
+    throw new AppError(
+      `Cannot permanently delete “${structure.name}” because ${assignmentCount} employee salary assignment(s) reference it. Deactivate the structure instead to preserve salary and payroll history.`,
+      409,
+    );
+  }
+
+  try {
+    // Components cascade with the structure; salary-linked structures are protected above
+    // and by the database's Restrict foreign key as a second line of defence.
+    return await prisma.payrollStructure.delete({ where: { id: structureId } });
+  } catch (error) {
+    if (error?.code === "P2003" || error?.code === "P2025") {
+      throw new AppError("This structure is referenced by financial history and cannot be permanently deleted.", 409);
+    }
+    throw error;
+  }
+};
+
 export const addComponent = async (companyId, structureId, data) => {
   const structure = await prisma.payrollStructure.findFirst({
     where: {
@@ -274,6 +303,83 @@ export const deactivateComponent = async (companyId, structureId, componentId) =
     data: { isActive: false },
   });
 };
+export const listEmployeeSalaries = async (companyId, query = {}) => {
+  const page = Number(query.page ?? 1);
+  const limit = Number(query.limit ?? 20);
+  const where = {
+    companyId,
+    ...(query.status ? { status: query.status } : {}),
+    ...(query.employeeId ? { employeeId: query.employeeId } : {}),
+    ...(query.structureId ? { structureId: query.structureId } : {}),
+    ...(query.departmentId ? { employee: { is: { departmentId: query.departmentId } } } : {}),
+    ...(query.search ? {
+      OR: [
+        { employee: { is: { employeeNumber: { contains: query.search, mode: "insensitive" } } } },
+        { employee: { is: { firstName: { contains: query.search, mode: "insensitive" } } } },
+        { employee: { is: { lastName: { contains: query.search, mode: "insensitive" } } } },
+        { structure: { is: { name: { contains: query.search, mode: "insensitive" } } } },
+        { structure: { is: { code: { contains: query.search, mode: "insensitive" } } } },
+      ],
+    } : {}),
+  };
+
+  const [rows, total] = await prisma.$transaction([
+    prisma.employeeSalary.findMany({
+      where,
+      include: {
+        employee: { include: { department: true, designation: true } },
+        structure: { include: { components: true } },
+      },
+      orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.employeeSalary.count({ where }),
+  ]);
+
+  return {
+    items: rows.map(mapEmployeeSalary),
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+  };
+};
+
+const intervalOverlaps = (startA, endA, startB, endB) => {
+  const aStart = startOfDay(new Date(startA)).getTime();
+  const bStart = startOfDay(new Date(startB)).getTime();
+  const aEnd = endA ? startOfDay(new Date(endA)).getTime() : Number.POSITIVE_INFINITY;
+  const bEnd = endB ? startOfDay(new Date(endB)).getTime() : Number.POSITIVE_INFINITY;
+  return aStart <= bEnd && bStart <= aEnd;
+};
+
+export const updateSalaryStatus = async (companyId, salaryId, nextStatus) => {
+  const salary = await prisma.employeeSalary.findFirst({
+    where: { id: salaryId, companyId },
+    include: { payrollItems: { select: { id: true } } },
+  });
+  if (!salary) throw new AppError("Employee salary assignment not found.", 404);
+  if (salary.status === nextStatus) return mapEmployeeSalary(salary);
+
+  if (nextStatus === "ACTIVE") {
+    const activeSalaries = await prisma.employeeSalary.findMany({
+      where: { companyId, employeeId: salary.employeeId, status: "ACTIVE", id: { not: salaryId } },
+      select: { id: true, effectiveFrom: true, effectiveTo: true },
+    });
+    const conflict = activeSalaries.find((item) => intervalOverlaps(
+      salary.effectiveFrom, salary.effectiveTo, item.effectiveFrom, item.effectiveTo,
+    ));
+    if (conflict) {
+      throw new AppError("This salary cannot be activated because its effective dates overlap another active salary assignment for the employee.", 409);
+    }
+  }
+
+  const updated = await prisma.employeeSalary.update({
+    where: { id: salaryId },
+    data: { status: nextStatus },
+    include: { employee: { include: { department: true, designation: true } }, structure: { include: { components: true } } },
+  });
+  return mapEmployeeSalary(updated);
+};
+
 export const assignSalary = async (companyId, data) => {
   const employee = await prisma.employee.findFirst({
     where: {
@@ -287,34 +393,49 @@ export const assignSalary = async (companyId, data) => {
   }
 
   const structure = await prisma.payrollStructure.findFirst({
-    where: {
-      id: data.structureId,
-      companyId,
-      isActive: true,
-    },
+    where: { id: data.structureId, companyId, isActive: true },
+    include: { components: true },
   });
 
   if (!structure) {
     throw new AppError("Payroll structure not found.", 404);
   }
 
+  const componentsByCode = new Map((structure.components ?? []).map((component) => [component.code, component]));
+  for (const [code, override] of Object.entries(data.componentOverrides ?? {})) {
+    const component = componentsByCode.get(code);
+    if (!component) throw new AppError(`Component override “${code}” does not belong to the selected payroll structure.`, 400);
+    if (override.amount !== undefined && component.calculation !== "FIXED") {
+      throw new AppError(`Component “${component.name}” does not use a fixed amount and cannot have an amount override.`, 400);
+    }
+    if (override.percentage !== undefined && !["PERCENTAGE_OF_BASIC", "PERCENTAGE_OF_GROSS"].includes(component.calculation)) {
+      throw new AppError(`Component “${component.name}” does not use a percentage calculation and cannot have a percentage override.`, 400);
+    }
+  }
+
   return prisma.$transaction(async (tx) => {
     const effectiveFrom = dateOnly(data.effectiveFrom);
-
-    await tx.employeeSalary.updateMany({
-      where: {
-        companyId,
-        employeeId: data.employeeId,
-        status: "ACTIVE",
-        effectiveFrom: {
-          lte: effectiveFrom,
-        },
-      },
-      data: {
-        status: "INACTIVE",
-        effectiveTo: effectiveFrom,
-      },
+    const effectiveTo = data.effectiveTo ? dateOnly(data.effectiveTo) : null;
+    const existingActive = await tx.employeeSalary.findMany({
+      where: { companyId, employeeId: data.employeeId, status: "ACTIVE" },
+      select: { id: true, effectiveFrom: true, effectiveTo: true },
     });
+    for (const existing of existingActive) {
+      if (!intervalOverlaps(effectiveFrom, effectiveTo, existing.effectiveFrom, existing.effectiveTo)) continue;
+      const existingStart = startOfDay(new Date(existing.effectiveFrom)).getTime();
+      const newStart = effectiveFrom.getTime();
+      if (existingStart > newStart) {
+        throw new AppError("A future active salary assignment overlaps this effective period. Review the scheduled assignment first.", 409);
+      }
+      if (existingStart < newStart) {
+        await tx.employeeSalary.update({
+          where: { id: existing.id },
+          data: { status: "INACTIVE", effectiveTo: addDays(effectiveFrom, -1) },
+        });
+      } else {
+        await tx.employeeSalary.update({ where: { id: existing.id }, data: { status: "INACTIVE" } });
+      }
+    }
 
     return tx.employeeSalary.create({
       data: {
@@ -322,16 +443,13 @@ export const assignSalary = async (companyId, data) => {
         employeeId: data.employeeId,
         structureId: data.structureId,
         basicSalary: money(data.basicSalary).toFixed(2),
+        componentOverrides: data.componentOverrides ?? {},
         effectiveFrom,
-        effectiveTo: data.effectiveTo ? dateOnly(data.effectiveTo) : null,
+        effectiveTo,
       },
       include: {
-        employee: true,
-        structure: {
-          include: {
-            components: true,
-          },
-        },
+        employee: { include: { department: true, designation: true } },
+        structure: { include: { components: true } },
       },
     });
   }, transactionOptions);
@@ -599,10 +717,15 @@ export const calculatePayroll = async (companyId, periodId, actorId) => {
 
       const earningLines = [];
 
-      for (const component of salary.structure.components) {
-        if (component.type !== "EARNING") {
-          continue;
-        }
+      for (const baseComponent of salary.structure.components) {
+        const override = salary.componentOverrides?.[baseComponent.code] ?? {};
+        if (override.isActive === false) continue;
+        const component = {
+          ...baseComponent,
+          amount: override.amount ?? baseComponent.amount,
+          percentage: override.percentage ?? baseComponent.percentage,
+        };
+        if (component.type !== "EARNING") continue;
 
         const amount = calculateComponent({
           component,
@@ -636,10 +759,15 @@ export const calculatePayroll = async (companyId, periodId, actorId) => {
         period.endDate
       );
 
-      for (const component of salary.structure.components) {
-        if (component.type !== "DEDUCTION") {
-          continue;
-        }
+      for (const baseComponent of salary.structure.components) {
+        const override = salary.componentOverrides?.[baseComponent.code] ?? {};
+        if (override.isActive === false) continue;
+        const component = {
+          ...baseComponent,
+          amount: override.amount ?? baseComponent.amount,
+          percentage: override.percentage ?? baseComponent.percentage,
+        };
+        if (component.type !== "DEDUCTION") continue;
 
         let amount = calculateComponent({
           component,

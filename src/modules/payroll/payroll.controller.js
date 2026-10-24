@@ -7,13 +7,15 @@ import {
   calculatePayroll,
   createPeriod,
   createStructure,
-  deactivateStructure,
   finalizePayroll,
   getCompanyId,
   getEmployeePayrollHistory,
   getPeriod,
   listPeriods,
   listStructures,
+  listEmployeeSalaries,
+  updateSalaryStatus,
+  deleteStructurePermanently,
   updateStructure,
 } from "./payroll.service.js";
 
@@ -42,7 +44,7 @@ export const updatePayrollStructure = async (req, res) => {
 export const deletePayrollStructure = async (req, res) => {
   return success(
     res,
-    await deactivateStructure(getCompanyId(req), req.params.id)
+    await deleteStructurePermanently(getCompanyId(req), req.params.id)
   );
 };
 
@@ -75,6 +77,14 @@ export const deleteComponent = async (req, res) => {
       req.params.componentId
     )
   );
+};
+
+export const listSalaries = async (req, res) => {
+  return success(res, await listEmployeeSalaries(getCompanyId(req), req.validatedQuery ?? req.query));
+};
+
+export const setSalaryStatus = async (req, res) => {
+  return success(res, await updateSalaryStatus(getCompanyId(req), req.params.id, req.body.status));
 };
 
 export const createSalary = async (req, res) => {

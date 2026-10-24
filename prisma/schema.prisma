@@ -1340,6 +1340,9 @@ model EmployeeSalary {
   employeeId    String
   structureId   String
   basicSalary   Decimal          @db.Decimal(18, 2)
+  // Optional employee-specific overrides keyed by payroll component code.
+  // Example: { "HOUSING": { "amount": 50000 }, "PENSION": { "percentage": 8 } }
+  componentOverrides Json?
   effectiveFrom DateTime
   effectiveTo   DateTime?
   status        SalaryStatus     @default(ACTIVE)

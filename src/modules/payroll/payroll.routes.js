@@ -12,6 +12,8 @@ import {
   employeeSalarySchema,
   listSchema,
   payrollPeriodSchema,
+  salaryListSchema,
+  salaryStatusSchema,
   structureSchema,
   structureUpdateSchema,
   validate,
@@ -50,6 +52,7 @@ router.patch(
   asyncHandler(controller.updatePayrollStructure)
 );
 
+// DELETE is a permanent delete only when the structure has no salary history.
 router.delete(
   "/structures/:id",
   requirePermission("payroll", "structures", "DELETE"),
@@ -82,6 +85,20 @@ router.delete(
                                                                                                                                                       | Employee Salaries
                                                                                                                                                       |--------------------------------------------------------------------------
                                                                                                                                                       */
+
+router.get(
+  "/salaries",
+  requirePermission("payroll", "salaries", "READ"),
+  validate(salaryListSchema, "query"),
+  asyncHandler(controller.listSalaries)
+);
+
+router.patch(
+  "/salaries/:id/status",
+  requirePermission("payroll", "salaries", "UPDATE"),
+  validate(salaryStatusSchema),
+  asyncHandler(controller.setSalaryStatus)
+);
 
 router.post(
   "/salaries",
