@@ -1,0 +1,1 @@
+Overlay this patch at the root of the existing EMS backend repository. See COMPRE_FACE_SETUP.md for the setup checklist. This patch uses the existing BiometricRecord metadata JSON field; no Prisma migration is required. Run scripts/remove-compreface-provider.mjs after extraction to delete the now-unused provider file.
