@@ -4,11 +4,15 @@ import { connectDatabase, disconnectDatabase } from "./config/database.js";
 import logger from "./config/logger.js";
 import { bootstrapDemoData } from "./bootstrap/demo-bootstrap.js";
 import { bootstrapRoleDefinitions } from "./bootstrap/role-bootstrap.js";
+import { reconcilePayrollSalaryPermissions } from "./bootstrap/payroll-salary-permission-bootstrap.js";
 
 const startServer = async () => {
   try {
     await connectDatabase();
     await bootstrapRoleDefinitions();
+    // Repair narrowly-scoped salary READ/UPDATE grants before accepting API traffic.
+    // This also covers deployments that use `prisma db push` instead of SQL migrations.
+    await reconcilePayrollSalaryPermissions();
     await bootstrapDemoData();
 
     const server = app.listen(env.PORT, () => {
