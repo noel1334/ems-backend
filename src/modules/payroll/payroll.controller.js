@@ -25,7 +25,7 @@ const success = (res, data, status = 200) => {
 };
 
 export const listPayrollStructures = async (req, res) => {
-  return success(res, await listStructures(getCompanyId(req), req.query));
+  return success(res, await listStructures(getCompanyId(req), req.validatedQuery ?? req.query));
 };
 
 export const createPayrollStructure = async (req, res) => {
@@ -82,7 +82,7 @@ export const createSalary = async (req, res) => {
 };
 
 export const listPayrollPeriods = async (req, res) => {
-  return success(res, await listPeriods(getCompanyId(req), req.query));
+  return success(res, await listPeriods(getCompanyId(req), req.validatedQuery ?? req.query));
 };
 
 export const createPayrollPeriod = async (req, res) => {
