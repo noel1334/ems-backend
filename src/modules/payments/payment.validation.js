@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const positiveAmount = z.coerce.number().finite().min(1000, "Minimum wallet funding amount is NGN 1,000.").refine(
-  (value) => Number.isInteger(Math.round(value * 100)),
+  (value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-7,
   "Amount must have at most two decimal places"
 );
 
@@ -17,6 +17,7 @@ export const initializePaymentSchema = z.object({
 
 export const verifyPaymentSchema = z.object({
   reference: z.string().trim().min(3).max(150),
+  transactionId: z.union([z.string().trim().min(1), z.number().finite()]).optional().transform((value) => value == null ? undefined : String(value)),
 });
 
 export const paymentQuerySchema = z.object({

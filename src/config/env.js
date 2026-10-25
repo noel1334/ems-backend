@@ -44,6 +44,7 @@ const envSchema = z.object({
     .default(5 * 1024 * 1024),
 
   APP_BASE_URL: z.string().url().default("http://localhost:5000"),
+  APP_FRONTEND_URL: z.string().url().default("http://localhost:5173"),
   STORAGE_PROVIDER: z.enum(["supabase", "local"]).default("supabase"),
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
@@ -69,6 +70,7 @@ const parsedEnv = envSchema.superRefine((value, ctx) => {
     if (!value.COOKIE_SECURE) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["COOKIE_SECURE"], message: "COOKIE_SECURE must be true in production" });
     if (value.CORS_ORIGIN.includes("*")) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["CORS_ORIGIN"], message: "Wildcard CORS is not allowed in production" });
     if (value.REQUIRE_HTTPS && value.APP_BASE_URL.startsWith("http://")) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["APP_BASE_URL"], message: "APP_BASE_URL must use HTTPS in production" });
+    if (value.REQUIRE_HTTPS && value.APP_FRONTEND_URL.startsWith("http://")) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["APP_FRONTEND_URL"], message: "APP_FRONTEND_URL must use HTTPS in production" });
     if (!value.SUPABASE_SERVICE_ROLE_KEY && value.STORAGE_PROVIDER === "supabase") ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["SUPABASE_SERVICE_ROLE_KEY"], message: "Supabase service role key is required when using Supabase storage" });
   }
 }).safeParse(process.env);

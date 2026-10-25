@@ -72,7 +72,8 @@ export const validateWalletQuery = (schema) => {
       });
     }
 
-    req.query = result.data;
+    // Express 5 exposes req.query through a getter; keep validated values on a dedicated property.
+    req.validatedQuery = result.data;
 
     next();
   };

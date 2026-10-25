@@ -11,9 +11,9 @@ import { mapWallet, mapWalletTransaction } from "./wallet.mapper.js";
 const companyId = (req) => req.tenant?.companyId || req.user?.companyId;
 const success = (res, data, status = 200) => res.status(status).json({ success: true, data });
 
-export const getWallet = async (req, res) => success(res, mapWallet(await getWalletDetails(companyId(req))));
+export const getWallet = async (req, res) => success(res, await getWalletDetails(companyId(req)));
 export const getTransactions = async (req, res) => {
-  const result = await getWalletTransactions(companyId(req), req.query);
+  const result = await getWalletTransactions(companyId(req), req.validatedQuery ?? req.query);
   return success(res, { transactions: result.transactions.map(mapWalletTransaction), pagination: result.pagination });
 };
 export const credit = async (req, res) => {

@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 export const initializeFundingSchema = z.object({
-  amount: z.coerce.number().finite().min(1000, "Minimum wallet funding amount is NGN 1,000."),
+  amount: z.coerce.number().finite().min(1000, "Minimum wallet funding amount is NGN 1,000.").refine(
+    (value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-7,
+    "Amount must have at most two decimal places",
+  ),
   email: z.string().email(),
   provider: z.enum(["PAYSTACK", "FLUTTERWAVE"]),
   callbackUrl: z.string().url().optional(),

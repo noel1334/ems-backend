@@ -9,8 +9,8 @@ export const initialize = async (req, res) => {
 };
 
 export const verify = async (req, res) => {
-  const { reference } = validateBody(verifyPaymentSchema, req.body);
-  const result = await service.verifyPayment(companyId(req), reference);
+  const { reference, transactionId } = validateBody(verifyPaymentSchema, req.body);
+  const result = await service.verifyPayment(companyId(req), reference, transactionId);
   return res.json({ success: true, message: "Payment verification completed", data: result });
 };
 

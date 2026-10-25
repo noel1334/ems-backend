@@ -57,7 +57,8 @@ export const initializePayment = async (companyId, input) => {
   if (!amount.isPositive()) throw new AppError("Payment amount must be greater than zero", 400);
 
   const reference = generateReference();
-  const callbackUrl = input.callbackUrl || `${process.env.APP_BASE_URL || "http://localhost:5000"}/payment/callback`;
+  const callbackBaseUrl = (process.env.APP_FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+  const callbackUrl = input.callbackUrl || `${callbackBaseUrl}/app/wallet`;
 
   let payment;
   try {
