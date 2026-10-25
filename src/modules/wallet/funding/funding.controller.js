@@ -9,6 +9,6 @@ export const initialize = async (req, res) => {
 };
 
 export const verify = async (req, res) => {
-  const { reference } = verifyFundingSchema.parse(req.body);
-  res.json({ success: true, data: await service.verifyFunding(companyId(req), reference) });
+  const { reference, transactionId } = verifyFundingSchema.parse(req.body);
+  res.json({ success: true, data: await service.verifyFunding(companyId(req), reference, transactionId) });
 };

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const positiveAmount = z.coerce.number().finite().positive().refine(
+const positiveAmount = z.coerce.number().finite().min(1000, "Minimum wallet funding amount is NGN 1,000.").refine(
   (value) => Number.isInteger(Math.round(value * 100)),
   "Amount must have at most two decimal places"
 );

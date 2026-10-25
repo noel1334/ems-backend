@@ -50,7 +50,7 @@ export const initializePayment = async (companyId, input) => {
       if (existingFingerprint && existingFingerprint !== fingerprint) {
         throw new AppError("Idempotency key was already used with different payment details", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
       }
-      return { payment: mapPayment(existing), idempotent: true };
+      return { payment: mapPayment(existing), providerResponse: existing.metadata?.providerInitialization || null, idempotent: true };
     }
   }
 
@@ -82,7 +82,7 @@ export const initializePayment = async (companyId, input) => {
         if (existingFingerprint && existingFingerprint !== fingerprint) {
           throw new AppError("Idempotency key was already used with different payment details", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
         }
-        return { payment: mapPayment(existing), idempotent: true };
+        return { payment: mapPayment(existing), providerResponse: existing.metadata?.providerInitialization || null, idempotent: true };
       }
     }
     throw error;
@@ -104,7 +104,7 @@ export const initializePayment = async (companyId, input) => {
       ? providerResponse?.data?.id?.toString() || null
       : providerResponse?.data?.reference || reference;
 
-    const updated = await repository.updatePayment(payment.id, { providerReference, metadata: providerResponse });
+    const updated = await repository.updatePayment(payment.id, { providerReference, metadata: { ...(payment.metadata || {}), providerInitialization: providerResponse } });
     return { payment: mapPayment(updated), providerResponse };
   } catch (error) {
     await repository.updatePayment(payment.id, { status: PAYMENT_STATUS.FAILED });
@@ -171,7 +171,7 @@ const completeSuccessfulPayment = async (paymentId, providerReference, providerR
   }, { isolationLevel: "Serializable" });
 };
 
-export const verifyPayment = async (companyId, reference) => {
+export const verifyPayment = async (companyId, reference, providerTransactionId) => {
   const payment = await repository.findPaymentByReference(companyId, reference);
   if (!payment) throw new AppError("Payment not found", 404);
   if (payment.status === PAYMENT_STATUS.SUCCESSFUL) return mapPayment(payment);
@@ -181,8 +181,14 @@ export const verifyPayment = async (companyId, reference) => {
   if (payment.provider === PAYMENT_PROVIDER.PAYSTACK) {
     providerResponse = await providerApi.verify(payment.reference);
   } else {
-    if (!payment.providerReference) throw new AppError("Flutterwave transaction ID is not available", 409);
-    providerResponse = await providerApi.verify(payment.providerReference);
+    const transactionId = providerTransactionId || payment.providerReference;
+    if (!transactionId) throw new AppError("Flutterwave transaction ID is not available. Return from checkout and try verification again.", 409);
+    providerResponse = await providerApi.verify(transactionId);
+    // Never trust a transaction ID supplied by the browser unless provider verification
+    // confirms that the verified transaction belongs to this EMS payment reference.
+    if (providerResponse?.data?.tx_ref !== payment.reference) {
+      throw new AppError("Payment reference mismatch", 400, { code: "PAYMENT_REFERENCE_MISMATCH" });
+    }
   }
 
   const successful = payment.provider === PAYMENT_PROVIDER.PAYSTACK
@@ -190,11 +196,20 @@ export const verifyPayment = async (companyId, reference) => {
     : providerResponse?.status === "success" && providerResponse?.data?.status === "successful";
 
   if (!successful) {
-    const updated = await repository.updatePayment(payment.id, { status: PAYMENT_STATUS.FAILED, metadata: { ...(payment.metadata || {}), providerResponse } });
+    const providerStatus = payment.provider === PAYMENT_PROVIDER.PAYSTACK
+      ? providerResponse?.data?.status
+      : providerResponse?.data?.status;
+    // A pending/abandoned checkout is not proof of failure. Keep it retryable.
+    const terminalFailure = ["failed", "abandoned", "reversed"].includes(String(providerStatus || "").toLowerCase());
+    const updated = await repository.updatePayment(payment.id, {
+      ...(terminalFailure ? { status: PAYMENT_STATUS.FAILED } : {}),
+      ...(providerTransactionId && !payment.providerReference ? { providerReference: String(providerTransactionId) } : {}),
+      metadata: { ...(payment.metadata || {}), lastVerificationResponse: providerResponse },
+    });
     return mapPayment(updated);
   }
 
-  return mapPayment(await completeSuccessfulPayment(payment.id, providerResponse?.data?.id?.toString(), providerResponse));
+  return mapPayment(await completeSuccessfulPayment(payment.id, providerResponse?.data?.id?.toString() || providerTransactionId, providerResponse));
 };
 
 export const listPayments = async (companyId, { page, limit, provider, status, purpose, search, startDate, endDate }) => {

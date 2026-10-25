@@ -5,4 +5,4 @@ export const initializeFunding = (companyId, data) => paymentService.initializeP
   purpose: "WALLET_FUNDING",
 });
 
-export const verifyFunding = (companyId, reference) => paymentService.verifyPayment(companyId, reference);
+export const verifyFunding = (companyId, reference, transactionId) => paymentService.verifyPayment(companyId, reference, transactionId);
