@@ -8,6 +8,10 @@ import {
   createPeriod,
   createStructure,
   finalizePayroll,
+  reopenPayrollForCorrection,
+  listPayrollDisbursements,
+  preparePayrollDisbursements,
+  updatePayrollDisbursement,
   getCompanyId,
   getEmployeePayrollHistory,
   getPeriod,
@@ -127,3 +131,9 @@ export const employeeHistory = async (req, res) => {
     await getEmployeePayrollHistory(getCompanyId(req), req.params.employeeId)
   );
 };
+
+
+export const reopenForCorrection = async (req, res) => success(res, await reopenPayrollForCorrection(getCompanyId(req), req.params.id, req.user.userId, req.body.reason));
+export const listDisbursements = async (req, res) => success(res, await listPayrollDisbursements(getCompanyId(req), req.params.id));
+export const prepareDisbursements = async (req, res) => success(res, await preparePayrollDisbursements(getCompanyId(req), req.params.id, req.user.userId), 201);
+export const updateDisbursement = async (req, res) => success(res, await updatePayrollDisbursement(getCompanyId(req), req.params.disbursementId, req.user.userId, req.body));

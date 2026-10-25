@@ -388,6 +388,7 @@ model Company {
   employeeSalaries              EmployeeSalary[]
   payrollPeriods                PayrollPeriod[]
   payrollItems                  PayrollItem[]
+  payrollDisbursements          PayrollDisbursement[]
   biometricRecords              BiometricRecord[]
   inventoryLocations            InventoryLocation[]
   inventorySuppliers            InventorySupplier[]
@@ -628,6 +629,7 @@ model Employee {
   leaveBalanceTransactions      LeaveBalanceTransaction[]
   salaries                      EmployeeSalary[]
   payrollItems                  PayrollItem[]
+  payrollDisbursements          PayrollDisbursement[]
   biometricRecords              BiometricRecord[]
   inventoryTransactions         InventoryTransaction[]
   inventoryVerifications        InventoryVerification[]
@@ -1369,7 +1371,8 @@ model PayrollPeriod {
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
   company   Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  items     PayrollItem[]
+  items          PayrollItem[]
+  disbursements  PayrollDisbursement[]
 
   @@unique([companyId, name])
   @@index([companyId, startDate, endDate])
@@ -1400,12 +1403,41 @@ model PayrollItem {
   employee        Employee          @relation(fields: [employeeId], references: [id], onDelete: Restrict)
   salary          EmployeeSalary    @relation(fields: [salaryId], references: [id], onDelete: Restrict)
   lines           PayrollItemLine[]
+  disbursement    PayrollDisbursement?
 
   @@unique([periodId, employeeId], name: "periodId_employeeId")
   @@index([companyId, status])
   @@index([employeeId])
   @@index([salaryId])
   @@map("payroll_items")
+}
+
+model PayrollDisbursement {
+  id                String       @id @default(uuid())
+  companyId         String
+  periodId          String
+  payrollItemId     String       @unique
+  employeeId        String
+  amount            Decimal      @db.Decimal(18, 2)
+  currency          String       @default("NGN")
+  status            String       @default("PENDING")
+  method            String       @default("MANUAL_BANK_TRANSFER")
+  externalReference String?
+  note              String?
+  paidAt            DateTime?
+  createdBy         String?
+  updatedBy         String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  company           Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  period            PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  payrollItem       PayrollItem  @relation(fields: [payrollItemId], references: [id], onDelete: Restrict)
+  employee          Employee     @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, externalReference])
+  @@index([companyId, periodId, status])
+  @@index([employeeId])
+  @@map("payroll_disbursements")
 }
 
 model PayrollItemLine {

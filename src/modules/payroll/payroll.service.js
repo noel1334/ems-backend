@@ -996,3 +996,112 @@ export const getEmployeePayrollHistory = async (companyId, employeeId) => {
 };
 
 export { getCompanyId };
+
+
+/**
+ * Reopen an approved/finalized payroll for correction before any disbursement is prepared.
+ * A reason is mandatory and the transition is audit-logged. Paid/partially paid payroll
+ * is never reopened; use a separate adjustment in a future payroll instead.
+ */
+export const reopenPayrollForCorrection = async (companyId, periodId, actorId, reason) => {
+  const normalizedReason = String(reason ?? "").trim();
+  if (normalizedReason.length < 8) throw new AppError("Please provide a correction reason of at least 8 characters.", 400);
+
+  return prisma.$transaction(async (tx) => {
+    const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
+    if (!period) throw new AppError("Payroll period not found.", 404);
+    if (!["APPROVED", "FINALIZED"].includes(period.status)) {
+      throw new AppError("Only approved or finalized payroll can be reopened for correction.", 400);
+    }
+    const existingDisbursements = await tx.payrollDisbursement.count({ where: { companyId, periodId } });
+    if (existingDisbursements > 0) {
+      throw new AppError("This payroll already has a disbursement batch. Do not edit paid or prepared payroll; record a correction in the next payroll instead.", 409);
+    }
+
+    await tx.payrollItem.updateMany({
+      where: { companyId, periodId },
+      data: { status: "CALCULATED", approvedAt: null },
+    });
+    const updated = await tx.payrollPeriod.update({ where: { id: periodId }, data: { status: "CALCULATED" } });
+    await writeAudit(tx, {
+      companyId, actorUserId: actorId, action: "UPDATE", module: "payroll",
+      resource: "payroll_period", resourceId: periodId,
+      metadata: { event: "REOPENED_FOR_CORRECTION", previousStatus: period.status, reason: normalizedReason },
+    });
+    return updated;
+  }, transactionOptions);
+};
+
+const disbursementInclude = {
+  employee: { select: { id: true, employeeNumber: true, firstName: true, middleName: true, lastName: true, email: true } },
+  payrollItem: { select: { id: true, netSalary: true, status: true } },
+};
+
+export const listPayrollDisbursements = async (companyId, periodId) => {
+  const period = await prisma.payrollPeriod.findFirst({ where: { id: periodId, companyId }, select: { id: true } });
+  if (!period) throw new AppError("Payroll period not found.", 404);
+  return prisma.payrollDisbursement.findMany({ where: { companyId, periodId }, include: disbursementInclude, orderBy: [{ status: "asc" }, { createdAt: "asc" }] });
+};
+
+export const preparePayrollDisbursements = async (companyId, periodId, actorId) => {
+  return prisma.$transaction(async (tx) => {
+    const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
+    if (!period) throw new AppError("Payroll period not found.", 404);
+    if (period.status !== "FINALIZED") throw new AppError("Only finalized payroll can be prepared for disbursement.", 400);
+
+    const existing = await tx.payrollDisbursement.count({ where: { companyId, periodId } });
+    if (existing > 0) throw new AppError("A disbursement batch already exists for this payroll period.", 409);
+    const items = await tx.payrollItem.findMany({ where: { companyId, periodId, status: "FINALIZED" }, orderBy: { employeeId: "asc" } });
+    if (!items.length) throw new AppError("There are no finalized payroll items to disburse.", 400);
+    const negative = items.find((item) => money(item.netSalary).isNegative());
+    if (negative) throw new AppError("Payroll contains a negative net salary. Correct the payroll before preparing payments.", 400, { employeeId: negative.employeeId });
+    const payable = items.filter((item) => money(item.netSalary).greaterThan(0));
+    if (!payable.length) throw new AppError("No employees have a positive net salary in this period.", 400);
+
+    await tx.payrollDisbursement.createMany({ data: payable.map((item) => ({
+      companyId, periodId, payrollItemId: item.id, employeeId: item.employeeId,
+      amount: money(item.netSalary).toFixed(2), currency: "NGN", status: "PENDING",
+      method: "MANUAL_BANK_TRANSFER", createdBy: actorId,
+    })) });
+    await writeAudit(tx, { companyId, actorUserId: actorId, action: "CREATE", module: "payroll", resource: "payroll_disbursement_batch", resourceId: periodId, metadata: { count: payable.length, totalAmount: payable.reduce((sum, item) => sum.plus(item.netSalary), new Decimal(0)).toFixed(2) } });
+    return tx.payrollDisbursement.findMany({ where: { companyId, periodId }, include: disbursementInclude, orderBy: { createdAt: "asc" } });
+  }, transactionOptions);
+};
+
+export const updatePayrollDisbursement = async (companyId, disbursementId, actorId, input) => {
+  const status = String(input.status ?? "").toUpperCase();
+  if (!["PAID", "FAILED", "PENDING"].includes(status)) throw new AppError("Unsupported disbursement status.", 400);
+  const reference = String(input.externalReference ?? "").trim();
+  const note = String(input.note ?? "").trim();
+  if (status === "PAID" && reference.length < 3) throw new AppError("Enter the bank/provider transaction reference before marking a payout as paid.", 400);
+  if (status === "FAILED" && note.length < 4) throw new AppError("Provide a short reason for the failed payment.", 400);
+
+  return prisma.$transaction(async (tx) => {
+    const record = await tx.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId } });
+    if (!record) throw new AppError("Payroll disbursement not found.", 404);
+    if (record.status === "PAID") throw new AppError("A recorded paid disbursement cannot be edited. Use a documented reversal/correction process.", 409);
+    const period = await tx.payrollPeriod.findFirst({ where: { id: record.periodId, companyId } });
+    if (!period || !["FINALIZED", "PAID"].includes(period.status)) throw new AppError("Disbursement is not available for this payroll status.", 409);
+
+    const updated = await tx.payrollDisbursement.update({
+      where: { id: record.id },
+      data: {
+        status,
+        externalReference: status === "PAID" ? reference : (input.externalReference === undefined ? record.externalReference : (reference || null)),
+        note: note || record.note,
+        paidAt: status === "PAID" ? new Date() : null,
+        updatedBy: actorId,
+      },
+      include: disbursementInclude,
+    });
+    const all = await tx.payrollDisbursement.findMany({ where: { companyId, periodId: record.periodId }, select: { status: true } });
+    if (all.length > 0 && all.every((row) => row.status === "PAID")) {
+      await tx.payrollPeriod.update({ where: { id: record.periodId }, data: { status: "PAID" } });
+      await tx.payrollItem.updateMany({ where: { companyId, periodId: record.periodId }, data: { status: "PAID" } });
+    } else if (period.status === "PAID") {
+      await tx.payrollPeriod.update({ where: { id: record.periodId }, data: { status: "FINALIZED" } });
+    }
+    await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_disbursement", resourceId: record.id, metadata: { previousStatus: record.status, status, externalReference: status === "PAID" ? reference : undefined, note: note || undefined } });
+    return updated;
+  }, transactionOptions);
+};

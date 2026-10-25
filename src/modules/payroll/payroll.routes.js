@@ -127,6 +127,30 @@ router.post(
   asyncHandler(controller.createPayrollPeriod)
 );
 
+router.post(
+  "/periods/:id/reopen-for-correction",
+  requirePermission("payroll", "runs", "APPROVE"),
+  asyncHandler(controller.reopenForCorrection)
+);
+
+router.get(
+  "/periods/:id/disbursements",
+  requirePermission("payroll", "runs", "READ"),
+  asyncHandler(controller.listDisbursements)
+);
+
+router.post(
+  "/periods/:id/disbursements/prepare",
+  requirePermission("payroll", "runs", "APPROVE"),
+  asyncHandler(controller.prepareDisbursements)
+);
+
+router.patch(
+  "/disbursements/:disbursementId/status",
+  requirePermission("payroll", "runs", "APPROVE"),
+  asyncHandler(controller.updateDisbursement)
+);
+
 router.get(
   "/periods/:id",
   requirePermission("payroll", "runs", "READ"),
