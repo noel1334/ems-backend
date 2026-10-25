@@ -121,6 +121,10 @@ export const creditWalletInTransaction = (tx, companyId, payload) => executeCred
 export const debitWallet = async (companyId, payload) =>
   prisma.$transaction((tx) => executeDebit(tx, companyId, payload), { isolationLevel: "Serializable" });
 
+// Used only by workflows that must atomically reserve wallet funds and create
+// their corresponding business records in the same database transaction.
+export const debitWalletInTransaction = (tx, companyId, payload) => executeDebit(tx, companyId, payload);
+
 export const getWalletDetails = (companyId) => getWallet(companyId);
 
 export const getWalletTransactions = async (companyId, { page = 1, limit = 20, type, status, search, startDate, endDate }) => {

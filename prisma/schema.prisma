@@ -423,21 +423,21 @@ model User {
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 
-  company                      Company?             @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  employee                     Employee?            @relation(fields: [employeeId], references: [id], onDelete: SetNull)
-  roles                        UserRole[]
-  sessions                     UserSession[]
-  auditLogs                    AuditLog[]
-  approvedLeaveRequests        LeaveRequest[]       @relation("LeaveApprovedBy")
-  leaveApprovals               LeaveApproval[]      @relation("LeaveApprovalApprover")
-  biometricRegistrations       BiometricRecord[]    @relation("BiometricRegisteredBy")
-  authTokens                   AuthToken[]
-  notifications                Notification[]
-  generatedScheduleGenerations ScheduleGeneration[] @relation("ScheduleGenerationGeneratedBy")
-  approvedScheduleGenerations  ScheduleGeneration[] @relation("ScheduleGenerationApprovedBy")
-  inventoryTransactionsAsStorekeeper InventoryTransaction[] @relation("InventoryStorekeeper")
-  inventoryVerificationsCreated InventoryVerification[] @relation("InventoryVerificationActor")
-  inventoryLedgerEntries InventoryLedgerEntry[]
+  company                            Company?                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee                           Employee?               @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  roles                              UserRole[]
+  sessions                           UserSession[]
+  auditLogs                          AuditLog[]
+  approvedLeaveRequests              LeaveRequest[]          @relation("LeaveApprovedBy")
+  leaveApprovals                     LeaveApproval[]         @relation("LeaveApprovalApprover")
+  biometricRegistrations             BiometricRecord[]       @relation("BiometricRegisteredBy")
+  authTokens                         AuthToken[]
+  notifications                      Notification[]
+  generatedScheduleGenerations       ScheduleGeneration[]    @relation("ScheduleGenerationGeneratedBy")
+  approvedScheduleGenerations        ScheduleGeneration[]    @relation("ScheduleGenerationApprovedBy")
+  inventoryTransactionsAsStorekeeper InventoryTransaction[]  @relation("InventoryStorekeeper")
+  inventoryVerificationsCreated      InventoryVerification[] @relation("InventoryVerificationActor")
+  inventoryLedgerEntries             InventoryLedgerEntry[]
 
   @@unique([companyId, email])
   @@index([email])
@@ -447,22 +447,22 @@ model User {
 }
 
 model Role {
-  id          String    @id @default(uuid())
-  companyId   String?
-  name        String
-  description String?
-  scope       RoleScope @default(COMPANY)
-  isSystem    Boolean   @default(false)
-  isActive    Boolean   @default(true)
+  id                    String    @id @default(uuid())
+  companyId             String?
+  name                  String
+  description           String?
+  scope                 RoleScope @default(COMPANY)
+  isSystem              Boolean   @default(false)
+  isActive              Boolean   @default(true)
   sourceTemplateId      String?
   sourceTemplateVersion Int?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
-  company     Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  sourceTemplate RoleTemplate? @relation("RoleTemplateCompanyRoles", fields: [sourceTemplateId], references: [id], onDelete: SetNull)
-  users       UserRole[]
-  permissions RolePermission[]
+  company        Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  sourceTemplate RoleTemplate?    @relation("RoleTemplateCompanyRoles", fields: [sourceTemplateId], references: [id], onDelete: SetNull)
+  users          UserRole[]
+  permissions    RolePermission[]
 
   @@unique([companyId, name])
   @@index([companyId])
@@ -472,15 +472,15 @@ model Role {
 }
 
 model Permission {
-  id          String           @id @default(uuid())
-  module      String
-  resource    String
-  action      PermissionAction
-  description String?
-  isActive    Boolean          @default(true)
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
-  roles       RolePermission[]
+  id               String                          @id @default(uuid())
+  module           String
+  resource         String
+  action           PermissionAction
+  description      String?
+  isActive         Boolean                         @default(true)
+  createdAt        DateTime                        @default(now())
+  updatedAt        DateTime                        @updatedAt
+  roles            RolePermission[]
   templateVersions RoleTemplateVersionPermission[]
 
   @@unique([module, resource, action])
@@ -646,17 +646,20 @@ model Employee {
 }
 
 model EmployeeBankAccount {
-  id            String   @id @default(uuid())
-  employeeId    String
-  bankName      String
-  accountName   String
-  accountNumber String
-  accountType   String?
-  isPrimary     Boolean  @default(true)
-  isActive      Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  employee      Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  id                  String   @id @default(uuid())
+  employeeId          String
+  bankName            String
+  // Provider-specific bank codes are not interchangeable between payment providers.
+  paystackBankCode    String?
+  flutterwaveBankCode String?
+  accountName         String
+  accountNumber       String
+  accountType         String?
+  isPrimary           Boolean  @default(true)
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  employee            Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   @@index([employeeId])
   @@index([employeeId, isPrimary])
@@ -960,17 +963,17 @@ model EmployeeShiftAssignment {
 }
 
 model Holiday {
-  id          String   @id @default(uuid())
+  id          String      @id @default(uuid())
   companyId   String
   name        String
   date        DateTime
   description String?
   holidayType HolidayType @default(COMPANY)
-  isRecurring Boolean  @default(false)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  isRecurring Boolean     @default(false)
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  company     Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@index([companyId, date])
   @@index([companyId, isActive])
@@ -1118,24 +1121,24 @@ model SchedulingPolicy {
 }
 
 model ScheduleGeneration {
-  id            String                         @id @default(uuid())
-  companyId     String
-  policyId      String
-  startDate     DateTime
-  endDate       DateTime
-  status        ScheduleGenerationStatus       @default(DRAFT)
-  generatedById String
-  approvedById  String?
-  publishedAt   DateTime?
-  notes         String?
+  id             String                         @id @default(uuid())
+  companyId      String
+  policyId       String
+  startDate      DateTime
+  endDate        DateTime
+  status         ScheduleGenerationStatus       @default(DRAFT)
+  generatedById  String
+  approvedById   String?
+  publishedAt    DateTime?
+  notes          String?
   policySnapshot Json?
-  createdAt     DateTime                       @default(now())
-  updatedAt     DateTime                       @updatedAt
-  company       Company                        @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  policy        SchedulingPolicy               @relation(fields: [policyId], references: [id], onDelete: Cascade)
-  generatedBy   User                           @relation("ScheduleGenerationGeneratedBy", fields: [generatedById], references: [id], onDelete: Restrict)
-  approvedBy    User?                          @relation("ScheduleGenerationApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
-  assignments   ScheduleGenerationAssignment[]
+  createdAt      DateTime                       @default(now())
+  updatedAt      DateTime                       @updatedAt
+  company        Company                        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  policy         SchedulingPolicy               @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  generatedBy    User                           @relation("ScheduleGenerationGeneratedBy", fields: [generatedById], references: [id], onDelete: Restrict)
+  approvedBy     User?                          @relation("ScheduleGenerationApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  assignments    ScheduleGenerationAssignment[]
 
   @@index([companyId, status])
   @@index([policyId, startDate, endDate])
@@ -1337,23 +1340,23 @@ model PayrollStructureComponent {
 }
 
 model EmployeeSalary {
-  id            String           @id @default(uuid())
-  companyId     String
-  employeeId    String
-  structureId   String
-  basicSalary   Decimal          @db.Decimal(18, 2)
+  id                 String           @id @default(uuid())
+  companyId          String
+  employeeId         String
+  structureId        String
+  basicSalary        Decimal          @db.Decimal(18, 2)
   // Optional employee-specific overrides keyed by payroll component code.
   // Example: { "HOUSING": { "amount": 50000 }, "PENSION": { "percentage": 8 } }
   componentOverrides Json?
-  effectiveFrom DateTime
-  effectiveTo   DateTime?
-  status        SalaryStatus     @default(ACTIVE)
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
-  company       Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  employee      Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  structure     PayrollStructure @relation(fields: [structureId], references: [id], onDelete: Restrict)
-  payrollItems  PayrollItem[]
+  effectiveFrom      DateTime
+  effectiveTo        DateTime?
+  status             SalaryStatus     @default(ACTIVE)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  company            Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee           Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  structure          PayrollStructure @relation(fields: [structureId], references: [id], onDelete: Restrict)
+  payrollItems       PayrollItem[]
 
   @@index([companyId, employeeId, status, effectiveFrom])
   @@index([structureId])
@@ -1361,18 +1364,18 @@ model EmployeeSalary {
 }
 
 model PayrollPeriod {
-  id        String        @id @default(uuid())
-  companyId String
-  name      String
-  startDate DateTime
-  endDate   DateTime
-  payDate   DateTime?
-  status    PayrollStatus @default(DRAFT)
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
-  company   Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  items          PayrollItem[]
-  disbursements  PayrollDisbursement[]
+  id            String                @id @default(uuid())
+  companyId     String
+  name          String
+  startDate     DateTime
+  endDate       DateTime
+  payDate       DateTime?
+  status        PayrollStatus         @default(DRAFT)
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  items         PayrollItem[]
+  disbursements PayrollDisbursement[]
 
   @@unique([companyId, name])
   @@index([companyId, startDate, endDate])
@@ -1381,27 +1384,27 @@ model PayrollPeriod {
 }
 
 model PayrollItem {
-  id              String            @id @default(uuid())
+  id              String               @id @default(uuid())
   companyId       String
   periodId        String
   employeeId      String
   salaryId        String
-  basicSalary     Decimal           @db.Decimal(18, 2)
-  totalEarnings   Decimal           @default(0) @db.Decimal(18, 2)
-  totalDeductions Decimal           @default(0) @db.Decimal(18, 2)
-  unpaidDays      Decimal           @default(0) @db.Decimal(10, 2)
-  unpaidDeduction Decimal           @default(0) @db.Decimal(18, 2)
-  grossSalary     Decimal           @default(0) @db.Decimal(18, 2)
-  netSalary       Decimal           @default(0) @db.Decimal(18, 2)
-  status          PayrollStatus     @default(CALCULATED)
-  calculatedAt    DateTime          @default(now())
+  basicSalary     Decimal              @db.Decimal(18, 2)
+  totalEarnings   Decimal              @default(0) @db.Decimal(18, 2)
+  totalDeductions Decimal              @default(0) @db.Decimal(18, 2)
+  unpaidDays      Decimal              @default(0) @db.Decimal(10, 2)
+  unpaidDeduction Decimal              @default(0) @db.Decimal(18, 2)
+  grossSalary     Decimal              @default(0) @db.Decimal(18, 2)
+  netSalary       Decimal              @default(0) @db.Decimal(18, 2)
+  status          PayrollStatus        @default(CALCULATED)
+  calculatedAt    DateTime             @default(now())
   approvedAt      DateTime?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-  company         Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  period          PayrollPeriod     @relation(fields: [periodId], references: [id], onDelete: Cascade)
-  employee        Employee          @relation(fields: [employeeId], references: [id], onDelete: Restrict)
-  salary          EmployeeSalary    @relation(fields: [salaryId], references: [id], onDelete: Restrict)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  company         Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  period          PayrollPeriod        @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  employee        Employee             @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  salary          EmployeeSalary       @relation(fields: [salaryId], references: [id], onDelete: Restrict)
   lines           PayrollItemLine[]
   disbursement    PayrollDisbursement?
 
@@ -1413,26 +1416,33 @@ model PayrollItem {
 }
 
 model PayrollDisbursement {
-  id                String       @id @default(uuid())
-  companyId         String
-  periodId          String
-  payrollItemId     String       @unique
-  employeeId        String
-  amount            Decimal      @db.Decimal(18, 2)
-  currency          String       @default("NGN")
-  status            String       @default("PENDING")
-  method            String       @default("MANUAL_BANK_TRANSFER")
-  externalReference String?
-  note              String?
-  paidAt            DateTime?
-  createdBy         String?
-  updatedBy         String?
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
-  company           Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  period            PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
-  payrollItem       PayrollItem  @relation(fields: [payrollItemId], references: [id], onDelete: Restrict)
-  employee          Employee     @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  id                 String        @id @default(uuid())
+  companyId          String
+  periodId           String
+  payrollItemId      String        @unique
+  employeeId         String
+  amount             Decimal       @db.Decimal(18, 2)
+  currency           String        @default("NGN")
+  status             String        @default("PENDING")
+  method             String        @default("MANUAL_BANK_TRANSFER")
+  // Provider payout state is kept separate from the locally reserved wallet amount.
+  provider           String?
+  providerTransferId String?
+  providerStatus     String?
+  providerResponse   Json?
+  failureReason      String?
+  verifiedAt         DateTime?
+  externalReference  String?
+  note               String?
+  paidAt             DateTime?
+  createdBy          String?
+  updatedBy          String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  company            Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  period             PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  payrollItem        PayrollItem   @relation(fields: [payrollItemId], references: [id], onDelete: Restrict)
+  employee           Employee      @relation(fields: [employeeId], references: [id], onDelete: Restrict)
 
   @@unique([companyId, externalReference])
   @@index([companyId, periodId, status])
@@ -1492,60 +1502,62 @@ model WalletLedgerEntry {
   @@map("wallet_ledger_entries")
 }
 
-
 model InventoryLocation {
-  id          String   @id @default(uuid())
-  companyId   String
-  name        String
-  code        String
-  address     String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  items       InventoryItem[]
+  id           String                 @id @default(uuid())
+  companyId    String
+  name         String
+  code         String
+  address      String?
+  isActive     Boolean                @default(true)
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  company      Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  items        InventoryItem[]
   transactions InventoryTransaction[]
+
   @@unique([companyId, code])
   @@index([companyId, isActive])
   @@map("inventory_locations")
 }
 
 model InventorySupplier {
-  id          String   @id @default(uuid())
-  companyId   String
-  name        String
-  email       String?
-  phone       String?
-  address     String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  id            String                 @id @default(uuid())
+  companyId     String
+  name          String
+  email         String?
+  phone         String?
+  address       String?
+  isActive      Boolean                @default(true)
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+  company       Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
   ledgerEntries InventoryLedgerEntry[]
+
   @@unique([companyId, name])
   @@index([companyId, isActive])
   @@map("inventory_suppliers")
 }
 
 model InventoryItem {
-  id              String   @id @default(uuid())
-  companyId       String
-  locationId      String?
-  sku             String
-  barcode         String
-  name            String
-  category        String?
-  unit            String   @default("piece")
-  quantity        Int      @default(0)
-  reservedQuantity Int     @default(0)
-  minimumQuantity Int      @default(0)
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  location        InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  transactions    InventoryTransaction[]
-  ledgerEntries   InventoryLedgerEntry[]
+  id               String                 @id @default(uuid())
+  companyId        String
+  locationId       String?
+  sku              String
+  barcode          String
+  name             String
+  category         String?
+  unit             String                 @default("piece")
+  quantity         Int                    @default(0)
+  reservedQuantity Int                    @default(0)
+  minimumQuantity  Int                    @default(0)
+  isActive         Boolean                @default(true)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  company          Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  location         InventoryLocation?     @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  transactions     InventoryTransaction[]
+  ledgerEntries    InventoryLedgerEntry[]
+
   @@unique([companyId, sku])
   @@unique([companyId, barcode])
   @@index([companyId, isActive])
@@ -1554,22 +1566,23 @@ model InventoryItem {
 }
 
 model InventoryVerification {
-  id              String   @id @default(uuid())
-  companyId       String
-  employeeId      String
-  actorUserId     String
-  method          InventoryVerificationMethod
-  biometricId     String
-  provider        String?
+  id                    String                      @id @default(uuid())
+  companyId             String
+  employeeId            String
+  actorUserId           String
+  method                InventoryVerificationMethod
+  biometricId           String
+  provider              String?
   verificationReference String
-  status          InventoryVerificationStatus @default(VERIFIED)
-  expiresAt       DateTime
-  usedAt          DateTime?
-  createdAt       DateTime @default(now())
-  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  actorUser       User     @relation("InventoryVerificationActor", fields: [actorUserId], references: [id], onDelete: Restrict)
-  transaction     InventoryTransaction?
+  status                InventoryVerificationStatus @default(VERIFIED)
+  expiresAt             DateTime
+  usedAt                DateTime?
+  createdAt             DateTime                    @default(now())
+  company               Company                     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee              Employee                    @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  actorUser             User                        @relation("InventoryVerificationActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  transaction           InventoryTransaction?
+
   @@unique([verificationReference])
   @@index([companyId, employeeId, status])
   @@index([expiresAt])
@@ -1577,29 +1590,30 @@ model InventoryVerification {
 }
 
 model InventoryTransaction {
-  id              String   @id @default(uuid())
-  companyId       String
-  itemId          String
-  employeeId      String
-  storekeeperId   String
-  locationId      String?
-  verificationId  String   @unique
-  type            InventoryTransactionType
-  status          InventoryTransactionStatus @default(PENDING_EMPLOYEE_CONFIRMATION)
-  quantity        Int
-  note            String?
-  employeeNote    String?
-  confirmedAt     DateTime?
-  disputedAt      DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  item            InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
-  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
-  storekeeper     User @relation("InventoryStorekeeper", fields: [storekeeperId], references: [id], onDelete: Restrict)
-  location        InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  verification   InventoryVerification @relation(fields: [verificationId], references: [id], onDelete: Restrict)
+  id             String                     @id @default(uuid())
+  companyId      String
+  itemId         String
+  employeeId     String
+  storekeeperId  String
+  locationId     String?
+  verificationId String                     @unique
+  type           InventoryTransactionType
+  status         InventoryTransactionStatus @default(PENDING_EMPLOYEE_CONFIRMATION)
+  quantity       Int
+  note           String?
+  employeeNote   String?
+  confirmedAt    DateTime?
+  disputedAt     DateTime?
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+  company        Company                    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  item           InventoryItem              @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  employee       Employee                   @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  storekeeper    User                       @relation("InventoryStorekeeper", fields: [storekeeperId], references: [id], onDelete: Restrict)
+  location       InventoryLocation?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  verification   InventoryVerification      @relation(fields: [verificationId], references: [id], onDelete: Restrict)
   ledgerEntry    InventoryLedgerEntry?
+
   @@index([companyId, status, createdAt])
   @@index([companyId, employeeId, createdAt])
   @@index([companyId, itemId, createdAt])
@@ -1607,24 +1621,25 @@ model InventoryTransaction {
 }
 
 model InventoryLedgerEntry {
-  id             String   @id @default(uuid())
-  companyId      String
-  itemId         String
-  transactionId  String?  @unique
-  supplierId     String?
-  actorUserId    String?
-  type           InventoryLedgerType
-  quantity       Int
-  balanceBefore  Int
-  balanceAfter   Int
-  reference      String
-  note           String?
-  createdAt      DateTime @default(now())
-  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  item           InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
-  transaction    InventoryTransaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
-  supplier       InventorySupplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
-  actorUser      User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  id            String                @id @default(uuid())
+  companyId     String
+  itemId        String
+  transactionId String?               @unique
+  supplierId    String?
+  actorUserId   String?
+  type          InventoryLedgerType
+  quantity      Int
+  balanceBefore Int
+  balanceAfter  Int
+  reference     String
+  note          String?
+  createdAt     DateTime              @default(now())
+  company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  item          InventoryItem         @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  transaction   InventoryTransaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  supplier      InventorySupplier?    @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  actorUser     User?                 @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
   @@index([companyId, itemId, createdAt])
   @@index([companyId, type, createdAt])
   @@map("inventory_ledger_entries")
@@ -1663,34 +1678,35 @@ model BiometricRecord {
   @@map("biometric_records")
 }
 
-
 // Platform-owned role templates are versioned defaults; tenant Role records are independent snapshots.
 model RoleTemplate {
-  id          String   @id @default(uuid())
-  key         String   @unique
-  name        String
-  description String?
-  industry    String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  versions    RoleTemplateVersion[]
-  companyRoles Role[] @relation("RoleTemplateCompanyRoles")
+  id           String                @id @default(uuid())
+  key          String                @unique
+  name         String
+  description  String?
+  industry     String?
+  isActive     Boolean               @default(true)
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  versions     RoleTemplateVersion[]
+  companyRoles Role[]                @relation("RoleTemplateCompanyRoles")
+
   @@index([industry, isActive])
   @@map("role_templates")
 }
 
 model RoleTemplateVersion {
-  id          String   @id @default(uuid())
+  id          String                          @id @default(uuid())
   templateId  String
   version     Int
   description String?
-  status      String   @default("DRAFT")
+  status      String                          @default("DRAFT")
   createdById String?
   publishedAt DateTime?
-  createdAt   DateTime @default(now())
-  template    RoleTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  createdAt   DateTime                        @default(now())
+  template    RoleTemplate                    @relation(fields: [templateId], references: [id], onDelete: Cascade)
   permissions RoleTemplateVersionPermission[]
+
   @@unique([templateId, version])
   @@index([templateId, status])
   @@map("role_template_versions")
@@ -1700,7 +1716,8 @@ model RoleTemplateVersionPermission {
   versionId    String
   permissionId String
   version      RoleTemplateVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
-  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  permission   Permission          @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
   @@id([versionId, permissionId])
   @@index([permissionId])
   @@map("role_template_version_permissions")

@@ -1080,6 +1080,9 @@ export const updatePayrollDisbursement = async (companyId, disbursementId, actor
     const record = await tx.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId } });
     if (!record) throw new AppError("Payroll disbursement not found.", 404);
     if (record.status === "PAID") throw new AppError("A recorded paid disbursement cannot be edited. Use a documented reversal/correction process.", 409);
+    if (record.provider && ["PROCESSING", "FAILED"].includes(record.status)) {
+      throw new AppError("Provider-managed salary transfers cannot be manually reconciled or retried. Verify the transfer status first and inspect the provider dashboard for failures.", 409);
+    }
     const period = await tx.payrollPeriod.findFirst({ where: { id: record.periodId, companyId } });
     if (!period || !["FINALIZED", "PAID"].includes(period.status)) throw new AppError("Disbursement is not available for this payroll status.", 409);
 

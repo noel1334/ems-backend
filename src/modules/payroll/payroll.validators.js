@@ -120,6 +120,12 @@ export const payrollPeriodSchema = z.object({
   }
 });
 
+export const payrollPayoutExecutionSchema = z.object({
+  provider: z.enum(["PAYSTACK", "FLUTTERWAVE"]),
+  // Explicit second-step confirmation is required even for API callers.
+  confirm: z.literal(true),
+});
+
 export const listSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),

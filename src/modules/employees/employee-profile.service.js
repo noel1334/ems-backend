@@ -88,6 +88,8 @@ export const addBankAccountService = async ({
                     {
                         employeeId,
                         bankName: data.bankName,
+                        paystackBankCode: data.paystackBankCode ?? null,
+                        flutterwaveBankCode: data.flutterwaveBankCode ?? null,
                         accountName: data.accountName,
                         accountNumber: data.accountNumber,
                         accountType:

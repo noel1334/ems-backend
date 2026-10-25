@@ -12,6 +12,7 @@ import {
   employeeSalarySchema,
   listSchema,
   payrollPeriodSchema,
+  payrollPayoutExecutionSchema,
   salaryListSchema,
   salaryStatusSchema,
   structureSchema,
@@ -143,6 +144,20 @@ router.post(
   "/periods/:id/disbursements/prepare",
   requirePermission("payroll", "runs", "APPROVE"),
   asyncHandler(controller.prepareDisbursements)
+);
+
+// Real-money payout initiation is feature-flagged on the server and requires explicit confirmation.
+router.post(
+  "/periods/:id/disbursements/execute",
+  requirePermission("payroll", "runs", "APPROVE"),
+  validate(payrollPayoutExecutionSchema),
+  asyncHandler(controller.executeDisbursementPayouts)
+);
+
+router.post(
+  "/disbursements/:disbursementId/verify",
+  requirePermission("payroll", "runs", "APPROVE"),
+  asyncHandler(controller.verifyDisbursementPayout)
 );
 
 router.patch(

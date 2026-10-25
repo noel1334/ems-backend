@@ -2,6 +2,8 @@ export const mapBankAccount = (account) => ({
     id: account.id,
     employeeId: account.employeeId,
     bankName: account.bankName,
+    paystackBankCode: account.paystackBankCode ?? null,
+    flutterwaveBankCode: account.flutterwaveBankCode ?? null,
     accountName: account.accountName,
     accountNumber: account.accountNumber,
     accountType: account.accountType,

@@ -1,3 +1,5 @@
+import { executePayrollPayouts, verifyPayrollPayout } from "./payroll.payout.service.js";
+
 import {
   addComponent,
   updateComponent as updatePayrollComponent,
@@ -137,3 +139,5 @@ export const reopenForCorrection = async (req, res) => success(res, await reopen
 export const listDisbursements = async (req, res) => success(res, await listPayrollDisbursements(getCompanyId(req), req.params.id));
 export const prepareDisbursements = async (req, res) => success(res, await preparePayrollDisbursements(getCompanyId(req), req.params.id, req.user.userId), 201);
 export const updateDisbursement = async (req, res) => success(res, await updatePayrollDisbursement(getCompanyId(req), req.params.disbursementId, req.user.userId, req.body));
+export const executeDisbursementPayouts = async (req, res) => success(res, await executePayrollPayouts(getCompanyId(req), req.params.id, req.user.userId, req.body.provider), 202);
+export const verifyDisbursementPayout = async (req, res) => success(res, await verifyPayrollPayout(getCompanyId(req), req.params.disbursementId, req.user.userId));

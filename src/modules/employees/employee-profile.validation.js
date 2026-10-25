@@ -9,6 +9,9 @@ export const createBankAccountSchema = z.object({
         .min(2)
         .max(150),
 
+    paystackBankCode: z.string().trim().max(30).optional().nullable(),
+    flutterwaveBankCode: z.string().trim().max(30).optional().nullable(),
+
     accountName: z
         .string()
         .trim()
@@ -45,6 +48,9 @@ export const updateBankAccountSchema = z
             .min(2)
             .max(150)
             .optional(),
+
+        paystackBankCode: z.string().trim().max(30).optional().nullable(),
+        flutterwaveBankCode: z.string().trim().max(30).optional().nullable(),
 
         accountName: z
             .string()
