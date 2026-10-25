@@ -81,7 +81,7 @@ export const getMyPayslips = async ({ userId, companyId, page = 1, limit = 12 })
   const employeeId = await employeeForUser(userId, companyId);
   const take = Math.min(Math.max(Number(limit) || 12, 1), 50);
   const skip = (Math.max(Number(page) || 1, 1) - 1) * take;
-  const where = { companyId, employeeId };
+  const where = { companyId, employeeId, period: { is: { status: { in: ["FINALIZED", "PAID"] } } } };
   const [items, total] = await prisma.$transaction([
     prisma.payrollItem.findMany({ where, orderBy: { period: { startDate: "desc" } }, skip, take, include: { period: true, lines: true } }),
     prisma.payrollItem.count({ where }),
