@@ -26,6 +26,12 @@ const router = Router();
 
 router.use(authenticate);
 
+router.get(
+  "/payouts/config",
+  requirePermission("payroll", "runs", "READ"),
+  asyncHandler(controller.getPayoutConfiguration)
+);
+
 /*
                   |--------------------------------------------------------------------------
                   | Payroll Structures

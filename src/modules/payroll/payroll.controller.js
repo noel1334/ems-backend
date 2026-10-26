@@ -1,4 +1,4 @@
-import { executePayrollPayouts, verifyPayrollPayout } from "./payroll.payout.service.js";
+import { executePayrollPayouts, verifyPayrollPayout, getPayrollPayoutConfiguration } from "./payroll.payout.service.js";
 
 import {
   addComponent,
@@ -141,3 +141,5 @@ export const prepareDisbursements = async (req, res) => success(res, await prepa
 export const updateDisbursement = async (req, res) => success(res, await updatePayrollDisbursement(getCompanyId(req), req.params.disbursementId, req.user.userId, req.body));
 export const executeDisbursementPayouts = async (req, res) => success(res, await executePayrollPayouts(getCompanyId(req), req.params.id, req.user.userId, req.body.provider), 202);
 export const verifyDisbursementPayout = async (req, res) => success(res, await verifyPayrollPayout(getCompanyId(req), req.params.disbursementId, req.user.userId));
+
+export const getPayoutConfiguration = async (req, res) => success(res, await getPayrollPayoutConfiguration());

@@ -1,3 +1,4 @@
+import { getBankDirectory } from "./bank-directory.service.js";
 import * as service from "./payment.service.js";
 import { initializePaymentSchema, verifyPaymentSchema, paymentQuerySchema, validateBody, validateQuery } from "./payment.validation.js";
 
@@ -28,3 +29,5 @@ export const paystackWebhook = async (req, res) => {
 
 export const flutterwaveWebhook = async (req, res) =>
   res.json(await service.processFlutterwaveWebhook(req.headers["verif-hash"], req.body));
+
+export const listBanks = async (req, res) => res.json({ success: true, data: await getBankDirectory() });

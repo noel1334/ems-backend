@@ -10,7 +10,6 @@ import designationRoutes from "../modules/designations/designation.routes.js";
 
 import employeeRoutes from "../modules/employees/employee.routes.js";
 import employeeProfileRoutes from "../modules/employees/employee-profile.routes.js";
-import bankDirectoryRoutes from "../modules/employees/bank-directory.routes.js";
 
 import shiftRoutes from "../modules/shifts/shift.routes.js";
 import scheduleRoutes from "../modules/schedules/schedule.routes.js";
@@ -46,6 +45,8 @@ const openapi = { openapi: "3.0.3", info: { title: "EMS API", version: "1.0.0" }
   "/auth/email/verify": { post: { summary: "Verify email", responses: { "200": { description: "Verified" } } } },
   "/payments/webhooks/paystack": { post: { summary: "Paystack webhook", responses: { "200": { description: "Received" } } } },
   "/payments/webhooks/flutterwave": { post: { summary: "Flutterwave webhook", responses: { "200": { description: "Received" } } } },
+  "/payments/banks": { get: { summary: "List supported Nigerian banks and provider-specific transfer codes", responses: { "200": { description: "Bank directory" }, "401": { description: "Authentication required" } } } },
+  "/payroll/payouts/config": { get: { summary: "Read automated payroll payout configuration", responses: { "200": { description: "Payout configuration" }, "403": { description: "Permission denied" } } } },
   "/biometrics/verify-and-attend": { post: { summary: "Verify biometric and record attendance", responses: { "200": { description: "Attendance recorded" } } } }
 } };
 
@@ -109,7 +110,6 @@ router.use("/designations", designationRoutes);
 */
 
 
-router.use("/bank-directory", bankDirectoryRoutes);
 router.use("/employees", employeeRoutes);
 router.use("/employees", employeeProfileRoutes);
 

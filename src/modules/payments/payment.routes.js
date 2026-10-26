@@ -10,6 +10,7 @@ router.post("/webhooks/paystack", controller.paystackWebhook);
 router.post("/webhooks/flutterwave", controller.flutterwaveWebhook);
 
 router.use(authenticate);
+router.get("/banks", controller.listBanks);
 router.get("/", requirePermission("payments", "payments", "READ"), controller.list);
 router.get("/:id", requirePermission("payments", "payments", "READ"), controller.getOne);
 router.post("/initialize", paymentRateLimit, requirePermission("payments", "payments", "CREATE"), controller.initialize);

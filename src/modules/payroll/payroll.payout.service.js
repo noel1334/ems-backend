@@ -7,12 +7,26 @@ import { creditWalletInTransaction, debitWalletInTransaction } from "../wallet/w
 import { createPaystackTransferRecipient, initiatePaystackTransfer, verifyPaystackTransfer } from "../payments/paystack/paystack.transfer.client.js";
 import { initiateFlutterwaveTransfer, verifyFlutterwaveTransfer } from "../payments/flutterwave/flutterwave.transfer.client.js";
 import { makePayrollPayoutReference, normalizePayrollPayoutStatus, isDefinitiveTransferFailure } from "./payroll.payout.utils.js";
-import { assertPayrollPayoutProviderConfiguration } from "./payroll.payout.config.js";
 
 const money = (value) => new Decimal(value ?? 0).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 const transactionOptions = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30000 };
 
-const assertPayoutEnabled = (provider) => assertPayrollPayoutProviderConfiguration(provider);
+export const getPayrollPayoutConfiguration = async () => ({
+  enabled: String(process.env.PAYROLL_PAYOUTS_ENABLED || "false").toLowerCase() === "true",
+  currency: "NGN",
+  providers: {
+    PAYSTACK: { configured: Boolean(process.env.PAYSTACK_SECRET_KEY) },
+    FLUTTERWAVE: { configured: Boolean(process.env.FLUTTERWAVE_SECRET_KEY), wholeNairaAmountsOnly: true },
+  },
+});
+
+const assertPayoutEnabled = (provider) => {
+  if (String(process.env.PAYROLL_PAYOUTS_ENABLED || "false").toLowerCase() !== "true") {
+    throw new AppError("Automated salary payouts are disabled. Set PAYROLL_PAYOUTS_ENABLED=true on the backend only after completing provider test-mode checks.", 503, { code: "PAYROLL_PAYOUTS_DISABLED" });
+  }
+  if (provider === "PAYSTACK" && !process.env.PAYSTACK_SECRET_KEY) throw new AppError("Paystack payouts are not configured: PAYSTACK_SECRET_KEY is missing on the backend.", 503);
+  if (provider === "FLUTTERWAVE" && !process.env.FLUTTERWAVE_SECRET_KEY) throw new AppError("Flutterwave payouts are not configured: FLUTTERWAVE_SECRET_KEY is missing on the backend.", 503);
+};
 
 const disbursementInclude = {
   employee: { select: { id: true, employeeNumber: true, firstName: true, middleName: true, lastName: true, email: true } },
@@ -204,22 +218,24 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
 };
 
 export const verifyPayrollPayout = async (companyId, disbursementId, actorId) => {
+  // The kill switch blocks new transfers, not status checks for money already submitted.
   const payout = await prisma.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId }, include: { employee: { include: { bankAccounts: { where: { isActive: true, isPrimary: true }, take: 1 } } } } });
   if (!payout) throw new AppError("Payroll disbursement not found.", 404);
   if (!payout.provider || !["PAYSTACK", "FLUTTERWAVE"].includes(payout.provider)) throw new AppError("This is a manual disbursement and cannot be verified through a payout provider.", 409);
-  assertPayoutEnabled(payout.provider);
   if (payout.status === "PAID") return payout;
   if (payout.status === "FAILED") throw new AppError("This transfer is marked failed and the wallet amount has been refunded. Inspect the provider dashboard before making any new payment.", 409);
   if (payout.status !== "PROCESSING") throw new AppError("Only a submitted provider transfer can be verified.", 409);
 
   let response;
   if (payout.provider === "PAYSTACK") {
+    if (!process.env.PAYSTACK_SECRET_KEY) throw new AppError("PAYSTACK_SECRET_KEY is not configured.", 503);
     response = await verifyPaystackTransfer(payout.externalReference);
     if (response?.status !== true || !response?.data) throw new AppError(response?.message || "Paystack could not verify this transfer yet.", 502);
     if (String(response.data.reference || "") !== String(payout.externalReference)) throw new AppError("Paystack transfer reference mismatch. Wallet funds remain reserved for investigation.", 409);
     const actualKobo = money(new Decimal(response.data.amount ?? 0).div(100));
     if (!actualKobo.eq(money(payout.amount)) || String(response.data.currency || "NGN").toUpperCase() !== "NGN") throw new AppError("Paystack transfer amount or currency mismatch. Wallet funds remain reserved for investigation.", 409);
   } else {
+    if (!process.env.FLUTTERWAVE_SECRET_KEY) throw new AppError("FLUTTERWAVE_SECRET_KEY is not configured.", 503);
     if (!payout.providerTransferId) throw new AppError("Flutterwave did not return a transfer ID. Find this reference in the provider dashboard and do not retry automatically.", 409);
     response = await verifyFlutterwaveTransfer(payout.providerTransferId);
     if (response?.status !== "success" || !response?.data) throw new AppError(response?.message || "Flutterwave could not verify this transfer yet.", 502);
