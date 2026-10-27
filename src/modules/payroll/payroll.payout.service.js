@@ -7,12 +7,14 @@ import { creditWalletInTransaction, debitWalletInTransaction } from "../wallet/w
 import { createPaystackTransferRecipient, initiatePaystackTransfer, verifyPaystackTransfer } from "../payments/paystack/paystack.transfer.client.js";
 import { initiateFlutterwaveTransfer, verifyFlutterwaveTransfer } from "../payments/flutterwave/flutterwave.transfer.client.js";
 import { makePayrollPayoutReference, normalizePayrollPayoutStatus, isDefinitiveTransferFailure } from "./payroll.payout.utils.js";
+import { assertPayrollPayoutProviderConfiguration, getPayrollPayoutMode } from "./payroll.payout.config.js";
 
 const money = (value) => new Decimal(value ?? 0).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 const transactionOptions = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30000 };
 
 export const getPayrollPayoutConfiguration = async () => ({
   enabled: String(process.env.PAYROLL_PAYOUTS_ENABLED || "false").toLowerCase() === "true",
+  mode: getPayrollPayoutMode(),
   currency: "NGN",
   providers: {
     PAYSTACK: { configured: Boolean(process.env.PAYSTACK_SECRET_KEY) },
@@ -20,13 +22,7 @@ export const getPayrollPayoutConfiguration = async () => ({
   },
 });
 
-const assertPayoutEnabled = (provider) => {
-  if (String(process.env.PAYROLL_PAYOUTS_ENABLED || "false").toLowerCase() !== "true") {
-    throw new AppError("Automated salary payouts are disabled. Set PAYROLL_PAYOUTS_ENABLED=true on the backend only after completing provider test-mode checks.", 503, { code: "PAYROLL_PAYOUTS_DISABLED" });
-  }
-  if (provider === "PAYSTACK" && !process.env.PAYSTACK_SECRET_KEY) throw new AppError("Paystack payouts are not configured: PAYSTACK_SECRET_KEY is missing on the backend.", 503);
-  if (provider === "FLUTTERWAVE" && !process.env.FLUTTERWAVE_SECRET_KEY) throw new AppError("Flutterwave payouts are not configured: FLUTTERWAVE_SECRET_KEY is missing on the backend.", 503);
-};
+const assertPayoutEnabled = (provider) => assertPayrollPayoutProviderConfiguration(provider);
 
 const disbursementInclude = {
   employee: { select: { id: true, employeeNumber: true, firstName: true, middleName: true, lastName: true, email: true } },
