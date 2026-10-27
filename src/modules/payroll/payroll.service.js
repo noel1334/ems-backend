@@ -485,6 +485,60 @@ export const createPeriod = async (companyId, data) => {
   });
 };
 
+export const updatePeriod = async (companyId, periodId, data, actorId = null) => {
+  const startDate = dateOnly(data.startDate);
+  const endDate = dateOnly(data.endDate);
+  if (endDate < startDate) throw new AppError("End date cannot be before start date.", 400);
+  const payDate = data.payDate ? dateOnly(data.payDate) : null;
+
+  return prisma.$transaction(async (tx) => {
+    const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
+    if (!period) throw new AppError("Payroll period not found.", 404);
+    if (period.status !== "DRAFT") throw new AppError("Only draft payroll periods can be edited. Reopen an eligible payroll for correction first.", 409);
+
+    const [itemCount, disbursementCount, batchCount] = await Promise.all([
+      tx.payrollItem.count({ where: { companyId, periodId } }),
+      tx.payrollDisbursement.count({ where: { companyId, periodId } }),
+      tx.payrollPayoutBatch.count({ where: { companyId, periodId } }),
+    ]);
+    if (itemCount || disbursementCount || batchCount) {
+      throw new AppError("This payroll period has payroll or payment records and cannot be edited. Preserve the audit trail and create a documented correction instead.", 409);
+    }
+
+    const duplicate = await tx.payrollPeriod.findFirst({
+      where: { companyId, id: { not: periodId }, OR: [{ name: data.name }, { startDate, endDate }] },
+      select: { id: true, name: true },
+    });
+    if (duplicate) throw new AppError("Another payroll period already uses this name or date range.", 409);
+
+    const updated = await tx.payrollPeriod.update({
+      where: { id: periodId },
+      data: { name: data.name.trim(), startDate, endDate, payDate },
+    });
+    await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_period", resourceId: periodId, metadata: { event: "PERIOD_DETAILS_UPDATED", previousName: period.name, name: updated.name, startDate: updated.startDate, endDate: updated.endDate, payDate: updated.payDate } });
+    return updated;
+  }, transactionOptions);
+};
+
+export const deletePeriod = async (companyId, periodId, actorId = null) => prisma.$transaction(async (tx) => {
+  const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
+  if (!period) throw new AppError("Payroll period not found.", 404);
+  if (period.status !== "DRAFT") throw new AppError("Only draft payroll periods can be deleted. Processed payroll is retained for audit history.", 409);
+
+  const [itemCount, disbursementCount, batchCount] = await Promise.all([
+    tx.payrollItem.count({ where: { companyId, periodId } }),
+    tx.payrollDisbursement.count({ where: { companyId, periodId } }),
+    tx.payrollPayoutBatch.count({ where: { companyId, periodId } }),
+  ]);
+  if (itemCount || disbursementCount || batchCount) {
+    throw new AppError("This payroll period has payroll or payment records and cannot be deleted.", 409);
+  }
+
+  await writeAudit(tx, { companyId, actorUserId: actorId, action: "DELETE", module: "payroll", resource: "payroll_period", resourceId: periodId, metadata: { name: period.name, startDate: period.startDate, endDate: period.endDate, payDate: period.payDate } });
+  await tx.payrollPeriod.delete({ where: { id: periodId } });
+  return { id: periodId, deleted: true };
+}, transactionOptions);
+
 export const listPeriods = async (companyId, query) => {
   const where = {
     companyId,

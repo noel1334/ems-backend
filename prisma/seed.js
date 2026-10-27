@@ -431,6 +431,7 @@ const permissions = [
   { module: "payroll", resource: "payslips", action: "READ", description: "View payslips" },
   { module: "payroll", resource: "runs", action: "APPROVE", description: "Approve payroll runs" },
   { module: "payroll", resource: "runs", action: "CREATE", description: "Create payroll runs" },
+  { module: "payroll", resource: "runs", action: "DELETE", description: "Delete empty draft payroll runs" },
   { module: "payroll", resource: "runs", action: "READ", description: "View payroll runs" },
   { module: "payroll", resource: "runs", action: "UPDATE", description: "Update payroll runs" },
   { module: "payroll", resource: "salaries", action: "CREATE", description: "Create employee salary records" },

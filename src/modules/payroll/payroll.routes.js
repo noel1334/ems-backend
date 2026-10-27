@@ -137,6 +137,19 @@ router.post(
   asyncHandler(controller.createPayrollPeriod)
 );
 
+router.patch(
+  "/periods/:id",
+  requirePermission("payroll", "runs", "UPDATE"),
+  validate(payrollPeriodSchema),
+  asyncHandler(controller.updatePayrollPeriod)
+);
+
+router.delete(
+  "/periods/:id",
+  requirePermission("payroll", "runs", "DELETE"),
+  asyncHandler(controller.deletePayrollPeriod)
+);
+
 router.post(
   "/periods/:id/reopen-for-correction",
   requirePermission("payroll", "runs", "APPROVE"),
