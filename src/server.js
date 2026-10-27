@@ -5,6 +5,7 @@ import logger from "./config/logger.js";
 import { bootstrapDemoData } from "./bootstrap/demo-bootstrap.js";
 import { bootstrapRoleDefinitions } from "./bootstrap/role-bootstrap.js";
 import { reconcilePayrollSalaryPermissions } from "./bootstrap/payroll-salary-permission-bootstrap.js";
+import { startPayrollPayoutReconciliationWorker } from "./modules/payroll/payroll.payout.service.js";
 
 const startServer = async () => {
   try {
@@ -15,15 +16,17 @@ const startServer = async () => {
     await reconcilePayrollSalaryPermissions();
     await bootstrapDemoData();
 
+    const stopPayoutReconciliation = startPayrollPayoutReconciliationWorker();
     const server = app.listen(env.PORT, () => {
       logger.info(`EMS API running on port ${env.PORT}`);
-
       logger.info(`Environment: ${env.NODE_ENV}`);
+      logger.info("Payroll payout status reconciliation worker registered");
     });
 
     const shutdown = async (signal) => {
       logger.info(`${signal} received. Shutting down...`);
 
+      stopPayoutReconciliation();
       server.close(async () => {
         await disconnectDatabase();
 

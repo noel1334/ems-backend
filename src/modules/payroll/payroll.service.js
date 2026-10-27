@@ -988,6 +988,7 @@ export const getEmployeePayrollHistory = async (companyId, employeeId) => {
     include: {
       period: true,
       lines: true,
+      disbursement: { select: { status: true, amount: true, paidAt: true, externalReference: true, providerStatus: true, failureReason: true } },
     },
     orderBy: {
       createdAt: "desc",

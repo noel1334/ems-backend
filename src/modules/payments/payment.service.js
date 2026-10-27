@@ -8,6 +8,7 @@ import * as flutterwave from "./flutterwave/flutterwave.service.js";
 import { mapPayment, mapPayments } from "./payment.mapper.js";
 import { PAYMENT_PROVIDER, PAYMENT_STATUS, PAYMENT_PURPOSE, PAYMENT_CURRENCY } from "./payment.constants.js";
 import { creditWalletInTransaction } from "../wallet/wallet.service.js";
+import { processPayrollPayoutWebhook } from "../payroll/payroll.payout.service.js";
 
 const money = (value) => new Decimal(value).toDecimalPlaces(2);
 const generateReference = () => `PAY-${Date.now()}-${crypto.randomBytes(8).toString("hex").toUpperCase()}`;
@@ -243,6 +244,9 @@ export const getPayment = async (companyId, id) => {
 
 export const processPaystackWebhook = async (rawBody, signature, payload) => {
   if (!paystack.verifyWebhookSignature(rawBody, signature)) throw new AppError("Invalid Paystack webhook signature", 401, { code: "INVALID_WEBHOOK_SIGNATURE" });
+  if (String(payload?.event || "").toLowerCase().startsWith("transfer.")) {
+    return processPayrollPayoutWebhook("PAYSTACK", payload);
+  }
   if (payload?.event !== "charge.success") return { received: true, processed: false };
 
   const reference = payload?.data?.reference;
@@ -260,6 +264,9 @@ export const processPaystackWebhook = async (rawBody, signature, payload) => {
 
 export const processFlutterwaveWebhook = async (signature, payload) => {
   if (!flutterwave.verifyWebhookSignature(signature)) throw new AppError("Invalid Flutterwave webhook signature", 401, { code: "INVALID_WEBHOOK_SIGNATURE" });
+  if (String(payload?.event || "").toLowerCase().startsWith("transfer.")) {
+    return processPayrollPayoutWebhook("FLUTTERWAVE", payload);
+  }
   if (payload?.event !== "charge.completed") return { received: true, processed: false };
 
   const reference = payload?.data?.tx_ref;

@@ -1,4 +1,8 @@
-import { executePayrollPayouts, verifyPayrollPayout, getPayrollPayoutConfiguration } from "./payroll.payout.service.js";
+import {
+  executePayrollPayouts, verifyPayrollPayout, getPayrollPayoutConfiguration,
+  previewPayrollPayoutBatch, approvePayrollPayoutBatch, getPayrollPayoutBatch, retryFailedPayrollPayout,
+  reconcilePayrollPayoutFee,
+} from "./payroll.payout.service.js";
 
 import {
   addComponent,
@@ -143,3 +147,9 @@ export const executeDisbursementPayouts = async (req, res) => success(res, await
 export const verifyDisbursementPayout = async (req, res) => success(res, await verifyPayrollPayout(getCompanyId(req), req.params.disbursementId, req.user.userId));
 
 export const getPayoutConfiguration = async (req, res) => success(res, await getPayrollPayoutConfiguration());
+
+export const getPayoutBatch = async (req, res) => success(res, await getPayrollPayoutBatch(getCompanyId(req), req.params.id));
+export const previewPayoutBatch = async (req, res) => success(res, await previewPayrollPayoutBatch(getCompanyId(req), req.params.id, req.user.userId, req.body.provider));
+export const approvePayoutBatch = async (req, res) => success(res, await approvePayrollPayoutBatch(getCompanyId(req), req.params.id, req.user.userId));
+export const retryDisbursementPayout = async (req, res) => success(res, await retryFailedPayrollPayout(getCompanyId(req), req.params.disbursementId, req.user.userId, req.body?.provider), 202);
+export const reconcileDisbursementPayoutFee = async (req, res) => success(res, await reconcilePayrollPayoutFee(getCompanyId(req), req.params.disbursementId, req.user.userId, req.body));

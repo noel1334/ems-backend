@@ -13,6 +13,9 @@ import {
   listSchema,
   payrollPeriodSchema,
   payrollPayoutExecutionSchema,
+  payrollPayoutPreviewSchema,
+  payrollPayoutRetrySchema,
+  payrollPayoutFeeReconciliationSchema,
   salaryListSchema,
   salaryStatusSchema,
   structureSchema,
@@ -141,6 +144,25 @@ router.post(
 );
 
 router.get(
+  "/periods/:id/disbursements/batch",
+  requirePermission("payroll", "runs", "READ"),
+  asyncHandler(controller.getPayoutBatch)
+);
+
+router.post(
+  "/periods/:id/disbursements/preview",
+  requirePermission("payroll", "runs", "APPROVE"),
+  validate(payrollPayoutPreviewSchema),
+  asyncHandler(controller.previewPayoutBatch)
+);
+
+router.post(
+  "/periods/:id/disbursements/approve",
+  requirePermission("payroll", "runs", "APPROVE"),
+  asyncHandler(controller.approvePayoutBatch)
+);
+
+router.get(
   "/periods/:id/disbursements",
   requirePermission("payroll", "runs", "READ"),
   asyncHandler(controller.listDisbursements)
@@ -161,9 +183,23 @@ router.post(
 );
 
 router.post(
+  "/disbursements/:disbursementId/retry",
+  requirePermission("payroll", "runs", "APPROVE"),
+  validate(payrollPayoutRetrySchema),
+  asyncHandler(controller.retryDisbursementPayout)
+);
+
+router.post(
   "/disbursements/:disbursementId/verify",
   requirePermission("payroll", "runs", "APPROVE"),
   asyncHandler(controller.verifyDisbursementPayout)
+);
+
+router.post(
+  "/disbursements/:disbursementId/fee-reconciliation",
+  requirePermission("payroll", "runs", "APPROVE"),
+  validate(payrollPayoutFeeReconciliationSchema),
+  asyncHandler(controller.reconcileDisbursementPayoutFee)
 );
 
 router.patch(

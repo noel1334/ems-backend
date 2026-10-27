@@ -1,36 +1,76 @@
 # Finance Phase 5 — Automated Salary Payments
 
-This release extends the existing Phase 4 wallet, existing payroll disbursement register, bank-directory fields, Paystack/Flutterwave transfer clients, and the current payroll workspace. It does not add a second wallet or payroll implementation.
+This release extends the existing EMS payroll register, company wallet ledger, employee bank accounts and Paystack/Flutterwave integrations. It does not create a second wallet or payroll subsystem.
 
-## Existing implementation found in the supplied snapshot
+## Workflow in EMS
 
-- `PayrollDisbursement` records and provider-specific bank account fields already exist in Prisma.
-- Payroll payout preparation, provider transfer initiation, transfer verification, wallet reservation/refund ledger operations, and audit logging already exist in `src/modules/payroll/payroll.payout.service.js`.
-- Backend routes already expose prepare, execute, verify, and manual reconciliation endpoints.
-- Frontend `src/features/payroll-periods-workspace.tsx` already contains provider selection, transfer confirmation, verification controls, and disbursement status display.
-- Provider webhooks and a scheduled reconciliation worker are not established by this snapshot; use the explicit verify endpoint until those are implemented and tested. Do not assume webhooks are active.
+1. Finalize the payroll period and prepare its payment register.
+2. Choose Paystack or Flutterwave and run **Preview & validate**.
+3. Review employee net pay, saved bank, last four account digits, bank validation errors, estimated fees, internal wallet balance and provider integration balance.
+4. Approve the batch separately. The server recomputes its preparation fingerprint and rejects approval if payroll, bank details or fee inputs have changed; it independently rechecks the wallet and provider balances at approval and execution.
+5. Initiate transfers only from an approved batch. The backend atomically reserves the internal wallet amount and creates unique per-attempt references before calling the provider.
+6. Verify processing transfers. The scheduled worker also reconciles existing references; it never starts new transfers.
+7. Retry only a provider-confirmed `FAILED` payment, and only through the original provider. Uncertain outcomes and reversals require reconciliation first.
+8. Employees can view payment status, paid date, reference and payment notes beside their released payslips. Payroll administrators can export the payment report as CSV.
+9. If the provider's transfer response does not report its final fee, or an actual fee could not be debited from the EMS wallet, an authorized payroll approver can reconcile it against a provider statement reference. The operation records an audit trail and credits/releases or debits the fee difference atomically. Failed transfers with unresolved fees cannot be retried until the fee discrepancy is reconciled.
 
-## Safety repair in this release
+## Important accounting and security behaviour
 
-The payout service now calls `assertPayrollPayoutProviderConfiguration()` so the existing sandbox/live credential guard is actually enforced before new transfers. The earlier service-level check only checked whether a secret existed and could bypass `PAYROLL_PAYOUTS_MODE=sandbox` credential validation.
+- The internal company wallet is an EMS ledger, not the Paystack or Flutterwave wallet. A provider balance is integration-wide and may be shared by multiple EMS tenants using the same merchant credentials. It can change outside EMS after preflight; preflight is not a lock on provider funds.
+- Funds are reserved atomically in the EMS wallet before transfers. The ledger is reconciled using provider-verified results, refunds/releases, reported fees and fee-reconciliation notes.
+- A request timeout or generic provider/API error is not treated as proof of transfer failure. Only a provider-confirmed failed transfer or a definitive non-retryable client rejection can safely release the failed salary reservation; uncertain outcomes retain their reservation until the original transfer reference is verified.
+- Reversal and fee-reconciliation events are distinct: a reversed salary principal is restored once, and any net fee refund/charge must be reconciled against the provider statement before further finance actions.
+- Paystack recipient codes are cached against provider mode and an HMAC fingerprint of the bank details. The stored fingerprint does not contain a raw account number.
+- Authenticated `transfer.*` webhooks are matched against known references, deduplicated, and re-verified through the provider API before changing payout status. Duplicate/stale attempts do not post another wallet credit.
+- The UI never receives secret provider credentials or full bank account numbers in preview output.
+- The Paystack fee defaults follow published NGN bands, including the configurable stamp-duty assumption, but must be reviewed against the business's current provider contract and exemption status before live use. Flutterwave uses its transfer-fee quote endpoint.
 
-## Required environment configuration
+## Safe deployment defaults
 
-Keep these values in the backend environment (Render), not in the frontend:
+Keep these settings until provider test-mode and accounting tests pass:
 
 ```env
 PAYROLL_PAYOUTS_ENABLED=false
 PAYROLL_PAYOUTS_MODE=sandbox
 PAYROLL_PAYOUTS_LIVE_CONFIRMATION=false
+PAYROLL_PAYOUT_RECONCILIATION_ENABLED=true
+PAYROLL_PAYOUT_RECONCILIATION_INTERVAL_MS=300000
+PAYROLL_PAYOUT_VALIDATE_BANK_ACCOUNTS_IN_SANDBOX=false
 ```
 
-Configure the appropriate test secret for sandbox checks. Do not turn on live payouts until you have confirmed provider business eligibility, available provider balance plus fees, wallet funding reconciliation, duplicate-transfer controls, failure/refund behavior, and status verification. The internal EMS wallet is an internal ledger; it does not prove that the Paystack/Flutterwave transfer balance contains the same funds.
+Use only provider test secret keys in sandbox mode. Live mode requires a live key plus both `PAYROLL_PAYOUTS_ENABLED=true` and `PAYROLL_PAYOUTS_LIVE_CONFIRMATION=true`. Do not turn this on from the frontend; these are server-side controls.
 
-## Important limitations to resolve before production
+To exercise the actual end-to-end workflow in a provider test environment, temporarily set `PAYROLL_PAYOUTS_ENABLED=true` while keeping `PAYROLL_PAYOUTS_MODE=sandbox`, using only test secret keys, and keeping `PAYROLL_PAYOUTS_LIVE_CONFIRMATION=false`. This enables sandbox requests only because the backend rejects live keys in sandbox mode. After testing, set `PAYROLL_PAYOUTS_ENABLED=false` again. Do not use production credentials for sandbox tests.
 
-1. Provider transfer fees are not calculated by the current payout register; the wallet reservation currently covers salary amounts only.
-2. The supplied snapshot does not contain a complete signed webhook/idempotency pipeline or scheduled reconciliation worker.
-3. Paystack recipient codes are created during payout initiation and are not persisted/reused by this snapshot.
-4. Do not retry a `PROCESSING`/uncertain transfer by submitting a new transfer. Verify its original reference first.
+Configure fee values as needed:
 
-The current feature flag remains disabled by default. This release is not a declaration that live money movement is production-ready.
+```env
+PAYSTACK_TRANSFER_FEE_UP_TO_5000_NGN=10
+PAYSTACK_TRANSFER_FEE_5001_TO_50000_NGN=25
+PAYSTACK_TRANSFER_FEE_ABOVE_50000_NGN=50
+PAYSTACK_TRANSFER_STAMP_DUTY_NGN=50
+PAYSTACK_TRANSFER_STAMP_DUTY_THRESHOLD_NGN=10000
+PAYSTACK_REGISTERED_PAYROLL_EXEMPTION=false
+```
+
+Set `PAYROLL_PAYOUT_RECIPIENT_FINGERPRINT_SECRET` to a high-entropy secret in the deployment environment (not in source control). If unset, the backend falls back to a server secret already required by the application.
+
+## Apply and validate
+
+Back up the database and the current project before applying Prisma schema updates. This project currently supports the `prisma db push` workflow; review the schema diff before applying it to a production database.
+
+```bash
+npm install
+npx prisma validate
+npx prisma db push
+npx prisma generate
+npm test -- tests/unit/payroll-payout-utils.test.js tests/unit/payroll-payout-config.test.js tests/unit/payroll-payout-fees.test.js
+node scripts/verify-finance-phase5.mjs
+git diff --check
+```
+
+`verify-finance-phase5.mjs` is a structural check only. Unit tests do not prove merchant-account eligibility or live transfers. Before production, run provider test-mode end-to-end tests for wallet reservations, insufficient balances, duplicate/concurrent requests, timeout handling, status verification, webhooks, reversals, actual fees, multi-tenant access and employee payslips. Confirm the provider account's transfer API eligibility, merchant/IP/approval settings, and the source of actual provider funds with the merchant administrator.
+
+## Known limitation to account for before enabling live payouts
+
+The available-balance preflight is an observation of the configured merchant integration, not an atomic reservation at Paystack or Flutterwave. Multiple EMS tenants sharing one provider credential, or other transactions using the merchant balance outside EMS, can race against this observation. Use a dedicated provider integration/balance per company or a controlled central payout queue and merchant-level reconciliation before relying on automated live payments for multiple tenants.

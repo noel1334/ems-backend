@@ -2,11 +2,6 @@ import AppError from "../../common/errors/AppError.js";
 
 const isTruthy = (value) => String(value || "false").trim().toLowerCase() === "true";
 
-/**
- * Validates the server-side payout mode and credential class before any provider
- * request. Sandbox is the default so enabling the feature flag alone cannot
- * accidentally authorize transfers with live credentials.
- */
 export const getPayrollPayoutMode = (env = process.env) => {
   const mode = String(env.PAYROLL_PAYOUTS_MODE || "sandbox").trim().toLowerCase();
   if (!["sandbox", "live"].includes(mode)) {
@@ -15,11 +10,7 @@ export const getPayrollPayoutMode = (env = process.env) => {
   return mode;
 };
 
-export const assertPayrollPayoutProviderConfiguration = (provider, env = process.env) => {
-  if (!isTruthy(env.PAYROLL_PAYOUTS_ENABLED)) {
-    throw new AppError("Automated salary payouts are disabled. Set PAYROLL_PAYOUTS_ENABLED=true only after completing provider test-mode checks.", 503, { code: "PAYROLL_PAYOUTS_DISABLED" });
-  }
-
+export const assertPayrollPayoutProviderCredentials = (provider, env = process.env) => {
   const mode = getPayrollPayoutMode(env);
   const keyName = provider === "PAYSTACK" ? "PAYSTACK_SECRET_KEY" : provider === "FLUTTERWAVE" ? "FLUTTERWAVE_SECRET_KEY" : null;
   if (!keyName) throw new AppError("Choose Paystack or Flutterwave for salary payouts.", 400);
@@ -43,4 +34,30 @@ export const assertPayrollPayoutProviderConfiguration = (provider, env = process
     throw new AppError("Live payouts require PAYROLL_PAYOUTS_LIVE_CONFIRMATION=true as an explicit server-side acknowledgement.", 503, { code: "PAYOUT_LIVE_CONFIRMATION_REQUIRED" });
   }
   return { provider, mode };
+};
+
+export const assertPayrollPayoutProviderConfiguration = (provider, env = process.env) => {
+  if (!isTruthy(env.PAYROLL_PAYOUTS_ENABLED)) {
+    throw new AppError("Automated salary payouts are disabled. Set PAYROLL_PAYOUTS_ENABLED=true only after completing provider test-mode checks.", 503, { code: "PAYROLL_PAYOUTS_DISABLED" });
+  }
+  return assertPayrollPayoutProviderCredentials(provider, env);
+};
+
+// Paystack does not expose a fee-quote API for standard NGN bank transfers.
+// These configurable defaults match the published Nigerian tier schedule and must be reviewed
+// against the merchant's current contract before live payouts are enabled.
+export const estimatePaystackTransferFee = (amount, env = process.env) => {
+  const value = Number(amount);
+  if (!Number.isFinite(value) || value <= 0) throw new AppError("Salary amount must be greater than zero before a fee can be estimated.", 400);
+  const upTo5000 = Number(env.PAYSTACK_TRANSFER_FEE_UP_TO_5000_NGN ?? 10);
+  const from5001To50000 = Number(env.PAYSTACK_TRANSFER_FEE_5001_TO_50000_NGN ?? 25);
+  const above50000 = Number(env.PAYSTACK_TRANSFER_FEE_ABOVE_50000_NGN ?? 50);
+  const levy = Number(env.PAYSTACK_TRANSFER_STAMP_DUTY_NGN ?? 50);
+  const levyThreshold = Number(env.PAYSTACK_TRANSFER_STAMP_DUTY_THRESHOLD_NGN ?? 10000);
+  const payrollExempt = isTruthy(env.PAYSTACK_REGISTERED_PAYROLL_EXEMPTION);
+  const fee = value <= 5000 ? upTo5000 : value <= 50000 ? from5001To50000 : above50000;
+  if ([upTo5000, from5001To50000, above50000, levy, levyThreshold].some((n) => !Number.isFinite(n) || n < 0)) {
+    throw new AppError("Paystack transfer fee configuration contains an invalid amount.", 503, { code: "PAYOUT_FEE_CONFIGURATION_INVALID" });
+  }
+  return Number((fee + (!payrollExempt && value >= levyThreshold ? levy : 0)).toFixed(2));
 };

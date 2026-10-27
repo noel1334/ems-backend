@@ -120,6 +120,20 @@ export const payrollPeriodSchema = z.object({
   }
 });
 
+export const payrollPayoutPreviewSchema = z.object({
+  provider: z.enum(["PAYSTACK", "FLUTTERWAVE"]),
+});
+
+export const payrollPayoutRetrySchema = z.object({
+  provider: z.enum(["PAYSTACK", "FLUTTERWAVE"]).optional(),
+});
+
+export const payrollPayoutFeeReconciliationSchema = z.object({
+  actualFeeAmount: z.preprocess((value) => typeof value === "string" && !value.trim() ? Number.NaN : value, z.coerce.number().finite().min(0).max(1000000)),
+  providerStatementReference: z.string().trim().min(3).max(120),
+  note: z.string().trim().min(4).max(500),
+});
+
 export const payrollPayoutExecutionSchema = z.object({
   provider: z.enum(["PAYSTACK", "FLUTTERWAVE"]),
   // Explicit second-step confirmation is required even for API callers.

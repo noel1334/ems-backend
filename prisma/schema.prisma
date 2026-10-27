@@ -389,6 +389,9 @@ model Company {
   payrollPeriods                PayrollPeriod[]
   payrollItems                  PayrollItem[]
   payrollDisbursements          PayrollDisbursement[]
+  payrollPayoutAttempts         PayrollPayoutAttempt[]
+  payrollPayoutBatches           PayrollPayoutBatch[]
+  payrollPayoutWebhookEvents     PayrollPayoutWebhookEvent[]
   biometricRecords              BiometricRecord[]
   inventoryLocations            InventoryLocation[]
   inventorySuppliers            InventorySupplier[]
@@ -657,6 +660,10 @@ model EmployeeBankAccount {
   accountType         String?
   isPrimary           Boolean  @default(true)
   isActive            Boolean  @default(true)
+  // Cached Paystack recipient is bound to the provider mode and a keyed bank-details fingerprint.
+  paystackRecipientCode        String?
+  paystackRecipientMode        String?
+  paystackRecipientFingerprint String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
   employee            Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
@@ -1376,6 +1383,7 @@ model PayrollPeriod {
   company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
   items         PayrollItem[]
   disbursements PayrollDisbursement[]
+  payoutBatches PayrollPayoutBatch[]
 
   @@unique([companyId, name])
   @@index([companyId, startDate, endDate])
@@ -1422,6 +1430,13 @@ model PayrollDisbursement {
   payrollItemId      String        @unique
   employeeId         String
   amount             Decimal       @db.Decimal(18, 2)
+  batchId            String?
+  estimatedFeeAmount Decimal       @default(0) @db.Decimal(18, 2)
+  reservedFeeAmount  Decimal       @default(0) @db.Decimal(18, 2)
+  actualFeeAmount    Decimal?      @db.Decimal(18, 2)
+  feeReconciliationReference String?
+  feeReconciliationNote      String?
+  feeReconciledAt            DateTime?
   currency           String        @default("NGN")
   status             String        @default("PENDING")
   method             String        @default("MANUAL_BANK_TRANSFER")
@@ -1443,11 +1458,96 @@ model PayrollDisbursement {
   period             PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
   payrollItem        PayrollItem   @relation(fields: [payrollItemId], references: [id], onDelete: Restrict)
   employee           Employee      @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  attempts           PayrollPayoutAttempt[]
+  batch              PayrollPayoutBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@unique([companyId, externalReference])
   @@index([companyId, periodId, status])
   @@index([employeeId])
+  @@index([batchId, status])
   @@map("payroll_disbursements")
+}
+
+model PayrollPayoutBatch {
+  id                       String              @id @default(uuid())
+  companyId                String
+  periodId                 String
+  provider                 String
+  status                   String              @default("PREPARED")
+  employeeCount            Int                 @default(0)
+  salaryAmount             Decimal             @default(0) @db.Decimal(18, 2)
+  estimatedFeeAmount       Decimal             @default(0) @db.Decimal(18, 2)
+  reservedAmount           Decimal             @default(0) @db.Decimal(18, 2)
+  providerAvailableBalance Decimal?            @db.Decimal(18, 2)
+  walletBalanceAtPreview   Decimal?            @db.Decimal(18, 2)
+  validationResults        Json?
+  preparationFingerprint   String?
+  previewedAt              DateTime?
+  approvedBy               String?
+  approvedAt               DateTime?
+  executedAt               DateTime?
+  createdBy                String?
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+  company                  Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  period                   PayrollPeriod       @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  disbursements            PayrollDisbursement[]
+
+  @@unique([companyId, periodId])
+  @@index([companyId, status, createdAt])
+  @@index([provider, status, createdAt])
+  @@map("payroll_payout_batches")
+}
+
+model PayrollPayoutAttempt {
+  id                 String              @id @default(uuid())
+  companyId          String
+  disbursementId     String
+  attemptNumber      Int
+  provider           String
+  externalReference  String              @unique
+  providerTransferId String?
+  status             String              @default("PENDING")
+  amount             Decimal             @db.Decimal(18, 2)
+  estimatedFeeAmount Decimal             @default(0) @db.Decimal(18, 2)
+  actualFeeAmount    Decimal?            @db.Decimal(18, 2)
+  providerResponse   Json?
+  failureReason      String?
+  createdBy          String?
+  submittedAt        DateTime?
+  verifiedAt         DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  company            Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  disbursement       PayrollDisbursement @relation(fields: [disbursementId], references: [id], onDelete: Cascade)
+
+  @@unique([disbursementId, attemptNumber])
+  @@index([companyId, status, createdAt])
+  @@index([disbursementId, status])
+  @@map("payroll_payout_attempts")
+}
+
+model PayrollPayoutWebhookEvent {
+  id                 String   @id @default(uuid())
+  companyId          String?
+  provider           String
+  eventKey           String
+  eventType          String
+  transferReference  String?
+  providerTransferId String?
+  status             String   @default("RECEIVED")
+  message            String?
+  payload            Json?
+  receivedAt         DateTime @default(now())
+  processedAt        DateTime?
+  updatedAt          DateTime @updatedAt
+  company            Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, eventKey])
+  @@index([companyId, provider, status])
+  @@index([provider, status, receivedAt])
+  @@index([transferReference])
+  @@map("payroll_payout_webhook_events")
 }
 
 model PayrollItemLine {
