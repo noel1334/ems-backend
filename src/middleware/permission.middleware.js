@@ -95,6 +95,24 @@ export const requirePermission = (moduleName, resource, action) => {
                 return next();
             }
 
+            const payrollAdminRole = user.companyId !== null && user.roles.find((userRole) => {
+                const role = userRole.role;
+                return ["COMPANY_ADMIN", "FINANCE_ADMIN"].includes(role.name) &&
+                    role.scope === "COMPANY" && role.companyId === user.companyId;
+            })?.role?.name;
+
+            // Company and finance administrators must be able to remove payroll periods
+            // even when an older tenant role snapshot predates payroll.runs.DELETE. The
+            // route remains tenant-scoped, and the service protects in-flight transfers
+            // while preserving linked financial history by soft deletion.
+            const isPayrollAdminDelete = Boolean(payrollAdminRole) &&
+                moduleName === "payroll" && resource === "runs" && action === "DELETE";
+
+            if (isPayrollAdminDelete) {
+                req.permission = { module: moduleName, resource, action, grantedBy: payrollAdminRole };
+                return next();
+            }
+
             const hasPermission =
                 user.roles.some((userRole) => {
                     const role = userRole.role;

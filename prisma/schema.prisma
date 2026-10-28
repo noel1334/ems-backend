@@ -1379,6 +1379,8 @@ model PayrollPeriod {
   payDate       DateTime?
   status        PayrollStatus         @default(DRAFT)
   isActive      Boolean               @default(true)
+  // Soft deletion keeps payroll and payment history available for audit/reporting.
+  deletedAt     DateTime?
   createdAt     DateTime              @default(now())
   updatedAt     DateTime              @updatedAt
   company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -1386,9 +1388,10 @@ model PayrollPeriod {
   disbursements PayrollDisbursement[]
   payoutBatches PayrollPayoutBatch[]
 
-  @@unique([companyId, name])
+  @@index([companyId, name])
   @@index([companyId, startDate, endDate])
   @@index([companyId, status])
+  @@index([companyId, deletedAt, startDate])
   @@map("payroll_periods")
 }
 

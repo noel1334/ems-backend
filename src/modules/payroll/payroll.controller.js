@@ -117,7 +117,8 @@ export const updatePayrollPeriod = async (req, res) => {
 };
 
 export const deletePayrollPeriod = async (req, res) => {
-  return success(res, await deletePeriod(getCompanyId(req), req.params.id, req.user.userId));
+  const canArchiveFinancialHistory = ["COMPANY_ADMIN", "FINANCE_ADMIN", "SUPER_ADMIN"].includes(req.permission?.grantedBy);
+  return success(res, await deletePeriod(getCompanyId(req), req.params.id, req.user.userId, { canArchiveFinancialHistory }));
 };
 
 export const setPayrollPeriodActive = async (req, res) => {

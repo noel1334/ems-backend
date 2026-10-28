@@ -56,8 +56,8 @@ export const getLeaveDashboard = async ({companyId}) => {
 export const getPayrollDashboard = async ({companyId,year,month}) => {
   const {start,end,...period}=monthRange(year,month);
   const [periods,items,salaries]=await prisma.$transaction([
-    prisma.payrollPeriod.findMany({where:{companyId,startDate:{lte:end},endDate:{gte:start}},orderBy:{startDate:"desc"},take:10}),
-    prisma.payrollItem.count({where:{companyId,period:{startDate:{lte:end},endDate:{gte:start}}}}),
+    prisma.payrollPeriod.findMany({where:{companyId,deletedAt:null,startDate:{lte:end},endDate:{gte:start}},orderBy:{startDate:"desc"},take:10}),
+    prisma.payrollItem.count({where:{companyId,period:{deletedAt:null,startDate:{lte:end},endDate:{gte:start}}}}),
     prisma.employeeSalary.count({where:{companyId,status:"ACTIVE",effectiveFrom:{lte:end},OR:[{effectiveTo:null},{effectiveTo:{gte:start}}]}}),
   ]);
   return {...period,periods,payrollItems:items,activeSalaries:salaries};

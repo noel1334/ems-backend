@@ -106,7 +106,7 @@ const getProviderBalance = async (provider) => {
 };
 
 const getPeriodAndPending = async (companyId, periodId) => {
-  const period = await prisma.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
+  const period = await prisma.payrollPeriod.findFirst({ where: { id: periodId, companyId, deletedAt: null } });
   if (!period) throw new AppError("Payroll period not found.", 404);
   if (period.status !== "FINALIZED") {
     throw new AppError("Only finalized payroll that has not been fully paid can be prepared for payment.", 409);
@@ -328,7 +328,7 @@ const persistPreview = async (companyId, periodId, actorId, evaluation) => {
 };
 
 export const getPayrollPayoutBatch = async (companyId, periodId) => {
-  const period = await prisma.payrollPeriod.findFirst({ where: { id: periodId, companyId }, select: { id: true } });
+  const period = await prisma.payrollPeriod.findFirst({ where: { id: periodId, companyId, deletedAt: null }, select: { id: true } });
   if (!period) throw new AppError("Payroll period not found.", 404);
   const [batch, wallet] = await Promise.all([
     prisma.payrollPayoutBatch.findUnique({ where: { companyId_periodId: { companyId, periodId } } }),
@@ -402,7 +402,7 @@ const refreshBatchStatus = async (tx, companyId, batchId, periodId) => {
     await tx.payrollPeriod.update({ where: { id: periodId }, data: { status: "PAID" } });
     await tx.payrollItem.updateMany({ where: { companyId, periodId }, data: { status: "PAID" } });
   } else {
-    const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId }, select: { status: true } });
+    const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId, deletedAt: null }, select: { status: true } });
     if (period?.status === "PAID") {
       await tx.payrollPeriod.update({ where: { id: periodId }, data: { status: "FINALIZED" } });
       await tx.payrollItem.updateMany({ where: { companyId, periodId, status: "PAID" }, data: { status: "FINALIZED" } });
@@ -645,7 +645,7 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
   await prisma.$transaction(async (tx) => {
     const currentBatch = await tx.payrollPayoutBatch.findFirst({ where: { id: batch.id, companyId, status: "APPROVED", preparationFingerprint: batch.preparationFingerprint } });
     if (!currentBatch) throw new AppError("The approved payout batch changed before reservation. Refresh and review it again.", 409);
-    const currentPeriod = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
+    const currentPeriod = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId, deletedAt: null } });
     if (!currentPeriod || currentPeriod.status !== "FINALIZED") throw new AppError("Payroll is no longer finalized and unpaid. No transfer has been initiated.", 409);
     const stillPending = await tx.payrollDisbursement.findMany({ where: { companyId, periodId, status: "PENDING" }, select: { id: true } });
     if (stillPending.length !== pendingIds.length || stillPending.some((row) => !pendingIds.includes(row.id))) throw new AppError("The payment register changed after approval. No transfer has been initiated.", 409);

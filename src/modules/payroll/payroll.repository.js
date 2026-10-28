@@ -24,6 +24,7 @@ export const findPeriod = (companyId, periodId, tx = prisma) =>
     where: {
       id: periodId,
       companyId,
+      deletedAt: null,
     },
   });
 
