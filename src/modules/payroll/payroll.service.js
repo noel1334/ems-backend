@@ -561,7 +561,7 @@ export const setPeriodActive = async (companyId, periodId, isActive, actorId = n
 export const deletePeriod = async (companyId, periodId, actorId = null) => prisma.$transaction(async (tx) => {
   const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
   if (!period) throw new AppError("Payroll period not found.", 404);
-  if (period.status !== "DRAFT") throw new AppError("Only draft payroll periods can be deleted. Processed payroll is retained for audit history.", 409);
+  if (!["DRAFT", "CALCULATED"].includes(period.status)) throw new AppError("Only draft or unprocessed calculated payroll periods can be deleted. Approved, processing, finalized, and paid payroll is retained for audit history.", 409);
 
   const [itemCount, disbursementCount, batchCount] = await Promise.all([
     tx.payrollItem.count({ where: { companyId, periodId } }),
