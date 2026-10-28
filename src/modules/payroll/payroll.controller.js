@@ -14,6 +14,7 @@ import {
   createPeriod,
   updatePeriod,
   deletePeriod,
+  setPeriodActive,
   createStructure,
   finalizePayroll,
   reopenPayrollForCorrection,
@@ -117,6 +118,10 @@ export const updatePayrollPeriod = async (req, res) => {
 
 export const deletePayrollPeriod = async (req, res) => {
   return success(res, await deletePeriod(getCompanyId(req), req.params.id, req.user.userId));
+};
+
+export const setPayrollPeriodActive = async (req, res) => {
+  return success(res, await setPeriodActive(getCompanyId(req), req.params.id, req.body.isActive, req.user.userId));
 };
 
 export const getPayrollPeriod = async (req, res) => {

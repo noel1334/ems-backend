@@ -239,6 +239,7 @@ export const mapPayrollPeriod = (period) => {
     payDate: dateToISO(period.payDate),
 
     status: period.status,
+    isActive: period.isActive !== false,
 
     itemCount: mappedItems.length,
 
@@ -284,6 +285,7 @@ export const mapPayrollPeriodSummary = (period) => {
     payDate: dateToISO(period.payDate),
 
     status: period.status,
+    isActive: period.isActive !== false,
 
     itemCount: items.length,
 

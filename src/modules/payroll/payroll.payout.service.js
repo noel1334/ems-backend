@@ -122,6 +122,7 @@ const getPeriodAndPending = async (companyId, periodId) => {
 const calculatePayoutPreview = async (companyId, periodId, provider) => {
   if (!isProvider(provider)) throw new AppError("Choose Paystack or Flutterwave for salary payouts.", 400);
   const { period, pending } = await getPeriodAndPending(companyId, periodId);
+  if (period.isActive === false) throw new AppError("Activate this payroll period before previewing or approving salary payments.", 409);
   const errors = [];
   const prepared = pending.map((row) => ({ row, bank: selectedBankAccount(row.employee, provider) }));
   const employeeResults = [];

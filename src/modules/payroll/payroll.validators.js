@@ -113,12 +113,14 @@ export const payrollPeriodSchema = z.object({
   name: z.string().trim().min(2).max(100),
   startDate: dateOnly,
   endDate: dateOnly,
-  payDate: dateOnly.optional(),
+  payDate: dateOnly.nullable().optional(),
 }).superRefine((value, ctx) => {
   if (value.endDate < value.startDate) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endDate"], message: "End date cannot be before start date." });
   }
 });
+
+export const payrollPeriodActiveSchema = z.object({ isActive: z.boolean() });
 
 export const payrollPayoutPreviewSchema = z.object({
   provider: z.enum(["PAYSTACK", "FLUTTERWAVE"]),

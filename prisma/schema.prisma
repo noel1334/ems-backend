@@ -1378,6 +1378,7 @@ model PayrollPeriod {
   endDate       DateTime
   payDate       DateTime?
   status        PayrollStatus         @default(DRAFT)
+  isActive      Boolean               @default(true)
   createdAt     DateTime              @default(now())
   updatedAt     DateTime              @updatedAt
   company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)

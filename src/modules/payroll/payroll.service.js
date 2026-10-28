@@ -489,36 +489,74 @@ export const updatePeriod = async (companyId, periodId, data, actorId = null) =>
   const startDate = dateOnly(data.startDate);
   const endDate = dateOnly(data.endDate);
   if (endDate < startDate) throw new AppError("End date cannot be before start date.", 400);
-  const payDate = data.payDate ? dateOnly(data.payDate) : null;
+  const requestedPayDate = data.payDate ? dateOnly(data.payDate) : null;
 
   return prisma.$transaction(async (tx) => {
     const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
     if (!period) throw new AppError("Payroll period not found.", 404);
-    if (period.status !== "DRAFT") throw new AppError("Only draft payroll periods can be edited. Reopen an eligible payroll for correction first.", 409);
+    if (["PROCESSING", "CANCELLED"].includes(period.status)) {
+      throw new AppError("This payroll period cannot be edited while processing or after cancellation.", 409);
+    }
 
     const [itemCount, disbursementCount, batchCount] = await Promise.all([
       tx.payrollItem.count({ where: { companyId, periodId } }),
       tx.payrollDisbursement.count({ where: { companyId, periodId } }),
       tx.payrollPayoutBatch.count({ where: { companyId, periodId } }),
     ]);
-    if (itemCount || disbursementCount || batchCount) {
-      throw new AppError("This payroll period has payroll or payment records and cannot be edited. Preserve the audit trail and create a documented correction instead.", 409);
+    const hasFinancialRecords = itemCount > 0 || disbursementCount > 0 || batchCount > 0;
+    const dateRangeChanged = startDate.getTime() !== period.startDate.getTime() || endDate.getTime() !== period.endDate.getTime();
+    const payDateChanged = (requestedPayDate?.getTime() ?? null) !== (period.payDate?.getTime() ?? null);
+
+    if (hasFinancialRecords && dateRangeChanged) {
+      throw new AppError("This period already has payroll or payment records. Its date range is locked to protect financial history.", 409);
+    }
+    if ((disbursementCount || batchCount) && payDateChanged) {
+      throw new AppError("This period has payment records. Its planned pay date is locked; you can still correct the period name.", 409);
     }
 
-    const duplicate = await tx.payrollPeriod.findFirst({
-      where: { companyId, id: { not: periodId }, OR: [{ name: data.name }, { startDate, endDate }] },
-      select: { id: true, name: true },
-    });
-    if (duplicate) throw new AppError("Another payroll period already uses this name or date range.", 409);
+    const duplicateConditions = [];
+    if (data.name.trim() !== period.name) duplicateConditions.push({ name: data.name.trim() });
+    if (!hasFinancialRecords && dateRangeChanged) duplicateConditions.push({ startDate, endDate });
+    if (duplicateConditions.length) {
+      const duplicate = await tx.payrollPeriod.findFirst({
+        where: { companyId, id: { not: periodId }, OR: duplicateConditions },
+        select: { id: true, name: true },
+      });
+      if (duplicate) throw new AppError("Another payroll period already uses this name or date range.", 409);
+    }
 
     const updated = await tx.payrollPeriod.update({
       where: { id: periodId },
-      data: { name: data.name.trim(), startDate, endDate, payDate },
+      data: {
+        name: data.name.trim(),
+        startDate: hasFinancialRecords ? period.startDate : startDate,
+        endDate: hasFinancialRecords ? period.endDate : endDate,
+        payDate: disbursementCount || batchCount ? period.payDate : requestedPayDate,
+      },
     });
-    await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_period", resourceId: periodId, metadata: { event: "PERIOD_DETAILS_UPDATED", previousName: period.name, name: updated.name, startDate: updated.startDate, endDate: updated.endDate, payDate: updated.payDate } });
+    await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_period", resourceId: periodId, metadata: { event: "PERIOD_DETAILS_UPDATED", previousName: period.name, name: updated.name, startDate: updated.startDate, endDate: updated.endDate, payDate: updated.payDate, hadFinancialRecords: hasFinancialRecords } });
     return updated;
   }, transactionOptions);
 };
+
+export const setPeriodActive = async (companyId, periodId, isActive, actorId = null) => prisma.$transaction(async (tx) => {
+  const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
+  if (!period) throw new AppError("Payroll period not found.", 404);
+  if (period.isActive === isActive) return period;
+  if (period.status === "PROCESSING") throw new AppError("A payroll period cannot be deactivated while processing is in progress.", 409);
+
+  const [pendingDisbursementCount, activeBatch] = await Promise.all([
+    tx.payrollDisbursement.count({ where: { companyId, periodId, status: { in: ["PENDING", "PROCESSING"] } } }),
+    tx.payrollPayoutBatch.findFirst({ where: { companyId, periodId, status: { in: ["PROCESSING", "SUBMITTING", "SUBMITTED"] } }, select: { id: true, status: true } }),
+  ]);
+  if (!isActive && (pendingDisbursementCount || activeBatch)) {
+    throw new AppError("This period has transfers still processing. Verify their status before deactivating the period.", 409);
+  }
+
+  const updated = await tx.payrollPeriod.update({ where: { id: periodId }, data: { isActive } });
+  await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_period", resourceId: periodId, metadata: { event: isActive ? "PERIOD_ACTIVATED" : "PERIOD_DEACTIVATED", previousIsActive: period.isActive, isActive, status: period.status } });
+  return updated;
+}, transactionOptions);
 
 export const deletePeriod = async (companyId, periodId, actorId = null) => prisma.$transaction(async (tx) => {
   const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
@@ -712,6 +750,7 @@ export const calculatePayroll = async (companyId, periodId, actorId) => {
     if (!period) {
       throw new AppError("Payroll period not found.", 404);
     }
+    if (period.isActive === false) throw new AppError("Activate this payroll period before calculating payroll.", 409);
 
     if (period.status === "APPROVED" || period.status === "FINALIZED") {
       throw new AppError("This payroll period cannot be recalculated.", 400);
@@ -917,6 +956,7 @@ export const approvePayroll = async (companyId, periodId, actorId) => {
     if (!period) {
       throw new AppError("Payroll period not found.", 404);
     }
+    if (period.isActive === false) throw new AppError("Activate this payroll period before approving payroll.", 409);
 
     if (period.status !== "CALCULATED") {
       throw new AppError("Only calculated payroll can be approved.", 400);
@@ -962,6 +1002,7 @@ export const finalizePayroll = async (companyId, periodId, actorId) => {
     if (!period) {
       throw new AppError("Payroll period not found.", 404);
     }
+    if (period.isActive === false) throw new AppError("Activate this payroll period before finalizing payroll.", 409);
 
     if (period.status !== "APPROVED") {
       throw new AppError("Payroll must be approved before finalization.", 400);
@@ -1102,6 +1143,7 @@ export const preparePayrollDisbursements = async (companyId, periodId, actorId) 
   return prisma.$transaction(async (tx) => {
     const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId } });
     if (!period) throw new AppError("Payroll period not found.", 404);
+    if (period.isActive === false) throw new AppError("Activate this payroll period before preparing payments.", 409);
     if (period.status !== "FINALIZED") throw new AppError("Only finalized payroll can be prepared for disbursement.", 400);
 
     const existing = await tx.payrollDisbursement.count({ where: { companyId, periodId } });

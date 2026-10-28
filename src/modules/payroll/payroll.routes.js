@@ -12,6 +12,7 @@ import {
   employeeSalarySchema,
   listSchema,
   payrollPeriodSchema,
+  payrollPeriodActiveSchema,
   payrollPayoutExecutionSchema,
   payrollPayoutPreviewSchema,
   payrollPayoutRetrySchema,
@@ -148,6 +149,13 @@ router.delete(
   "/periods/:id",
   requirePermission("payroll", "runs", "DELETE"),
   asyncHandler(controller.deletePayrollPeriod)
+);
+
+router.patch(
+  "/periods/:id/active",
+  requirePermission("payroll", "runs", "UPDATE"),
+  validate(payrollPeriodActiveSchema),
+  asyncHandler(controller.setPayrollPeriodActive)
 );
 
 router.post(
