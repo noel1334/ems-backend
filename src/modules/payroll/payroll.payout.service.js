@@ -672,17 +672,17 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
       description: `Reserve salary payout batch — ${evaluation.period.name}`,
       metadata: { payoutBatchId: batch.id, periodId, provider, disbursementIds: pendingIds, salaryAmount: evaluation.salaryTotal.toFixed(2), estimatedFees: evaluation.feeTotal.toFixed(2), totalReserved: reservationAmount.toFixed(2) },
     });
-    for (const { row } of prepared) {
-      const fee = row.fee;
-      const reference = makePayrollPayoutReference(row.row.id, 1);
-      await tx.payrollDisbursement.update({ where: { id: row.row.id }, data: {
+    for (const item of prepared) {
+      const { row, fee } = item;
+      const reference = makePayrollPayoutReference(row.id, 1);
+      await tx.payrollDisbursement.update({ where: { id: row.id }, data: {
         batchId: batch.id, status: "PROCESSING", method: provider, provider, externalReference: reference,
         estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null,
         providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, failureReason: null, updatedBy: actorId,
       } });
       await tx.payrollPayoutAttempt.create({ data: {
-        companyId, disbursementId: row.row.id, attemptNumber: 1, provider, externalReference: reference,
-        status: "SUBMITTED", amount: money(row.row.amount).toFixed(2), estimatedFeeAmount: fee.toFixed(2),
+        companyId, disbursementId: row.id, attemptNumber: 1, provider, externalReference: reference,
+        status: "SUBMITTED", amount: money(row.amount).toFixed(2), estimatedFeeAmount: fee.toFixed(2),
         createdBy: actorId, submittedAt: new Date(),
       } });
     }

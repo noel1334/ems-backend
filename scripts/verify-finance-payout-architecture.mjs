@@ -8,8 +8,8 @@ const checks = [
   },
   {
     file: 'src/modules/payroll/payroll.payout.service.js',
-    required: ['PRIMARY_SALARY_PAYOUT', 'WALLET_FUNDING_ONLY', 'verifyFlutterwaveTransfer', 'initiatePaystackTransfer'],
-    forbidden: ['initiateFlutterwaveTransfer', 'getFlutterwaveAvailableBalance'],
+    required: ['PRIMARY_SALARY_PAYOUT', 'WALLET_FUNDING_ONLY', 'verifyFlutterwaveTransfer', 'initiatePaystackTransfer', 'makePayrollPayoutReference(row.id, 1)', 'disbursementId: row.id', 'money(row.amount).toFixed(2)'],
+    forbidden: ['initiateFlutterwaveTransfer', 'getFlutterwaveAvailableBalance', 'row.row'],
   },
 ];
 
