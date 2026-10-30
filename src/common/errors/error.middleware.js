@@ -103,6 +103,28 @@ export const errorHandler = (error, req, res, next) => {
     console.error(error);
   }
 
+  // Production-safe diagnostics for unexpected 500s. Do not log request bodies,
+  // authorization headers, API keys, full provider payloads, or bank account numbers.
+  // The request ID lets an operator correlate the browser error with this server log.
+  const safeDiagnosticText = (value, maxLength) => String(value ?? "")
+    .replace(/\b(?:sk_live|sk_test|FLWSECK)[A-Za-z0-9_-]*\b/gi, "[REDACTED_PROVIDER_KEY]")
+    .replace(/\b\d{10}\b/g, "[REDACTED_ACCOUNT_NUMBER]")
+    .slice(0, maxLength);
+  if (statusCode >= 500 && !(error instanceof AppError)) {
+    console.error(JSON.stringify({
+      event: "api_unhandled_error",
+      requestId: req.requestId || null,
+      method: req.method,
+      path: req.path,
+      errorName: safeDiagnosticText(error?.name || "Error", 100),
+      errorMessage: safeDiagnosticText(error?.message || "Unknown error", 400),
+      errorCode: error?.code ? safeDiagnosticText(error.code, 80) : null,
+      providerHttpStatus: Number.isInteger(error?.response?.status) ? error.response.status : null,
+      providerMessage: error?.response?.data?.message ? safeDiagnosticText(error.response.data.message, 250) : null,
+      stack: error?.stack ? safeDiagnosticText(String(error.stack).split("\n").slice(0, 8).join("\n"), 1600) : null,
+    }));
+  }
+
   const response = {
     success: false,
     message,
