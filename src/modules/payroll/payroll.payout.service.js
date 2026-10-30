@@ -88,14 +88,18 @@ const disbursementInclude = {
 const selectedBankAccount = (employee, provider) => {
   const accounts = [...(employee?.bankAccounts || [])].filter((account) => account.isActive);
   accounts.sort((a, b) => Number(Boolean(b.isPrimary)) - Number(Boolean(a.isPrimary)) || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
-  const account = accounts[0];
-  if (!account) return { error: "No active bank account is recorded." };
-  const bankCode = String(provider === "PAYSTACK" ? account.paystackBankCode ?? "" : account.flutterwaveBankCode ?? "").trim();
-  if (!bankCode) return { error: `The ${provider === "PAYSTACK" ? "Paystack" : "Flutterwave"} bank code is missing.` };
-  if (!/^\d{2,12}$/.test(bankCode)) return { error: "The provider-specific bank code must contain 2–12 digits." };
-  if (!/^\d{10}$/.test(String(account.accountNumber || ""))) return { error: "The employee account number must contain exactly 10 digits for an NGN bank transfer." };
-  if (!account.accountName || account.accountName.trim().length < 2) return { error: "The employee account name is missing." };
-  return { account, bankCode };
+  if (!accounts.length) return { error: "No active bank account is recorded." };
+  // Prefer the primary account only when it is supported by the selected provider.
+  // Otherwise, automatically use the most recently updated active account that has
+  // this provider's bank code and a valid Nigerian account number.
+  const codeFor = (account) => String(provider === "PAYSTACK" ? account.paystackBankCode ?? "" : account.flutterwaveBankCode ?? "").trim();
+  const eligible = accounts.find((account) => /^\d{2,12}$/.test(codeFor(account)) && /^\d{10}$/.test(String(account.accountNumber || "")) && String(account.accountName || "").trim().length >= 2);
+  if (!eligible) {
+    const hasAccountNumber = accounts.some((account) => /^\d{10}$/.test(String(account.accountNumber || "")));
+    if (!hasAccountNumber) return { error: "No active bank account has a valid 10-digit account number." };
+    return { error: `No active bank account has a valid ${provider === "PAYSTACK" ? "Paystack" : "Flutterwave"} bank code. Switch payment provider or update the employee bank details.` };
+  }
+  return { account: eligible, bankCode: codeFor(eligible) };
 };
 
 const displayEmployeeName = (employee) => [employee?.firstName, employee?.middleName, employee?.lastName].filter(Boolean).join(" ") || employee?.employeeNumber || employee?.id || "Employee";
@@ -656,17 +660,17 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
       description: `Reserve salary payout batch — ${evaluation.period.name}`,
       metadata: { payoutBatchId: batch.id, periodId, provider, disbursementIds: pendingIds, salaryAmount: evaluation.salaryTotal.toFixed(2), estimatedFees: evaluation.feeTotal.toFixed(2), totalReserved: reservationAmount.toFixed(2) },
     });
-    for (const item of prepared) {
-      const { row, fee } = item;
-      const reference = makePayrollPayoutReference(row.id, 1);
-      await tx.payrollDisbursement.update({ where: { id: row.id }, data: {
+    for (const { row } of prepared) {
+      const fee = row.fee;
+      const reference = makePayrollPayoutReference(row.row.id, 1);
+      await tx.payrollDisbursement.update({ where: { id: row.row.id }, data: {
         batchId: batch.id, status: "PROCESSING", method: provider, provider, externalReference: reference,
         estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null,
         providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, failureReason: null, updatedBy: actorId,
       } });
       await tx.payrollPayoutAttempt.create({ data: {
-        companyId, disbursementId: row.id, attemptNumber: 1, provider, externalReference: reference,
-        status: "SUBMITTED", amount: money(row.amount).toFixed(2), estimatedFeeAmount: fee.toFixed(2),
+        companyId, disbursementId: row.row.id, attemptNumber: 1, provider, externalReference: reference,
+        status: "SUBMITTED", amount: money(row.row.amount).toFixed(2), estimatedFeeAmount: fee.toFixed(2),
         createdBy: actorId, submittedAt: new Date(),
       } });
     }

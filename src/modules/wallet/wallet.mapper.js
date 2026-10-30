@@ -13,6 +13,9 @@ export const mapWallet = (wallet) => wallet ? ({
   totals: wallet.totals ? {
     credits: decimalToString(wallet.totals.credits),
     debits: decimalToString(wallet.totals.debits),
+    paystackFunded: decimalToString(wallet.totals.paystackFunded),
+    flutterwaveFunded: decimalToString(wallet.totals.flutterwaveFunded),
+    providerFundedTotal: decimalToString(wallet.totals.providerFundedTotal),
   } : undefined,
   createdAt: date(wallet.createdAt),
   updatedAt: date(wallet.updatedAt),

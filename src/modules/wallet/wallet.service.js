@@ -152,16 +152,23 @@ export const getWalletTransactions = async (companyId, { page = 1, limit = 20, t
 };
 
 export const getWalletSummaryDetails = async (companyId) => {
-  const [wallet, credits, debits] = await Promise.all([
+  const [wallet, credits, debits, paystackFunding, flutterwaveFunding] = await Promise.all([
     repository.findWallet(companyId),
     repository.aggregateCredits(companyId),
     repository.aggregateDebits(companyId),
+    prisma.payment.aggregate({ where: { companyId, provider: "PAYSTACK", purpose: "WALLET_FUNDING", status: "SUCCESSFUL", currency: "NGN" }, _sum: { amount: true } }),
+    prisma.payment.aggregate({ where: { companyId, provider: "FLUTTERWAVE", purpose: "WALLET_FUNDING", status: "SUCCESSFUL", currency: "NGN" }, _sum: { amount: true } }),
   ]);
+  const paystackAmount = paystackFunding._sum.amount || new Prisma.Decimal(0);
+  const flutterwaveAmount = flutterwaveFunding._sum.amount || new Prisma.Decimal(0);
   return {
     ...(wallet || (await repository.findOrCreateWallet(companyId))),
     totals: {
       credits: credits._sum.amount || new Prisma.Decimal(0),
       debits: debits._sum.amount || new Prisma.Decimal(0),
+      paystackFunded: paystackAmount,
+      flutterwaveFunded: flutterwaveAmount,
+      providerFundedTotal: paystackAmount.plus(flutterwaveAmount),
     },
   };
 };

@@ -46,13 +46,33 @@ export async function createPaystackTransferRecipient({ name, accountNumber, ban
   return response.data;
 }
 
-export async function initiatePaystackTransfer({ amount, recipientCode, reference, reason }) {
-  // Decimal arithmetic avoids binary floating point errors when converting naira to kobo.
+export function toPaystackKobo(amount) {
   const amountDecimal = new Decimal(amount);
-  if (!amountDecimal.isFinite() || !amountDecimal.isPositive()) throw new Error("Salary amount must be a positive valid number.");
+
+  if (
+    !amountDecimal.isFinite() ||
+    amountDecimal.lessThanOrEqualTo(0)
+  ) {
+    throw new Error("Salary amount must be a positive valid number.");
+  }
+
   const amountInKoboDecimal = amountDecimal.mul(100);
-  if (!amountInKoboDecimal.isInteger() || !amountInKoboDecimal.isSafeInteger()) throw new Error("Salary amount is outside Paystack's supported range.");
+
+  if (!amountInKoboDecimal.isInteger()) {
+    throw new Error("Salary amount must be a whole number of kobo.");
+  }
+
   const amountInKobo = amountInKoboDecimal.toNumber();
+
+  if (!Number.isSafeInteger(amountInKobo)) {
+    throw new Error("Salary amount is outside Paystack's supported range.");
+  }
+
+  return amountInKobo;
+}
+
+export async function initiatePaystackTransfer({ amount, recipientCode, reference, reason }) {
+  const amountInKobo = toPaystackKobo(amount);
   const response = await client.post("/transfer", {
     source: "balance",
     amount: amountInKobo,
