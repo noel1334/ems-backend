@@ -1,29 +1,29 @@
 # Finance Phase 5 — Automated Salary Payments
 
-This release extends the existing EMS payroll register, company wallet ledger, employee bank accounts and Paystack/Flutterwave integrations. It does not create a second wallet or payroll subsystem.
+This release extends the existing EMS payroll register, company wallet ledger, employee bank accounts and payment integrations. Company-wallet funding uses Paystack as primary and Flutterwave as an alternative. New automated salary payouts use Paystack Transfers only. Monnify is being evaluated as a payout alternative but is not integrated in this release; Mono Disburse is a future option.
 
 ## Workflow in EMS
 
 1. Finalize the payroll period and prepare its payment register.
-2. Choose Paystack or Flutterwave and run **Preview & validate**.
+2. Run **Preview & validate with Paystack**. Flutterwave is not selectable for new salary payouts.
 3. Review employee net pay, saved bank, last four account digits, bank validation errors, estimated fees, internal wallet balance and provider integration balance.
 4. Approve the batch separately. The server recomputes its preparation fingerprint and rejects approval if payroll, bank details or fee inputs have changed; it independently rechecks the wallet and provider balances at approval and execution.
 5. Initiate transfers only from an approved batch. The backend atomically reserves the internal wallet amount and creates unique per-attempt references before calling the provider.
 6. Verify processing transfers. The scheduled worker also reconciles existing references; it never starts new transfers.
-7. Retry only a provider-confirmed `FAILED` payment, and only through the original provider. Uncertain outcomes and reversals require reconciliation first.
+7. Retry only a provider-confirmed `FAILED` payment after required fee reconciliation. New retry attempts use Paystack. Existing pending Flutterwave transfers remain verifiable through their original Flutterwave references; they are never switched or resubmitted while unresolved.
 8. Employees can view payment status, paid date, reference and payment notes beside their released payslips. Payroll administrators can export the payment report as CSV.
 9. If the provider's transfer response does not report its final fee, or an actual fee could not be debited from the EMS wallet, an authorized payroll approver can reconcile it against a provider statement reference. The operation records an audit trail and credits/releases or debits the fee difference atomically. Failed transfers with unresolved fees cannot be retried until the fee discrepancy is reconciled.
 
 ## Important accounting and security behaviour
 
-- The internal company wallet is an EMS ledger, not the Paystack or Flutterwave wallet. A provider balance is integration-wide and may be shared by multiple EMS tenants using the same merchant credentials. It can change outside EMS after preflight; preflight is not a lock on provider funds.
+- The internal company wallet is an EMS ledger, not the Paystack balance. The Paystack transfer balance is integration-wide and may be shared by multiple EMS tenants using the same merchant credentials. It can change outside EMS after preflight; preflight is not a lock on provider funds.
 - Funds are reserved atomically in the EMS wallet before transfers. The ledger is reconciled using provider-verified results, refunds/releases, reported fees and fee-reconciliation notes.
 - A request timeout or generic provider/API error is not treated as proof of transfer failure. Only a provider-confirmed failed transfer or a definitive non-retryable client rejection can safely release the failed salary reservation; uncertain outcomes retain their reservation until the original transfer reference is verified.
 - Reversal and fee-reconciliation events are distinct: a reversed salary principal is restored once, and any net fee refund/charge must be reconciled against the provider statement before further finance actions.
 - Paystack recipient codes are cached against provider mode and an HMAC fingerprint of the bank details. The stored fingerprint does not contain a raw account number.
 - Authenticated `transfer.*` webhooks are matched against known references, deduplicated, and re-verified through the provider API before changing payout status. Duplicate/stale attempts do not post another wallet credit.
 - The UI never receives secret provider credentials or full bank account numbers in preview output.
-- The Paystack fee defaults follow published NGN bands, including the configurable stamp-duty assumption, but must be reviewed against the business's current provider contract and exemption status before live use. Flutterwave uses its transfer-fee quote endpoint.
+- The Paystack fee defaults are configurable estimates and must be checked against the business's current provider contract and applicable charges before live use. Flutterwave transfer-fee quoting is not used for new salary payouts in this release.
 
 ## Safe deployment defaults
 
@@ -73,4 +73,4 @@ git diff --check
 
 ## Known limitation to account for before enabling live payouts
 
-The available-balance preflight is an observation of the configured merchant integration, not an atomic reservation at Paystack or Flutterwave. Multiple EMS tenants sharing one provider credential, or other transactions using the merchant balance outside EMS, can race against this observation. Use a dedicated provider integration/balance per company or a controlled central payout queue and merchant-level reconciliation before relying on automated live payments for multiple tenants.
+The available-balance preflight is an observation of the configured Paystack merchant integration, not an atomic reservation at Paystack. Multiple EMS tenants sharing one provider credential, or other transactions using the merchant balance outside EMS, can race against this observation. Use a dedicated provider integration/balance per company or a controlled central payout queue and merchant-level reconciliation before relying on automated live payments for multiple tenants.

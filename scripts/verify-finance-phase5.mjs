@@ -4,7 +4,7 @@ const required = [
   ['prisma/schema.prisma', ['model PayrollDisbursement', 'providerTransferId', 'providerStatus', 'providerResponse', 'model EmployeeBankAccount', 'paystackBankCode', 'flutterwaveBankCode', 'model WalletLedgerEntry']],
   ['src/modules/payroll/payroll.routes.js', ['/disbursements/execute', '/disbursements/:disbursementId/verify']],
   ['src/modules/payroll/payroll.controller.js', ['executePayrollPayouts', 'verifyPayrollPayout']],
-  ['src/modules/payroll/payroll.payout.service.js', ['PAYROLL_PAYOUTS_ENABLED', 'debitWalletInTransaction', 'creditWalletInTransaction', 'verifyPaystackTransfer', 'verifyFlutterwaveTransfer']],
+  ['src/modules/payroll/payroll.payout.service.js', ['PAYROLL_PAYOUTS_ENABLED', 'debitWalletInTransaction', 'creditWalletInTransaction', 'verifyPaystackTransfer', 'verifyFlutterwaveTransfer', 'PRIMARY_SALARY_PAYOUT', 'WALLET_FUNDING_ONLY', 'only enabled provider for new automated salary payouts']],
   ['src/modules/payments/paystack/paystack.transfer.client.js', ['/transferrecipient', '/transfer', '/transfer/verify/']],
   ['src/modules/payments/flutterwave/flutterwave.transfer.client.js', ['/transfers']],
 ];

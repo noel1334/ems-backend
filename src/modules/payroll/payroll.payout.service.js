@@ -11,11 +11,7 @@ import {
   initiatePaystackTransfer,
   verifyPaystackTransfer,
 } from "../payments/paystack/paystack.transfer.client.js";
-import {
-  getFlutterwaveAvailableBalance,
-  initiateFlutterwaveTransfer,
-  verifyFlutterwaveTransfer,
-} from "../payments/flutterwave/flutterwave.transfer.client.js";
+import { verifyFlutterwaveTransfer } from "../payments/flutterwave/flutterwave.transfer.client.js";
 import {
   makePayrollPayoutReference,
   normalizePayrollPayoutStatus,
@@ -69,8 +65,19 @@ export const getPayrollPayoutConfiguration = async () => ({
   currency: "NGN",
   liveConfirmationRequired: getPayrollPayoutMode() === "live",
   providers: {
-    PAYSTACK: { configured: Boolean(process.env.PAYSTACK_SECRET_KEY), balancePreflight: true, feeEstimate: "configurable-tier-estimate" },
-    FLUTTERWAVE: { configured: Boolean(process.env.FLUTTERWAVE_SECRET_KEY), balancePreflight: true, feeEstimate: "provider-quote", wholeNairaAmountsOnly: true },
+    PAYSTACK: {
+      configured: Boolean(process.env.PAYSTACK_SECRET_KEY),
+      payoutsEnabled: true,
+      role: "PRIMARY_SALARY_PAYOUT",
+      balancePreflight: true,
+      feeEstimate: "configurable-tier-estimate",
+    },
+    FLUTTERWAVE: {
+      configured: Boolean(process.env.FLUTTERWAVE_SECRET_KEY),
+      payoutsEnabled: false,
+      role: "WALLET_FUNDING_ONLY",
+      note: "Flutterwave remains available for wallet funding and verification of previously submitted legacy transfers; new payroll payouts use Paystack.",
+    },
   },
   safeguards: {
     livePaymentsDisabledByDefault: String(process.env.PAYROLL_PAYOUTS_ENABLED || "false").trim().toLowerCase() !== "true",
@@ -97,7 +104,7 @@ const selectedBankAccount = (employee, provider) => {
   if (!eligible) {
     const hasAccountNumber = accounts.some((account) => /^\d{10}$/.test(String(account.accountNumber || "")));
     if (!hasAccountNumber) return { error: "No active bank account has a valid 10-digit account number." };
-    return { error: `No active bank account has a valid ${provider === "PAYSTACK" ? "Paystack" : "Flutterwave"} bank code. Switch payment provider or update the employee bank details.` };
+    return { error: "No active bank account has a valid Paystack bank code. Update the employee bank details before preparing this salary payout." };
   }
   return { account: eligible, bankCode: codeFor(eligible) };
 };
@@ -105,7 +112,10 @@ const selectedBankAccount = (employee, provider) => {
 const displayEmployeeName = (employee) => [employee?.firstName, employee?.middleName, employee?.lastName].filter(Boolean).join(" ") || employee?.employeeNumber || employee?.id || "Employee";
 
 const getProviderBalance = async (provider) => {
-  const result = provider === "PAYSTACK" ? await getPaystackAvailableBalance() : await getFlutterwaveAvailableBalance();
+  if (provider !== "PAYSTACK") {
+    throw new AppError("Paystack is the only enabled provider for new automated salary payouts. Flutterwave remains available for wallet funding and legacy transfer verification.", 400);
+  }
+  const result = await getPaystackAvailableBalance();
   return money(result.availableBalance);
 };
 
@@ -124,7 +134,9 @@ const getPeriodAndPending = async (companyId, periodId) => {
 };
 
 const calculatePayoutPreview = async (companyId, periodId, provider) => {
-  if (!isProvider(provider)) throw new AppError("Choose Paystack or Flutterwave for salary payouts.", 400);
+  if (provider !== "PAYSTACK") {
+    throw new AppError("Paystack is the only enabled provider for new automated salary payouts. Flutterwave remains available for wallet funding; Monnify is being evaluated as a future payout alternative.", 400);
+  }
   const { period, pending } = await getPeriodAndPending(companyId, periodId);
   if (period.isActive === false) throw new AppError("Activate this payroll period before previewing or approving salary payments.", 409);
   const errors = [];
@@ -687,17 +699,14 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
     let transferRequestStarted = false;
     try {
       let response;
-      if (provider === "PAYSTACK") {
-        const recipientCode = await getOrCreatePaystackRecipient({ companyId, payout: fresh, bankAccount: bank.account });
-        transferRequestStarted = true;
-        response = await initiatePaystackTransfer({ amount: fresh.amount, recipientCode, reference: fresh.externalReference, reason: `EMS salary ${evaluation.period.name} — ${fresh.employee?.employeeNumber || fresh.employeeId}` });
-      } else {
-        transferRequestStarted = true;
-        response = await initiateFlutterwaveTransfer({
-          amount: fresh.amount, accountNumber: bank.account.accountNumber, bankCode: bank.bankCode, accountName: bank.account.accountName,
-          reference: fresh.externalReference, narration: `EMS salary ${evaluation.period.name} — ${fresh.employee?.employeeNumber || fresh.employeeId}`.slice(0, 100),
-        });
-      }
+      const recipientCode = await getOrCreatePaystackRecipient({ companyId, payout: fresh, bankAccount: bank.account });
+      transferRequestStarted = true;
+      response = await initiatePaystackTransfer({
+        amount: fresh.amount,
+        recipientCode,
+        reference: fresh.externalReference,
+        reason: `EMS salary ${evaluation.period.name} — ${fresh.employee?.employeeNumber || fresh.employeeId}`,
+      });
       const initiationStatus = normalizePayrollPayoutStatus(provider, response?.data?.status);
       if (initiationStatus === "REVERSED") {
         const reversed = await recordReversal(companyId, fresh, 1, actorId, response);
@@ -840,13 +849,16 @@ export const retryFailedPayrollPayout = async (companyId, disbursementId, actorI
   if (payout.status !== "FAILED" || !payout.provider) throw new AppError("Only a provider-managed transfer with a definitively FAILED status can be retried. Uncertain and reversed transfers cannot be retried automatically.", 409);
   if (/fee reconciliation|required finance reconciliation/i.test(payout.failureReason || "")) throw new AppError("Reconcile the previous provider fee against its statement before retrying this failed salary transfer.", 409);
   const provider = String(providerInput || payout.provider).toUpperCase();
-  if (provider !== payout.provider) throw new AppError("Retry must use the original provider. Do not switch providers after a transfer failure without confirming the original outcome.", 409);
+  if (provider !== "PAYSTACK") {
+    throw new AppError("New salary payout attempts must use Paystack. Flutterwave is retained for wallet funding and verification of previously submitted transfers.", 400);
+  }
+  // Cross-provider retry is permitted only from a definitively FAILED legacy transfer.
+  // The checks above and below require FAILED status, a FAILED latest attempt, and reconciled fees.
   assertPayrollPayoutProviderConfiguration(provider);
   const bank = selectedBankAccount(payout.employee, provider);
   if (bank.error) throw new AppError(bank.error, 400);
   const latestAttempt = await getAttemptForPayout(payout);
   if (latestAttempt.status !== "FAILED") throw new AppError("The latest attempt has not been confirmed failed. Check the provider and reconcile before retrying.", 409);
-  if (provider === "FLUTTERWAVE" && !money(payout.amount).eq(money(payout.amount).toDecimalPlaces(0, Decimal.ROUND_HALF_UP))) throw new AppError("Flutterwave NGN transfers require whole-naira amounts.", 400);
   const mode = getPayrollPayoutMode();
   const shouldResolveAccount = mode === "live" || String(process.env.PAYROLL_PAYOUT_VALIDATE_BANK_ACCOUNTS_IN_SANDBOX || "false").trim().toLowerCase() === "true";
   if (shouldResolveAccount) {
@@ -883,14 +895,14 @@ export const retryFailedPayrollPayout = async (companyId, disbursementId, actorI
   let transferRequestStarted = false;
   try {
     let response;
-    if (provider === "PAYSTACK") {
-      const recipientCode = await getOrCreatePaystackRecipient({ companyId, payout: current, bankAccount: bank.account });
-      transferRequestStarted = true;
-      response = await initiatePaystackTransfer({ amount: current.amount, recipientCode, reference, reason: `EMS salary retry ${payout.periodId} — ${current.employee?.employeeNumber || current.employeeId}` });
-    } else {
-      transferRequestStarted = true;
-      response = await initiateFlutterwaveTransfer({ amount: current.amount, accountNumber: bank.account.accountNumber, bankCode: bank.bankCode, accountName: bank.account.accountName, reference, narration: `EMS salary retry — ${current.employee?.employeeNumber || current.employeeId}`.slice(0, 100) });
-    }
+    const recipientCode = await getOrCreatePaystackRecipient({ companyId, payout: current, bankAccount: bank.account });
+    transferRequestStarted = true;
+    response = await initiatePaystackTransfer({
+      amount: current.amount,
+      recipientCode,
+      reference,
+      reason: `EMS salary retry ${payout.periodId} — ${current.employee?.employeeNumber || current.employeeId}`,
+    });
     const retryResponseStatus = normalizePayrollPayoutStatus(provider, response?.data?.status);
     if (retryResponseStatus === "REVERSED") return recordReversal(companyId, current, attemptNumber, actorId, response);
     if (retryResponseStatus === "REQUIRES_REVIEW") {
