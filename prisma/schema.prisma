@@ -1852,6 +1852,7 @@ model CompanyMonnifyBatch {
   payrollPeriodId     String
   batchReference      String   @unique
   providerStatus      String   @default("SUBMITTING")
+  environment         String   @default("sandbox")
   totalAmount         Decimal  @db.Decimal(18, 2)
   totalTransactions   Int
   providerResponse    Json?

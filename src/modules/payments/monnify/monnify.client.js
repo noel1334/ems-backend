@@ -1,9 +1,10 @@
 import axios from "axios";
 import AppError from "../../../common/errors/AppError.js";
 import { decryptMonnifySecret } from "./monnify.crypto.js";
+import { monnifyFailureMessage } from "./monnify.utils.js";
 
 const baseUrl = (environment) => environment === "live" ? "https://api.monnify.com" : "https://sandbox.monnify.com";
-const unwrap = (response) => { const body = response?.data; if (!body?.requestSuccessful) throw new AppError(body?.responseMessage || "Monnify rejected the request.", 422, { code: body?.responseCode || "MONNIFY_REQUEST_FAILED", provider: "MONNIFY" }); return body.responseBody ?? body; };
+const unwrap = (response) => { const body = response?.data; if (!body?.requestSuccessful) { const providerCode = String(body?.responseCode || "MONNIFY_REQUEST_FAILED"); throw new AppError(monnifyFailureMessage(providerCode, body?.responseMessage), providerCode === "99" ? 502 : 422, { code: providerCode, details: { provider: "MONNIFY", providerCode, providerMessage: body?.responseMessage || null } }); } return body.responseBody ?? body; };
 export async function monnifyRequest(connection, method, path, { data, params } = {}) {
   const apiKey = decryptMonnifySecret(connection.apiKeyCiphertext);
   const apiSecret = decryptMonnifySecret(connection.apiSecretCiphertext);
@@ -17,7 +18,8 @@ export async function monnifyRequest(connection, method, path, { data, params } 
   } catch (error) {
     if (error instanceof AppError) throw error;
     const status = error?.response?.status || 502; const body = error?.response?.data;
-    throw new AppError(body?.responseMessage || error.message || "Unable to reach Monnify.", status >= 400 && status < 500 ? status : 502, { code: body?.responseCode || "MONNIFY_UPSTREAM_ERROR", provider: "MONNIFY" });
+    const providerCode = String(body?.responseCode || "MONNIFY_UPSTREAM_ERROR");
+    throw new AppError(body?.responseCode ? monnifyFailureMessage(providerCode, body?.responseMessage) : (error.message || "Unable to reach Monnify."), providerCode === "99" ? 502 : (status >= 400 && status < 500 ? status : 502), { code: providerCode, details: { provider: "MONNIFY", providerCode, providerMessage: body?.responseMessage || null } });
   }
 }
 export const monnifyEndpoints = {
@@ -27,18 +29,5 @@ export const monnifyEndpoints = {
   submitBatch: (connection, payload) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch", { data: payload }),
   authorizeBatch: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch/validate-otp", { data: { reference, authorizationCode } }),
   batchStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/summary", { params: { batchReference: reference } }),
-  batchTransactions: async (connection, reference, pageNo = 0, pageSize = 100) => {
-    const all = []; let page = pageNo; let totalPages = null;
-    do {
-      const result = await monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/", { params: { batchReference: reference, pageNo: page, pageSize } });
-      const content = Array.isArray(result) ? result : Array.isArray(result?.content) ? result.content : Array.isArray(result?.transactions) ? result.transactions : [];
-      all.push(...content);
-      totalPages = Number.isFinite(Number(result?.totalPages)) ? Number(result.totalPages) : totalPages;
-      page += 1;
-      if (totalPages !== null && page >= totalPages) break;
-      if (content.length < pageSize) break;
-      if (page >= 100) throw new AppError("Monnify batch contains too many pages to reconcile safely.", 502, { code: "MONNIFY_PAGINATION_LIMIT" });
-    } while (true);
-    return { content: all, totalElements: all.length, totalPages: 1 };
-  },
+  batchTransactions: (connection, reference, pageNo = 0, pageSize = 100) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/", { params: { batchReference: reference, pageNo, pageSize } }),
 };
