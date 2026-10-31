@@ -10,3 +10,7 @@ export const submit = async (req,res) => ok(res, await service.submitBatch(req.u
 export const authorize = async (req,res) => ok(res, await service.authorizeBatch(req.user.companyId, req.params.id, req.body.otp));
 export const refresh = async (req,res) => ok(res, await service.refreshBatch(req.user.companyId, req.params.id));
 export const batches = async (req,res) => ok(res, await service.listBatches(req.user.companyId));
+
+export const payrollPreview = async (req,res) => ok(res, await service.previewPayroll(req.user.companyId, req.params.periodId));
+export const payrollSubmit = async (req,res) => ok(res, await service.submitPayroll(req.user.companyId, req.params.periodId, req.user.userId), 202);
+export const payrollRefresh = async (req,res) => ok(res, await service.refreshPayrollBatch(req.user.companyId, req.params.id));

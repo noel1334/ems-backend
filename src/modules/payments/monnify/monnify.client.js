@@ -27,5 +27,18 @@ export const monnifyEndpoints = {
   submitBatch: (connection, payload) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch", { data: payload }),
   authorizeBatch: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch/validate-otp", { data: { reference, authorizationCode } }),
   batchStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/summary", { params: { batchReference: reference } }),
-  batchTransactions: (connection, reference, pageNo = 0, pageSize = 100) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/", { params: { batchReference: reference, pageNo, pageSize } }),
+  batchTransactions: async (connection, reference, pageNo = 0, pageSize = 100) => {
+    const all = []; let page = pageNo; let totalPages = null;
+    do {
+      const result = await monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/", { params: { batchReference: reference, pageNo: page, pageSize } });
+      const content = Array.isArray(result) ? result : Array.isArray(result?.content) ? result.content : Array.isArray(result?.transactions) ? result.transactions : [];
+      all.push(...content);
+      totalPages = Number.isFinite(Number(result?.totalPages)) ? Number(result.totalPages) : totalPages;
+      page += 1;
+      if (totalPages !== null && page >= totalPages) break;
+      if (content.length < pageSize) break;
+      if (page >= 100) throw new AppError("Monnify batch contains too many pages to reconcile safely.", 502, { code: "MONNIFY_PAGINATION_LIMIT" });
+    } while (true);
+    return { content: all, totalElements: all.length, totalPages: 1 };
+  },
 };

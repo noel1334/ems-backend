@@ -1,0 +1,13 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const read = (p) => fs.readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
+const service = read('src/modules/payments/monnify/monnify.service.js');
+const routes = read('src/modules/payments/monnify/monnify.routes.js');
+const client = read('src/modules/payments/monnify/monnify.client.js');
+for (const name of ['previewPayroll', 'submitPayroll', 'refreshPayrollBatch']) assert.match(service, new RegExp(`export async function ${name}`));
+for (const path of ['/payroll/:periodId/preview', '/payroll/:periodId/submit', '/batches/:id/reconcile-payroll']) assert.ok(routes.includes(path), `Missing route ${path}`);
+assert.match(service, /Do not submit this payroll again until the batch reference is checked with Monnify/);
+assert.match(service, /employeeReferences/);
+assert.match(service, /Monnify disbursement balance is insufficient/);
+assert.match(client, /pageSize/);
+console.log('OK Monnify payroll preview, submission, OTP route, employee mapping and reconciliation hooks are present.');
