@@ -17,6 +17,7 @@ import holidayRoutes from "../modules/holidays/holiday.routes.js";
 import attendanceRoutes from "../modules/attendance/attendance.routes.js";
 import leaveRoutes from "../modules/leave/leave.routes.js";
 import payrollRoutes from "../modules/payroll/payroll.routes.js";
+import monnifyRoutes from "../modules/payments/monnify/monnify.routes.js";
 import walletRoutes from "../modules/wallet/wallet.routes.js";
 import paymentRoutes from "../modules/payments/payment.routes.js";
 import biometricRoutes from "../modules/biometrics/biometric.routes.js";
@@ -129,6 +130,7 @@ router.use("/attendance", attendanceRoutes);
 
 router.use("/leave", leaveRoutes);
 router.use("/payroll", payrollRoutes);
+router.use("/payroll/monnify", monnifyRoutes);
 router.use("/wallet", walletRoutes);
 router.use("/payments", paymentRoutes);
 router.use("/biometrics", biometricRoutes);

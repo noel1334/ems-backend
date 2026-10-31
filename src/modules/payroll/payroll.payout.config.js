@@ -12,19 +12,17 @@ export const getPayrollPayoutMode = (env = process.env) => {
 
 export const assertPayrollPayoutProviderCredentials = (provider, env = process.env) => {
   const mode = getPayrollPayoutMode(env);
-  if (provider !== "PAYSTACK") {
-    throw new AppError(
-      "Paystack is the only enabled provider for new automated salary payouts. Flutterwave remains available for wallet funding; Monnify is being evaluated as a future payout alternative.",
-      400,
-      { code: "PAYOUT_PROVIDER_NOT_ENABLED" },
-    );
-  }
-  const keyName = "PAYSTACK_SECRET_KEY";
+  const keyName = provider === "PAYSTACK" ? "PAYSTACK_SECRET_KEY" : provider === "FLUTTERWAVE" ? "FLUTTERWAVE_SECRET_KEY" : null;
+  if (!keyName) throw new AppError("Choose Paystack or Flutterwave for salary payouts.", 400);
   const secret = String(env[keyName] || "").trim();
   if (!secret) throw new AppError(`${keyName} is not configured on the backend.`, 503, { code: "PAYOUT_PROVIDER_NOT_CONFIGURED" });
 
-  const isTestKey = secret.startsWith("sk_test_");
-  const isLiveKey = secret.startsWith("sk_live_");
+  const isTestKey = provider === "PAYSTACK"
+    ? secret.startsWith("sk_test_")
+    : secret.startsWith("FLWSECK_TEST-");
+  const isLiveKey = provider === "PAYSTACK"
+    ? secret.startsWith("sk_live_")
+    : secret.startsWith("FLWSECK-") && !secret.startsWith("FLWSECK_TEST-");
 
   if (mode === "sandbox" && !isTestKey) {
     throw new AppError(`${keyName} does not look like a ${provider} test secret. Sandbox mode refuses non-test credentials.`, 503, { code: "PAYOUT_TEST_KEY_REQUIRED" });

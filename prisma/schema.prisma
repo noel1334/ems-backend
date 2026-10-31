@@ -356,6 +356,8 @@ model Company {
   isSubscriptionActive    Boolean       @default(false)
   paystackSubaccountId    String?
   flutterwaveSubaccountId String?
+  monnifyConnection       CompanyMonnifyConnection?
+  monnifyBatches          CompanyMonnifyBatch[]
   walletBalance           Decimal       @default(0) @db.Decimal(18, 2)
   createdAt               DateTime      @default(now())
   updatedAt               DateTime      @updatedAt
@@ -1825,4 +1827,41 @@ model RoleTemplateVersionPermission {
   @@id([versionId, permissionId])
   @@index([permissionId])
   @@map("role_template_version_permissions")
+}
+
+
+model CompanyMonnifyConnection {
+  id                    String   @id @default(uuid())
+  companyId             String   @unique
+  apiKeyCiphertext      String
+  apiSecretCiphertext   String
+  contractCodeCiphertext String
+  sourceAccountNumber   String
+  environment           String   @default("sandbox")
+  isActive              Boolean  @default(true)
+  lastTestedAt          DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@map("company_monnify_connections")
+}
+
+model CompanyMonnifyBatch {
+  id                  String   @id @default(uuid())
+  companyId           String
+  payrollPeriodId     String
+  batchReference      String   @unique
+  providerStatus      String   @default("SUBMITTING")
+  totalAmount         Decimal  @db.Decimal(18, 2)
+  totalTransactions   Int
+  providerResponse    Json?
+  submittedBy         String?
+  authorizedAt        DateTime?
+  lastCheckedAt       DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  company             Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@index([companyId, payrollPeriodId, createdAt])
+  @@index([companyId, providerStatus])
+  @@map("company_monnify_batches")
 }

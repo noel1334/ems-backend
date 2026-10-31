@@ -1,0 +1,16 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const root = new URL('../', import.meta.url).pathname;
+const read = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
+const schema = read('../prisma/schema.prisma');
+assert.match(schema, /model CompanyMonnifyConnection/);
+assert.match(schema, /model CompanyMonnifyBatch/);
+assert.match(schema, /monnifyConnection\s+CompanyMonnifyConnection\?/);
+const service = read('../src/modules/payments/monnify/monnify.service.js');
+for (const text of ['PENDING_AUTHORIZATION', 'SUBMISSION_UNKNOWN', 'companyId', 'transactionList']) assert.ok(service.includes(text), `Missing ${text}`);
+const client = read('../src/modules/payments/monnify/monnify.client.js');
+for (const text of ['/api/v2/disbursements/batch', '/api/v2/disbursements/batch/validate-otp', '/api/v2/disbursements/account/validate']) assert.ok(client.includes(text), `Missing endpoint ${text}`);
+const routes = read('../src/modules/payments/monnify/monnify.routes.js');
+assert.match(routes, /router\.use\(authenticate\)/);
+assert.match(routes, /requirePermission\("payroll", "runs", "APPROVE"\)/);
+console.log('OK Monnify company-scoped integration files and safeguards are present.');

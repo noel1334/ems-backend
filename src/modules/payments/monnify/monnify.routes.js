@@ -1,0 +1,18 @@
+import { Router } from "express";
+import { authenticate } from "../../../middleware/auth.middleware.js";
+import { requirePermission } from "../../../middleware/permission.middleware.js";
+import asyncHandler from "../../../common/utils/asyncHandler.js";
+import * as controller from "./monnify.controller.js";
+const router = Router(); router.use(authenticate);
+const read = requirePermission("payroll", "runs", "READ"); const manage = requirePermission("payroll", "runs", "APPROVE");
+router.get("/connection", read, asyncHandler(controller.connection));
+router.put("/connection", manage, asyncHandler(controller.save));
+router.delete("/connection", manage, asyncHandler(controller.remove));
+router.post("/connection/test", manage, asyncHandler(controller.test));
+router.get("/banks", read, asyncHandler(controller.banks));
+router.post("/account-validation", manage, asyncHandler(controller.validate));
+router.get("/batches", read, asyncHandler(controller.batches));
+router.post("/batches", manage, asyncHandler(controller.submit));
+router.post("/batches/:id/authorize", manage, asyncHandler(controller.authorize));
+router.post("/batches/:id/refresh", read, asyncHandler(controller.refresh));
+export default router;

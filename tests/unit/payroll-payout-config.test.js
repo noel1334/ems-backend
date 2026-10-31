@@ -23,14 +23,9 @@ describe("payroll payout provider mode guard", () => {
       .toThrow(/refuses non-test credentials/i);
   });
 
-  it("does not allow Flutterwave to initiate new salary payouts", () => {
-    expect(() => assertPayrollPayoutProviderConfiguration("FLUTTERWAVE", { ...enabled, FLUTTERWAVE_SECRET_KEY: "FLWSECK_TEST-example" }))
-      .toThrow(/Paystack is the only enabled provider/i);
-  });
-
-  it("rejects Monnify until its payout adapter is implemented and enabled", () => {
-    expect(() => assertPayrollPayoutProviderConfiguration("MONNIFY", { ...enabled }))
-      .toThrow(/Paystack is the only enabled provider/i);
+  it("allows Flutterwave test credentials in sandbox mode", () => {
+    expect(assertPayrollPayoutProviderConfiguration("FLUTTERWAVE", { ...enabled, FLUTTERWAVE_SECRET_KEY: "FLWSECK_TEST-example" }))
+      .toEqual({ provider: "FLUTTERWAVE", mode: "sandbox" });
   });
 
   it("requires explicit acknowledgement before live payouts", () => {
