@@ -11,3 +11,6 @@ assert.match(service, /employeeReferences/);
 assert.match(service, /Monnify disbursement balance is insufficient/);
 assert.match(client, /pageSize/);
 console.log('OK Monnify payroll preview, submission, OTP route, employee mapping and reconciliation hooks are present.');
+
+assert.match(service, /const monnifyAccountError =/);
+assert.match(service, /monnifyAccountError\(error/);
