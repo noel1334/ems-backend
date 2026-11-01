@@ -24,7 +24,16 @@ export async function monnifyRequest(connection, method, path, { data, params } 
 }
 export const monnifyEndpoints = {
   banks: (connection) => monnifyRequest(connection, "GET", "/api/v1/banks", { params: { countryCode: "NG" } }),
-  validateAccount: (connection, accountNumber, bankCode) => monnifyRequest(connection, "GET", "/api/v2/disbursements/account/validate", { params: { accountNumber, bankCode } }),
+  validateAccount: async (connection, accountNumber, bankCode) => {
+    try {
+      return await monnifyRequest(connection, "GET", "/api/v2/disbursements/account/validate", { params: { accountNumber, bankCode } });
+    } catch (error) {
+      // Monnify code 99 is an unexpected provider error, not proof of an invalid
+      // beneficiary. Retry this read-only Name Enquiry once before surfacing it.
+      if (String(error?.code || error?.details?.providerCode || "").toUpperCase() !== "99") throw error;
+      return monnifyRequest(connection, "GET", "/api/v2/disbursements/account/validate", { params: { accountNumber, bankCode } });
+    }
+  },
   balance: (connection, accountNumber) => monnifyRequest(connection, "GET", "/api/v2/disbursements/wallet-balance", { params: { accountNumber } }),
   submitBatch: (connection, payload) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch", { data: payload }),
   authorizeBatch: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch/validate-otp", { data: { reference, authorizationCode } }),
