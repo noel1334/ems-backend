@@ -1,5 +1,6 @@
 import { getBankDirectory } from "./bank-directory.service.js";
 import * as service from "./payment.service.js";
+import { processCompanyPaystackWebhook } from "./company-paystack/company-paystack.service.js";
 import { initializePaymentSchema, verifyPaymentSchema, paymentQuerySchema, validateBody, validateQuery } from "./payment.validation.js";
 
 const companyId = (req) => req.tenant?.companyId || req.user?.companyId;
@@ -24,7 +25,12 @@ export const getOne = async (req, res) => res.json({ success: true, data: await 
 
 export const paystackWebhook = async (req, res) => {
   const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
-  return res.json(await service.processPaystackWebhook(rawBody, req.headers["x-paystack-signature"], JSON.parse(rawBody.toString("utf8"))));
+  const payload = JSON.parse(rawBody.toString("utf8"));
+  // Tenant-owned transfers use the secret key saved for the company that owns the transfer.
+  // Existing platform Paystack wallet/payment webhooks continue through the original handler.
+  const companyResult = await processCompanyPaystackWebhook(rawBody, req.headers["x-paystack-signature"], payload);
+  if (companyResult?.matched) return res.json({ success: true, data: companyResult });
+  return res.json(await service.processPaystackWebhook(rawBody, req.headers["x-paystack-signature"], payload));
 };
 
 export const flutterwaveWebhook = async (req, res) =>
