@@ -158,14 +158,19 @@ export async function validateAccount(companyId, accountNumber, bankCode) {
 
   const resolved = await monnifyEndpoints.validateAccount(connection, number, selectedBank.code);
   const accountName = String(resolved?.accountName ?? resolved?.account_name ?? resolved?.name ?? "").trim();
+  const resolvedNumber = String(resolved?.accountNumber ?? resolved?.account_number ?? number).trim();
+  const resolvedCode = String(resolved?.bankCode ?? resolved?.bank_code ?? selectedBank.code).trim();
   if (accountName.length < 2) throw new AppError("Monnify did not return a verified account name. Do not use this account for payroll until it can be verified.", 422, { code: "MONNIFY_ACCOUNT_NAME_MISSING" });
+  if (resolvedNumber !== number || resolvedCode !== selectedBank.code) {
+    throw new AppError("Monnify's Name Enquiry response did not match the account number and bank code submitted. Reload the bank directory and retry; do not proceed with this beneficiary.", 422, { code: "MONNIFY_BENEFICIARY_RESPONSE_MISMATCH", details: { provider: "MONNIFY", requested: { accountNumber: `••••${number.slice(-4)}`, bankCode: selectedBank.code }, returned: { accountNumber: `••••${resolvedNumber.slice(-4)}`, bankCode: resolvedCode } } });
+  }
 
   return {
     verified: true,
     environment: connection.environment,
     bankName: String(resolved?.bankName ?? resolved?.bank_name ?? selectedBank.name),
     bankCode: selectedBank.code,
-    accountNumber: String(resolved?.accountNumber ?? resolved?.account_number ?? number),
+    accountNumber: resolvedNumber,
     accountName,
   };
 }
@@ -446,7 +451,8 @@ async function buildPayrollPreview(companyId, periodId) {
       const response = await monnifyEndpoints.validateAccount(connection, accountNumber, bank.code);
       const verifiedName = String(response?.accountName ?? response?.account_name ?? response?.name ?? "").trim();
       const verifiedNumber = String(response?.accountNumber ?? response?.account_number ?? accountNumber).trim();
-      if (verifiedName.length < 2 || verifiedNumber !== accountNumber) {
+      const verifiedBankCode = String(response?.bankCode ?? response?.bank_code ?? bank.code).trim();
+      if (verifiedName.length < 2 || verifiedNumber !== accountNumber || verifiedBankCode !== bank.code) {
         return { ...result, message: "Monnify did not return a complete matching beneficiary record. Retry validation or contact Monnify support.", validationCode: "MONNIFY_BENEFICIARY_RESPONSE_MISMATCH" };
       }
       if (!accountNamesCompatible(bankAccount.accountName, verifiedName)) {

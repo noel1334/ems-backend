@@ -16,14 +16,21 @@ export async function monnifyRequest(connection, method, path, { data, params } 
     const response = await axios({ method, url: `${root}${path}`, data, params, timeout: 30000, headers: { Authorization: `Bearer ${login.data.responseBody.accessToken}`, "Content-Type": "application/json" } });
     return unwrap(response);
   } catch (error) {
-    if (error instanceof AppError) throw error;
+    const safeParams = params ? Object.fromEntries(Object.entries(params).map(([key, value]) => [key, key.toLowerCase().includes("account") ? `••••${String(value || "").slice(-4)}` : value])) : undefined;
+    const requestDiagnostic = { method: String(method).toUpperCase(), path, query: safeParams || null };
+    if (error instanceof AppError) {
+      error.details = { ...(error.details || {}), provider: "MONNIFY", request: requestDiagnostic };
+      throw error;
+    }
     const status = error?.response?.status || 502; const body = error?.response?.data;
     const providerCode = String(body?.responseCode || "MONNIFY_UPSTREAM_ERROR");
-    throw new AppError(body?.responseCode ? monnifyFailureMessage(providerCode, body?.responseMessage) : (error.message || "Unable to reach Monnify."), providerCode === "99" ? 502 : (status >= 400 && status < 500 ? status : 502), { code: providerCode, details: { provider: "MONNIFY", providerCode, providerMessage: body?.responseMessage || null } });
+    throw new AppError(body?.responseCode ? monnifyFailureMessage(providerCode, body?.responseMessage) : (error.message || "Unable to reach Monnify."), providerCode === "99" ? 502 : (status >= 400 && status < 500 ? status : 502), { code: providerCode, details: { provider: "MONNIFY", providerCode, providerMessage: body?.responseMessage || null, request: requestDiagnostic, providerResponse: body && typeof body === "object" ? { requestSuccessful: body.requestSuccessful ?? null, responseCode: body.responseCode ?? null, responseMessage: body.responseMessage ?? null } : null } });
   }
 }
 export const monnifyEndpoints = {
-  banks: (connection) => monnifyRequest(connection, "GET", "/api/v1/banks", { params: { countryCode: "NG" } }),
+  // Monnify's authenticated Get Banks endpoint is exactly GET /api/v1/banks.
+  // Do not append a provider-specific query parameter; consume its responseBody codes.
+  banks: (connection) => monnifyRequest(connection, "GET", "/api/v1/banks"),
   validateAccount: async (connection, accountNumber, bankCode) => {
     try {
       return await monnifyRequest(connection, "GET", "/api/v2/disbursements/account/validate", { params: { accountNumber, bankCode } });

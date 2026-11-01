@@ -4,6 +4,8 @@ export const mapBankAccount = (account) => ({
     bankName: account.bankName,
     paystackBankCode: account.paystackBankCode ?? null,
     flutterwaveBankCode: account.flutterwaveBankCode ?? null,
+    monnifyBankCode: account.monnifyBankCode ?? null,
+    monnifyVerifiedAt: account.monnifyVerifiedAt ?? null,
     accountName: account.accountName,
     accountNumber: account.accountNumber,
     accountType: account.accountType,

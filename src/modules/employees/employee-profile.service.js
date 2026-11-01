@@ -1,5 +1,6 @@
 import prisma from "../../config/database.js";
 import AppError from "../../common/errors/AppError.js";
+import { resolveMonnifyAccount } from "../payments/monnify/monnify.service.js";
 
 import { validateUploadedFileContent } from "../../middleware/upload.middleware.js";
 
@@ -63,44 +64,47 @@ const requireEmployee = async (
     return employee;
 };
 
+const verifyMonnifyBankAccount = async ({ companyId, accountNumber, bankCode }) => {
+    if (!bankCode) return null;
+    const verified = await resolveMonnifyAccount(companyId, accountNumber, bankCode);
+    return {
+        bankName: verified.bankName,
+        monnifyBankCode: verified.bankCode,
+        accountName: verified.accountName,
+        monnifyVerifiedAt: new Date(verified.verifiedAt)
+    };
+};
+
 export const addBankAccountService = async ({
     employeeId,
     companyId,
     data
 }) => {
+    await requireEmployee(employeeId, companyId);
+    const verification = await verifyMonnifyBankAccount({
+        companyId,
+        accountNumber: data.accountNumber,
+        bankCode: data.monnifyBankCode
+    });
+
     return prisma.$transaction(
         async (tx) => {
-            await requireEmployee(
+            await requireEmployee(employeeId, companyId, tx);
+            if (data.isPrimary) await clearPrimaryBankAccounts(employeeId, tx);
+
+            const account = await createBankAccount({
                 employeeId,
-                companyId,
-                tx
-            );
-
-            if (data.isPrimary) {
-                await clearPrimaryBankAccounts(
-                    employeeId,
-                    tx
-                );
-            }
-
-            const account =
-                await createBankAccount(
-                    {
-                        employeeId,
-                        bankName: data.bankName,
-                        paystackBankCode: data.paystackBankCode ?? null,
-                        flutterwaveBankCode: data.flutterwaveBankCode ?? null,
-                        accountName: data.accountName,
-                        accountNumber: data.accountNumber,
-                        accountType:
-                            data.accountType ?? null,
-                        isPrimary:
-                            data.isPrimary ?? true,
-                        isActive:
-                            data.isActive ?? true
-                    },
-                    tx
-                );
+                bankName: verification?.bankName ?? data.bankName,
+                paystackBankCode: data.paystackBankCode ?? null,
+                flutterwaveBankCode: data.flutterwaveBankCode ?? null,
+                monnifyBankCode: verification?.monnifyBankCode ?? null,
+                monnifyVerifiedAt: verification?.monnifyVerifiedAt ?? null,
+                accountName: verification?.accountName ?? data.accountName,
+                accountNumber: data.accountNumber,
+                accountType: data.accountType ?? null,
+                isPrimary: data.isPrimary ?? true,
+                isActive: data.isActive ?? true
+            }, tx);
 
             return mapBankAccount(account);
         }
@@ -127,72 +131,55 @@ export const listBankAccountsService =
         );
     };
 
-export const updateBankAccountService =
-    async ({
-        employeeId,
-        companyId,
-        accountId,
-        data
-    }) => {
-        return prisma.$transaction(
-            async (tx) => {
-                await requireEmployee(
-                    employeeId,
-                    companyId,
-                    tx
-                );
+export const updateBankAccountService = async ({
+    employeeId,
+    companyId,
+    accountId,
+    data
+}) => {
+    await requireEmployee(employeeId, companyId);
+    const existing = await findBankAccount(accountId, employeeId);
+    if (!existing) throw new AppError("Bank account not found", 404, "BANK_ACCOUNT_NOT_FOUND");
 
-                const account =
-                    await findBankAccount(
-                        accountId,
-                        employeeId,
-                        tx
-                    );
+    const codeWasProvided = Object.prototype.hasOwnProperty.call(data, "monnifyBankCode");
+    const nextMonnifyCode = codeWasProvided
+        ? String(data.monnifyBankCode ?? "").trim() || null
+        : existing.monnifyBankCode;
+    const nextAccountNumber = data.accountNumber ?? existing.accountNumber;
+    const beneficiaryChanged =
+        (data.accountNumber !== undefined && String(data.accountNumber) !== String(existing.accountNumber)) ||
+        (data.bankName !== undefined && String(data.bankName) !== String(existing.bankName)) ||
+        (codeWasProvided && nextMonnifyCode !== existing.monnifyBankCode) ||
+        data.accountName !== undefined;
 
-                if (!account) {
-                    throw new AppError(
-                        "Bank account not found",
-                        404,
-                        "BANK_ACCOUNT_NOT_FOUND"
-                    );
-                }
+    let updateData = { ...data };
+    if (nextMonnifyCode && beneficiaryChanged) {
+        const verification = await verifyMonnifyBankAccount({
+            companyId,
+            accountNumber: nextAccountNumber,
+            bankCode: nextMonnifyCode
+        });
+        updateData = {
+            ...updateData,
+            bankName: verification.bankName,
+            monnifyBankCode: verification.monnifyBankCode,
+            accountName: verification.accountName,
+            monnifyVerifiedAt: verification.monnifyVerifiedAt
+        };
+    } else if (codeWasProvided && !nextMonnifyCode) {
+        updateData = { ...updateData, monnifyBankCode: null, monnifyVerifiedAt: null };
+    }
 
-                if (data.isPrimary === true) {
-                    await clearPrimaryBankAccounts(
-                        employeeId,
-                        tx
-                    );
-                }
+    return prisma.$transaction(async (tx) => {
+        await requireEmployee(employeeId, companyId, tx);
+        if (updateData.isPrimary === true) await clearPrimaryBankAccounts(employeeId, tx);
 
-                const result =
-                    await updateBankAccount(
-                        accountId,
-                        employeeId,
-                        data,
-                        tx
-                    );
-
-                if (result.count === 0) {
-                    throw new AppError(
-                        "Bank account could not be updated",
-                        404,
-                        "BANK_ACCOUNT_NOT_FOUND"
-                    );
-                }
-
-                const updated =
-                    await findBankAccount(
-                        accountId,
-                        employeeId,
-                        tx
-                    );
-
-                return mapBankAccount(
-                    updated
-                );
-            }
-        );
-    };
+        const result = await updateBankAccount(accountId, employeeId, updateData, tx);
+        if (result.count === 0) throw new AppError("Bank account could not be updated", 404, "BANK_ACCOUNT_NOT_FOUND");
+        const updated = await findBankAccount(accountId, employeeId, tx);
+        return mapBankAccount(updated);
+    });
+};
 
 export const deleteBankAccountService =
     async ({

@@ -11,12 +11,13 @@ export const createBankAccountSchema = z.object({
 
     paystackBankCode: z.string().trim().max(30).optional().nullable(),
     flutterwaveBankCode: z.string().trim().max(30).optional().nullable(),
+    monnifyBankCode: z.string().trim().max(30).optional().nullable(),
 
     accountName: z
         .string()
         .trim()
-        .min(2)
-        .max(150),
+        .max(150)
+        .optional(),
 
     accountNumber: z
         .string()
@@ -38,7 +39,10 @@ export const createBankAccountSchema = z.object({
     isActive: z
         .boolean()
         .default(true)
-});
+}).refine(
+    (data) => Boolean(String(data.monnifyBankCode ?? "").trim()) || String(data.accountName ?? "").trim().length >= 2,
+    { path: ["accountName"], message: "Enter the account name or select a Monnify bank so the account name can be verified automatically." }
+);
 
 export const updateBankAccountSchema = z
     .object({
@@ -51,11 +55,11 @@ export const updateBankAccountSchema = z
 
         paystackBankCode: z.string().trim().max(30).optional().nullable(),
         flutterwaveBankCode: z.string().trim().max(30).optional().nullable(),
+        monnifyBankCode: z.string().trim().max(30).optional().nullable(),
 
         accountName: z
             .string()
             .trim()
-            .min(2)
             .max(150)
             .optional(),
 

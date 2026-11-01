@@ -7,20 +7,30 @@ export const canonicalMonnifyBankName = (value) => String(value || "")
   .trim();
 
 export const normalizeMonnifyBanks = (payload) => {
-  const rows = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.banks)
-      ? payload.banks
-      : Array.isArray(payload?.data)
-        ? payload.data
-        : Array.isArray(payload?.responseBody)
-          ? payload.responseBody
-          : [];
-
+  // The standard Monnify envelope is unwrapped by monnifyRequest(), but accept
+  // documented/raw envelopes as well so harmless response-shape changes do not
+  // silently empty the bank selector.
+  const candidates = [
+    payload,
+    payload?.responseBody,
+    payload?.banks,
+    payload?.data,
+    payload?.data?.banks,
+    payload?.responseBody?.banks,
+    payload?.content,
+    payload?.data?.content,
+  ];
+  const rows = candidates.find(Array.isArray) || [];
   const byCode = new Map();
   for (const row of rows) {
     const name = String(row?.name ?? row?.bankName ?? row?.bank_name ?? "").trim();
-    const code = String(row?.code ?? row?.bankCode ?? row?.bank_code ?? "").trim();
+    // Keep the code exactly as Monnify supplied it. In particular, do not
+    // coerce numeric-looking strings through Number() and lose leading zeroes.
+    const rawCode = row?.code ?? row?.bankCode ?? row?.bank_code;
+    // Monnify returns bank codes as strings (for example "058"). If a future
+    // response changes this to a number, reject it rather than inventing a
+    // leading zero and potentially routing a payment to the wrong bank.
+    const code = typeof rawCode === "string" ? rawCode.trim() : "";
     if (!name || !/^\d{2,10}$/.test(code)) continue;
     if (!byCode.has(code)) byCode.set(code, { name, code });
   }

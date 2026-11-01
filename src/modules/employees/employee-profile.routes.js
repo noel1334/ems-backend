@@ -23,6 +23,8 @@ import { authMiddleware } from "../../middleware/auth.middleware.js";
 import { tenantMiddleware } from "../../middleware/tenant.middleware.js";
 import { requirePermission } from "../../middleware/permission.middleware.js";
 import { uploadSingle } from "../../middleware/upload.middleware.js";
+import asyncHandler from "../../common/utils/asyncHandler.js";
+import { listBanks as listMonnifyBanks, resolveMonnifyAccount } from "../payments/monnify/monnify.service.js";
 
 const router = Router();
 
@@ -30,6 +32,26 @@ router.use(
     authMiddleware,
     tenantMiddleware
 );
+
+// Company-specific Monnify directory and Name Enquiry used by employee bank details.
+router.get(
+    "/bank-directory/monnify",
+    requirePermission("employees", "employee-profile", "READ"),
+    asyncHandler(async (req, res) => {
+        const data = await listMonnifyBanks(req.tenant.id);
+        return res.status(200).json({ success: true, message: "Monnify bank directory loaded", data });
+    })
+);
+
+router.post(
+    "/bank-directory/monnify/resolve",
+    requirePermission("employees", "employee-profile", "UPDATE"),
+    asyncHandler(async (req, res) => {
+        const data = await resolveMonnifyAccount(req.tenant.id, req.body?.accountNumber, req.body?.bankCode);
+        return res.status(200).json({ success: true, message: "Monnify account verified", data });
+    })
+);
+
 
 router.post(
     "/:id/bank-accounts",
