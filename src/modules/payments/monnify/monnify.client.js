@@ -37,6 +37,30 @@ export const monnifyEndpoints = {
   balance: (connection, accountNumber) => monnifyRequest(connection, "GET", "/api/v2/disbursements/wallet-balance", { params: { accountNumber } }),
   submitBatch: (connection, payload) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch", { data: payload }),
   authorizeBatch: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch/validate-otp", { data: { reference, authorizationCode } }),
+  resendBatchOtp: (connection, reference) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single/resend-otp", { data: { reference } }),
   batchStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/summary", { params: { batchReference: reference } }),
-  batchTransactions: (connection, reference, pageNo = 0, pageSize = 100) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/", { params: { batchReference: reference, pageNo, pageSize } }),
+  batchTransactions: async (connection, reference, pageNo = 0, pageSize = 100) => {
+    const all = [];
+    let page = pageNo;
+    let totalPages = null;
+    // Bulk transaction history is paginated. Reconcile every page so a large payroll
+    // does not leave employees beyond the first 100 stuck in PROCESSING.
+    do {
+      // Monnify's Get Bulk Transfer Transactions endpoint places the batch reference
+      // in the URL path: /bulk/{batchReference}/transactions?pageNo=0&pageSize=100.
+      const payload = await monnifyRequest(connection, "GET", `/api/v2/disbursements/bulk/${encodeURIComponent(reference)}/transactions`, { params: { pageNo: page, pageSize } });
+      const rows = Array.isArray(payload) ? payload : (payload?.content || payload?.transactions || payload?.items || payload?.data?.content || []);
+      if (Array.isArray(rows)) all.push(...rows);
+      const pages = Number(payload?.totalPages ?? payload?.data?.totalPages ?? payload?.page?.totalPages);
+      if (Number.isFinite(pages) && pages > 0) totalPages = pages;
+      if (totalPages !== null) {
+        page += 1;
+      } else {
+        if (!Array.isArray(rows) || rows.length < pageSize) break;
+        page += 1;
+      }
+      if (page - pageNo >= 50) break;
+    } while (totalPages === null || page < totalPages);
+    return { content: all, totalElements: all.length, totalPages: totalPages ?? (all.length ? Math.ceil(all.length / pageSize) : 0) };
+  },
 };

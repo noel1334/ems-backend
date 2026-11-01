@@ -9,8 +9,9 @@ export const validate = async (req,res) => ok(res, await service.validateAccount
 export const submit = async (req,res) => ok(res, await service.submitBatch(req.user.companyId, req.body.payrollPeriodId, req.user.userId, req.body), 202);
 export const authorize = async (req,res) => ok(res, await service.authorizeBatch(req.user.companyId, req.params.id, req.body.otp));
 export const refresh = async (req,res) => ok(res, await service.refreshBatch(req.user.companyId, req.params.id));
+export const resendOtp = async (req,res) => ok(res, await service.resendBatchOtp(req.user.companyId, req.params.id));
 export const batches = async (req,res) => ok(res, await service.listBatches(req.user.companyId));
 
 export const payrollPreview = async (req,res) => ok(res, await service.previewPayroll(req.user.companyId, req.params.periodId));
-export const payrollSubmit = async (req,res) => ok(res, await service.submitPayroll(req.user.companyId, req.params.periodId, req.user.userId), 202);
+export const payrollSubmit = async (req,res) => ok(res, await service.submitPayroll(req.user.companyId, req.params.periodId, req.user.userId, req.body?.previewFingerprint), 202);
 export const payrollRefresh = async (req,res) => ok(res, await service.refreshPayrollBatch(req.user.companyId, req.params.id));
