@@ -162,7 +162,10 @@ export async function validateAccount(companyId, accountNumber, bankCode) {
   const resolvedCode = String(resolved?.bankCode ?? resolved?.bank_code ?? selectedBank.code).trim();
   if (accountName.length < 2) throw new AppError("Monnify did not return a verified account name. Do not use this account for payroll until it can be verified.", 422, { code: "MONNIFY_ACCOUNT_NAME_MISSING" });
   if (resolvedNumber !== number || resolvedCode !== selectedBank.code) {
-    throw new AppError("Monnify's Name Enquiry response did not match the account number and bank code submitted. Reload the bank directory and retry; do not proceed with this beneficiary.", 422, { code: "MONNIFY_BENEFICIARY_RESPONSE_MISMATCH", details: { provider: "MONNIFY", requested: { accountNumber: `••••${number.slice(-4)}`, bankCode: selectedBank.code }, returned: { accountNumber: `••••${resolvedNumber.slice(-4)}`, bankCode: resolvedCode } } });
+    throw new AppError("Monnify's Name Enquiry response did not match the requested account number and bank code. Retry the enquiry before saving this beneficiary.", 422, {
+      code: "MONNIFY_BENEFICIARY_RESPONSE_MISMATCH",
+      details: { requested: { accountNumber: `••••${number.slice(-4)}`, bankCode: selectedBank.code }, returned: { accountNumber: `••••${resolvedNumber.slice(-4)}`, bankCode: resolvedCode } },
+    });
   }
 
   return {
@@ -175,17 +178,27 @@ export async function validateAccount(companyId, accountNumber, bankCode) {
   };
 }
 
+// Shared employee-profile adapter: always resolves against this tenant's Monnify
+// connection and returns a server-generated verification timestamp.
+export async function resolveMonnifyAccount(companyId, accountNumber, bankCode) {
+  const resolved = await validateAccount(companyId, accountNumber, bankCode);
+  return { ...resolved, verifiedAt: new Date().toISOString() };
+}
+
 const resolveBatchBank = (transaction, banks, index) => {
   const bankName = String(transaction.bankName || "").trim();
   const suppliedCode = String(transaction.bankCode || "").trim();
   let bank = null;
 
-  if (bankName) {
-    const bankKey = canonicalMonnifyBankName(bankName);
-    bank = banks.find((candidate) => canonicalMonnifyBankName(candidate.name) === bankKey) || null;
-  } else if (suppliedCode) {
-    // Backward compatibility is restricted to codes currently returned by Monnify.
+  if (suppliedCode) {
+    // A code explicitly selected from Monnify's own directory is authoritative.
+    // The canonical bankName may legitimately differ from Monnify's display label.
     bank = banks.find((candidate) => candidate.code === suppliedCode) || null;
+  } else if (bankName) {
+    // Backward compatibility for older employee accounts without a saved Monnify code.
+    const bankKey = bankMatchKey(bankName);
+    const matches = banks.filter((candidate) => bankMatchKey(candidate.name) === bankKey);
+    bank = matches.length === 1 ? matches[0] : null;
   }
 
   if (!bank) {
@@ -374,6 +387,7 @@ const payrollSnapshotFingerprint = (rows) => crypto.createHash("sha256").update(
   bankName: row.bankAccount?.bankName || null,
   accountName: row.bankAccount?.accountName || null,
   accountNumber: row.bankAccount?.accountNumber || null,
+  monnifyBankCode: row.bankAccount?.monnifyBankCode || null,
 })).sort((a, b) => a.id.localeCompare(b.id)))).digest("hex");
 
 const payrollDisbursementRows = (companyId, periodId) => prisma.payrollDisbursement.findMany({
@@ -440,19 +454,26 @@ async function buildPayrollPreview(companyId, periodId) {
     if (!String(bankAccount.accountName || "").trim()) return { ...result, message: "The saved bank account name is missing." };
     if (!Number.isFinite(amount) || amount <= 0) return { ...result, message: "The payroll register contains an invalid or non-positive net salary." };
 
-    const wantedBank = bankMatchKey(bankAccount.bankName);
-    const matchingBanks = banks.filter((bank) => bankMatchKey(bank.name) === wantedBank);
-    if (matchingBanks.length !== 1) {
-      return { ...result, message: matchingBanks.length ? "The saved bank name matches more than one Monnify bank record. Select the precise bank from Monnify's directory." : `The saved bank name “${bankAccount.bankName}” could not be matched to Monnify's current bank directory. Update the bank selection; do not guess a bank code.`, validationCode: "MONNIFY_BANK_NOT_MAPPED" };
+    const selectedMonnifyCode = String(bankAccount.monnifyBankCode || "").trim();
+    let bank = null;
+    if (selectedMonnifyCode) {
+      bank = banks.find((candidate) => candidate.code === selectedMonnifyCode) || null;
+      if (!bank) return { ...result, message: `The saved Monnify bank code “${selectedMonnifyCode}” is no longer present in the current Monnify bank directory. Re-select the bank from Monnify's directory.`, validationCode: "MONNIFY_BANK_CODE_NOT_IN_DIRECTORY" };
+    } else {
+      // Backward compatibility for older records created before provider-specific codes were stored.
+      const wantedBank = bankMatchKey(bankAccount.bankName);
+      const matchingBanks = banks.filter((candidate) => bankMatchKey(candidate.name) === wantedBank);
+      if (matchingBanks.length !== 1) {
+        return { ...result, message: matchingBanks.length ? "The saved bank name matches more than one Monnify bank record. Select the precise bank from Monnify's directory." : `The saved bank name “${bankAccount.bankName}” could not be matched to Monnify's current bank directory. Edit the employee account and select its Monnify bank code.`, validationCode: "MONNIFY_BANK_NOT_MAPPED" };
+      }
+      bank = matchingBanks[0];
     }
 
     try {
-      const bank = matchingBanks[0];
       const response = await monnifyEndpoints.validateAccount(connection, accountNumber, bank.code);
       const verifiedName = String(response?.accountName ?? response?.account_name ?? response?.name ?? "").trim();
       const verifiedNumber = String(response?.accountNumber ?? response?.account_number ?? accountNumber).trim();
-      const verifiedBankCode = String(response?.bankCode ?? response?.bank_code ?? bank.code).trim();
-      if (verifiedName.length < 2 || verifiedNumber !== accountNumber || verifiedBankCode !== bank.code) {
+      if (verifiedName.length < 2 || verifiedNumber !== accountNumber) {
         return { ...result, message: "Monnify did not return a complete matching beneficiary record. Retry validation or contact Monnify support.", validationCode: "MONNIFY_BENEFICIARY_RESPONSE_MISMATCH" };
       }
       if (!accountNamesCompatible(bankAccount.accountName, verifiedName)) {
@@ -801,26 +822,4 @@ export async function listBatches(companyId) {
       createdAt: true,
     },
   });
-}
-
-/**
- * Employee bank-account verification compatibility wrapper.
- * Uses the same Monnify bank directory and Name Enquiry
- * validation used by automated payroll.
- */
-export async function resolveMonnifyAccount(
-  companyId,
-  accountNumber,
-  bankCode
-) {
-  const result = await validateAccount(
-    companyId,
-    accountNumber,
-    bankCode
-  );
-
-  return {
-    ...result,
-    verifiedAt: new Date().toISOString(),
-  };
 }

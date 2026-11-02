@@ -661,8 +661,9 @@ model EmployeeBankAccount {
   // Provider-specific bank codes are not interchangeable between payment providers.
   paystackBankCode             String?
   flutterwaveBankCode          String?
-  monnifyBankCode     String?
-  monnifyVerifiedAt   DateTime?
+  monnifyBankCode              String?
+  // Monnify Name Enquiry is performed server-side when this beneficiary is saved/updated.
+  monnifyVerifiedAt            DateTime?
   accountName                  String
   accountNumber                String
   accountType                  String?

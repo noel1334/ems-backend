@@ -1,4 +1,5 @@
 import axios from "axios";
+import AppError from "../../common/errors/AppError.js";
 import { mergeProviderBankLists } from "./bank-directory.utils.js";
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
@@ -103,7 +104,56 @@ export const getBankDirectory = async () => {
     country: "NG",
     currency: "NGN",
     banks: mergeProviderBankLists(paystack.banks, flutterwave.banks),
-    providers: { PAYSTACK: { configured: paystack.configured, available: paystack.available, error: paystack.error }, FLUTTERWAVE: { configured: flutterwave.configured, available: flutterwave.available, error: flutterwave.error } },
+    // Keep the raw provider directories separate. The merged `banks` list is only
+    // for canonical bank-name selection; provider selectors must use their own
+    // provider's original name/code pairs and must never borrow another code.
+    providers: {
+      PAYSTACK: {
+        configured: paystack.configured,
+        available: paystack.available,
+        error: paystack.error,
+        banks: paystack.banks.map((bank) => ({ name: String(bank.name).trim(), code: String(bank.code).trim() })),
+      },
+      FLUTTERWAVE: {
+        configured: flutterwave.configured,
+        available: flutterwave.available,
+        error: flutterwave.error,
+        banks: flutterwave.banks.map((bank) => ({ name: String(bank.name).trim(), code: String(bank.code).trim() })),
+      },
+    },
     cacheTtlSeconds: { success: 3600, unavailable: 60 },
   };
+};
+
+
+/**
+ * Validate a selected code against exactly one provider's own current directory.
+ * The returned label is informational; codes are never translated between providers.
+ */
+export const validateProviderBankCode = async (provider, bankCode) => {
+  const normalizedProvider = String(provider || "").trim().toUpperCase();
+  if (!["PAYSTACK", "FLUTTERWAVE"].includes(normalizedProvider)) {
+    throw new AppError("Choose Paystack or Flutterwave for this bank code.", 400, "INVALID_BANK_PROVIDER");
+  }
+  const code = String(bankCode ?? "").trim();
+  if (!code) return null;
+
+  const directory = await getBankDirectory();
+  const providerDirectory = directory.providers?.[normalizedProvider];
+  if (!providerDirectory?.available || !Array.isArray(providerDirectory.banks)) {
+    throw new AppError(
+      `${normalizedProvider} bank directory is currently unavailable. Refresh the provider bank list and try again.`,
+      503,
+      { code: "PROVIDER_BANK_DIRECTORY_UNAVAILABLE", details: { provider: normalizedProvider } },
+    );
+  }
+  const bank = providerDirectory.banks.find((row) => String(row.code) === code);
+  if (!bank) {
+    throw new AppError(
+      `Bank code ${code} is not present in ${normalizedProvider}'s current bank directory. Select the bank from that provider's list.`,
+      422,
+      { code: "PROVIDER_BANK_CODE_NOT_IN_DIRECTORY", details: { provider: normalizedProvider } },
+    );
+  }
+  return { provider: normalizedProvider, bankName: String(bank.name), bankCode: code };
 };

@@ -13,11 +13,7 @@ export const createBankAccountSchema = z.object({
     flutterwaveBankCode: z.string().trim().max(30).optional().nullable(),
     monnifyBankCode: z.string().trim().max(30).optional().nullable(),
 
-    accountName: z
-        .string()
-        .trim()
-        .max(150)
-        .optional(),
+    accountName: z.string().trim().max(150).optional().nullable(),
 
     accountNumber: z
         .string()
@@ -39,10 +35,11 @@ export const createBankAccountSchema = z.object({
     isActive: z
         .boolean()
         .default(true)
-}).refine(
-    (data) => Boolean(String(data.monnifyBankCode ?? "").trim()) || String(data.accountName ?? "").trim().length >= 2,
-    { path: ["accountName"], message: "Enter the account name or select a Monnify bank so the account name can be verified automatically." }
-);
+}).superRefine((data, ctx) => {
+    if (!data.monnifyBankCode && String(data.accountName ?? "").trim().length < 2) {
+        ctx.addIssue({ code: "custom", path: ["accountName"], message: "Account name is required unless Monnify Name Enquiry is selected." });
+    }
+});
 
 export const updateBankAccountSchema = z
     .object({
@@ -57,11 +54,7 @@ export const updateBankAccountSchema = z
         flutterwaveBankCode: z.string().trim().max(30).optional().nullable(),
         monnifyBankCode: z.string().trim().max(30).optional().nullable(),
 
-        accountName: z
-            .string()
-            .trim()
-            .max(150)
-            .optional(),
+        accountName: z.string().trim().max(150).optional().nullable(),
 
         accountNumber: z
             .string()
@@ -85,12 +78,15 @@ export const updateBankAccountSchema = z
             .boolean()
             .optional()
     })
-    .refine(
-        (data) => Object.keys(data).length > 0,
-        {
-            message: "At least one field is required"
+    .superRefine((data, ctx) => {
+        if (Object.keys(data).length === 0) {
+            ctx.addIssue({ code: "custom", message: "At least one field is required" });
+            return;
         }
-    );
+        if (data.accountName !== undefined && !data.monnifyBankCode && String(data.accountName ?? "").trim().length < 2) {
+            ctx.addIssue({ code: "custom", path: ["accountName"], message: "Enter a valid account name or select a Monnify bank for verification." });
+        }
+    });
 
 export const createEducationSchema = z.object({
     institution: z

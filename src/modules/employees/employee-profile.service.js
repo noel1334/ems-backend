@@ -1,6 +1,7 @@
 import prisma from "../../config/database.js";
 import AppError from "../../common/errors/AppError.js";
 import { resolveMonnifyAccount } from "../payments/monnify/monnify.service.js";
+import { validateProviderBankCode } from "../payments/bank-directory.service.js";
 
 import { validateUploadedFileContent } from "../../middleware/upload.middleware.js";
 
@@ -64,47 +65,54 @@ const requireEmployee = async (
     return employee;
 };
 
-const verifyMonnifyBankAccount = async ({ companyId, accountNumber, bankCode }) => {
-    if (!bankCode) return null;
-    const verified = await resolveMonnifyAccount(companyId, accountNumber, bankCode);
-    return {
-        bankName: verified.bankName,
-        monnifyBankCode: verified.bankCode,
-        accountName: verified.accountName,
-        monnifyVerifiedAt: new Date(verified.verifiedAt)
-    };
-};
-
 export const addBankAccountService = async ({
     employeeId,
     companyId,
     data
 }) => {
+    // Check tenant ownership before contacting any provider.
     await requireEmployee(employeeId, companyId);
-    const verification = await verifyMonnifyBankAccount({
-        companyId,
-        accountNumber: data.accountNumber,
-        bankCode: data.monnifyBankCode
-    });
+    if (data.paystackBankCode) await validateProviderBankCode("PAYSTACK", data.paystackBankCode);
+    if (data.flutterwaveBankCode) await validateProviderBankCode("FLUTTERWAVE", data.flutterwaveBankCode);
+    const verifiedMonnify = data.monnifyBankCode
+        ? await resolveMonnifyAccount(companyId, data.accountNumber, data.monnifyBankCode)
+        : null;
 
     return prisma.$transaction(
         async (tx) => {
-            await requireEmployee(employeeId, companyId, tx);
-            if (data.isPrimary) await clearPrimaryBankAccounts(employeeId, tx);
-
-            const account = await createBankAccount({
+            await requireEmployee(
                 employeeId,
-                bankName: verification?.bankName ?? data.bankName,
-                paystackBankCode: data.paystackBankCode ?? null,
-                flutterwaveBankCode: data.flutterwaveBankCode ?? null,
-                monnifyBankCode: verification?.monnifyBankCode ?? null,
-                monnifyVerifiedAt: verification?.monnifyVerifiedAt ?? null,
-                accountName: verification?.accountName ?? data.accountName,
-                accountNumber: data.accountNumber,
-                accountType: data.accountType ?? null,
-                isPrimary: data.isPrimary ?? true,
-                isActive: data.isActive ?? true
-            }, tx);
+                companyId,
+                tx
+            );
+
+            if (data.isPrimary) {
+                await clearPrimaryBankAccounts(
+                    employeeId,
+                    tx
+                );
+            }
+
+            const account =
+                await createBankAccount(
+                    {
+                        employeeId,
+                        bankName: data.bankName,
+                        paystackBankCode: data.paystackBankCode ?? null,
+                        flutterwaveBankCode: data.flutterwaveBankCode ?? null,
+                        monnifyBankCode: verifiedMonnify?.bankCode ?? null,
+                        monnifyVerifiedAt: verifiedMonnify?.verifiedAt ? new Date(verifiedMonnify.verifiedAt) : null,
+                        accountName: verifiedMonnify?.accountName ?? data.accountName,
+                        accountNumber: data.accountNumber,
+                        accountType:
+                            data.accountType ?? null,
+                        isPrimary:
+                            data.isPrimary ?? true,
+                        isActive:
+                            data.isActive ?? true
+                    },
+                    tx
+                );
 
             return mapBankAccount(account);
         }
@@ -141,39 +149,51 @@ export const updateBankAccountService = async ({
     const existing = await findBankAccount(accountId, employeeId);
     if (!existing) throw new AppError("Bank account not found", 404, "BANK_ACCOUNT_NOT_FOUND");
 
-    const codeWasProvided = Object.prototype.hasOwnProperty.call(data, "monnifyBankCode");
-    const nextMonnifyCode = codeWasProvided
+    const nextAccountNumber = String(data.accountNumber ?? existing.accountNumber).trim();
+    const hasMonnifyCode = Object.prototype.hasOwnProperty.call(data, "monnifyBankCode");
+    const nextMonnifyCode = hasMonnifyCode
         ? String(data.monnifyBankCode ?? "").trim() || null
-        : existing.monnifyBankCode;
-    const nextAccountNumber = data.accountNumber ?? existing.accountNumber;
-    const beneficiaryChanged =
-        (data.accountNumber !== undefined && String(data.accountNumber) !== String(existing.accountNumber)) ||
-        (data.bankName !== undefined && String(data.bankName) !== String(existing.bankName)) ||
-        (codeWasProvided && nextMonnifyCode !== existing.monnifyBankCode) ||
-        data.accountName !== undefined;
+        : existing.monnifyBankCode ?? null;
+    const accountNumberChanged = nextAccountNumber !== String(existing.accountNumber);
+    const monnifyCodeChanged = hasMonnifyCode && nextMonnifyCode !== String(existing.monnifyBankCode ?? "");
+    const paystackCodeChanged = Object.prototype.hasOwnProperty.call(data, "paystackBankCode")
+        && String(data.paystackBankCode ?? "") !== String(existing.paystackBankCode ?? "");
+    const flutterwaveCodeChanged = Object.prototype.hasOwnProperty.call(data, "flutterwaveBankCode")
+        && String(data.flutterwaveBankCode ?? "") !== String(existing.flutterwaveBankCode ?? "");
+    const accountNameChanged = Object.prototype.hasOwnProperty.call(data, "accountName")
+        && String(data.accountName ?? "") !== String(existing.accountName ?? "");
+    const updateData = { ...data };
 
-    let updateData = { ...data };
-    if (nextMonnifyCode && beneficiaryChanged) {
-        const verification = await verifyMonnifyBankAccount({
-            companyId,
-            accountNumber: nextAccountNumber,
-            bankCode: nextMonnifyCode
-        });
-        updateData = {
-            ...updateData,
-            bankName: verification.bankName,
-            monnifyBankCode: verification.monnifyBankCode,
-            accountName: verification.accountName,
-            monnifyVerifiedAt: verification.monnifyVerifiedAt
-        };
-    } else if (codeWasProvided && !nextMonnifyCode) {
-        updateData = { ...updateData, monnifyBankCode: null, monnifyVerifiedAt: null };
+    if (paystackCodeChanged && data.paystackBankCode) await validateProviderBankCode("PAYSTACK", data.paystackBankCode);
+    if (flutterwaveCodeChanged && data.flutterwaveBankCode) await validateProviderBankCode("FLUTTERWAVE", data.flutterwaveBankCode);
+
+    if (nextMonnifyCode && (monnifyCodeChanged || accountNumberChanged || accountNameChanged || !existing.monnifyVerifiedAt)) {
+        // Verify only when Monnify beneficiary details need validation. Changing a
+        // Paystack/Flutterwave selection must not call or depend on Monnify.
+        const verified = await resolveMonnifyAccount(companyId, nextAccountNumber, nextMonnifyCode);
+        updateData.monnifyBankCode = verified.bankCode;
+        updateData.monnifyVerifiedAt = new Date(verified.verifiedAt);
+        updateData.accountName = verified.accountName;
+    } else if (hasMonnifyCode && !nextMonnifyCode) {
+        updateData.monnifyBankCode = null;
+        updateData.monnifyVerifiedAt = null;
+    } else if (accountNumberChanged && !nextMonnifyCode) {
+        updateData.monnifyBankCode = null;
+        updateData.monnifyVerifiedAt = null;
+    }
+
+    const effectiveAccountNameChanged = Object.prototype.hasOwnProperty.call(updateData, "accountName")
+        && String(updateData.accountName ?? "") !== String(existing.accountName ?? "");
+    if (accountNumberChanged || paystackCodeChanged || effectiveAccountNameChanged) {
+        // Cached Paystack recipients are bound to the original beneficiary fingerprint.
+        updateData.paystackRecipientCode = null;
+        updateData.paystackRecipientMode = null;
+        updateData.paystackRecipientFingerprint = null;
     }
 
     return prisma.$transaction(async (tx) => {
         await requireEmployee(employeeId, companyId, tx);
         if (updateData.isPrimary === true) await clearPrimaryBankAccounts(employeeId, tx);
-
         const result = await updateBankAccount(accountId, employeeId, updateData, tx);
         if (result.count === 0) throw new AppError("Bank account could not be updated", 404, "BANK_ACCOUNT_NOT_FOUND");
         const updated = await findBankAccount(accountId, employeeId, tx);

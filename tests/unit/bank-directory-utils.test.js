@@ -22,5 +22,7 @@ describe("provider bank directory", () => {
     expect(normalizeBankName("United Bank for Africa Plc")).toBe("uba");
     expect(normalizeBankName("Access Bank")).toBe("access bank");
     expect(normalizeBankName("Stanbic IBTC Bank Nigeria")).toBe("stanbic ibtc");
+    expect(normalizeBankName("Loma MFB")).toBe(normalizeBankName("Loma Microfinance Bank"));
+    expect(normalizeBankName("OPay Digital Services Limited")).toBe("opay");
   });
 });

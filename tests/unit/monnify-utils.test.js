@@ -10,6 +10,8 @@ describe("Monnify beneficiary safeguards", () => {
     expect(canonicalMonnifyBankName("Access Bank Plc")).toBe(canonicalMonnifyBankName("Access bank"));
     expect(canonicalMonnifyBankName("Zenith Bank")).not.toBe(canonicalMonnifyBankName("Unity Bank"));
     expect(canonicalMonnifyBankName("Moniepoint MFB")).toBe(canonicalMonnifyBankName("Moniepoint MFB"));
+    expect(canonicalMonnifyBankName("Loma MFB")).toBe(canonicalMonnifyBankName("Loma Microfinance Bank"));
+    expect(canonicalMonnifyBankName("OPay Digital Services Limited")).toBe(canonicalMonnifyBankName("OPay"));
   });
 
   it("normalizes the current Monnify bank-directory response and preserves directory codes", () => {

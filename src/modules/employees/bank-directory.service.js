@@ -7,7 +7,7 @@ const configured = () => ({ PAYSTACK: Boolean(process.env.PAYSTACK_SECRET_KEY), 
 
 export const canonicalBankKey = (value) => String(value || "")
   .normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/&/g, " and ")
-  .replace(/\b(microfinance|digital|services|service|limited|ltd|plc|bank|of nigeria|nigeria)\b/g, " ")
+  .replace(/\b(microfinance|mfb|digital|services|service|limited|ltd|plc|bank|of nigeria|nigeria)\b/g, " ")
   .replace(/[^a-z0-9]/g, "").trim();
 
 const providerRequest = async (provider, method, path, data, params) => {

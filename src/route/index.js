@@ -10,6 +10,7 @@ import designationRoutes from "../modules/designations/designation.routes.js";
 
 import employeeRoutes from "../modules/employees/employee.routes.js";
 import employeeProfileRoutes from "../modules/employees/employee-profile.routes.js";
+import employeeBankDirectoryRoutes from "../modules/employees/bank-directory.routes.js";
 
 import shiftRoutes from "../modules/shifts/shift.routes.js";
 import scheduleRoutes from "../modules/schedules/schedule.routes.js";
@@ -112,6 +113,7 @@ router.use("/designations", designationRoutes);
 */
 
 
+router.use("/employees/bank-directory", employeeBankDirectoryRoutes);
 router.use("/employees", employeeRoutes);
 router.use("/employees", employeeProfileRoutes);
 
