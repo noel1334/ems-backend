@@ -802,3 +802,25 @@ export async function listBatches(companyId) {
     },
   });
 }
+
+/**
+ * Employee bank-account verification compatibility wrapper.
+ * Uses the same Monnify bank directory and Name Enquiry
+ * validation used by automated payroll.
+ */
+export async function resolveMonnifyAccount(
+  companyId,
+  accountNumber,
+  bankCode
+) {
+  const result = await validateAccount(
+    companyId,
+    accountNumber,
+    bankCode
+  );
+
+  return {
+    ...result,
+    verifiedAt: new Date().toISOString(),
+  };
+}
