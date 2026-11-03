@@ -43,6 +43,15 @@ const accessUrl = async (storage, storageKey) => {
     return null;
 };
 
+const MONNIFY_NAME_ENQUIRY_PATH = "/api/v2/disbursements/account/validate";
+
+// Monnify code 99 is a temporary Name Enquiry processing failure, not proof
+// that the employee's bank details are invalid. Only suppress this exact
+// endpoint failure; bank-directory/authentication failures must still surface.
+const isMonnifyNameEnquiryUnavailable = (error) =>
+    [error?.code, error?.details?.providerCode].some((code) => String(code ?? "").trim() === "99") &&
+    String(error?.details?.request?.path ?? "").trim() === MONNIFY_NAME_ENQUIRY_PATH;
+
 const requireEmployee = async (
     employeeId,
     companyId,
@@ -162,18 +171,47 @@ export const updateBankAccountService = async ({
         && String(data.flutterwaveBankCode ?? "") !== String(existing.flutterwaveBankCode ?? "");
     const accountNameChanged = Object.prototype.hasOwnProperty.call(data, "accountName")
         && String(data.accountName ?? "") !== String(existing.accountName ?? "");
+    const bankNameChanged = Object.prototype.hasOwnProperty.call(data, "bankName")
+        && String(data.bankName ?? "") !== String(existing.bankName ?? "");
+    const onlyOtherProviderCodeChanged = (paystackCodeChanged || flutterwaveCodeChanged)
+        && !monnifyCodeChanged
+        && !accountNumberChanged
+        && !accountNameChanged
+        && !bankNameChanged;
     const updateData = { ...data };
 
     if (paystackCodeChanged && data.paystackBankCode) await validateProviderBankCode("PAYSTACK", data.paystackBankCode);
     if (flutterwaveCodeChanged && data.flutterwaveBankCode) await validateProviderBankCode("FLUTTERWAVE", data.flutterwaveBankCode);
 
-    if (nextMonnifyCode && (monnifyCodeChanged || accountNumberChanged || accountNameChanged || !existing.monnifyVerifiedAt)) {
-        // Verify only when Monnify beneficiary details need validation. Changing a
-        // Paystack/Flutterwave selection must not call or depend on Monnify.
-        const verified = await resolveMonnifyAccount(companyId, nextAccountNumber, nextMonnifyCode);
-        updateData.monnifyBankCode = verified.bankCode;
-        updateData.monnifyVerifiedAt = new Date(verified.verifiedAt);
-        updateData.accountName = verified.accountName;
+    if (nextMonnifyCode && (
+        monnifyCodeChanged
+        || accountNumberChanged
+        || accountNameChanged
+        || bankNameChanged
+        || (!existing.monnifyVerifiedAt && !onlyOtherProviderCodeChanged)
+    )) {
+        // Verify when Monnify beneficiary details change, or retry a previously
+        // unverified beneficiary on an ordinary bank-account save. A Paystack or
+        // Flutterwave code-only edit must never depend on Monnify availability.
+        try {
+            const verified = await resolveMonnifyAccount(companyId, nextAccountNumber, nextMonnifyCode);
+            updateData.monnifyBankCode = verified.bankCode;
+            updateData.monnifyVerifiedAt = new Date(verified.verifiedAt);
+            updateData.accountName = verified.accountName;
+        } catch (error) {
+            if (!isMonnifyNameEnquiryUnavailable(error)) throw error;
+
+            // Keep the selected company-specific Monnify bank code and all profile
+            // edits. Preserve a non-empty manual/existing account name, but leave
+            // verifiedAt null so payroll preflight still requires a successful
+            // Name Enquiry before any Monnify salary transfer is submitted.
+            updateData.monnifyBankCode = nextMonnifyCode;
+            updateData.monnifyVerifiedAt = null;
+            const retainedAccountName = String(data.accountName ?? "").trim()
+                || String(existing.accountName ?? "").trim();
+            if (retainedAccountName) updateData.accountName = retainedAccountName;
+            else delete updateData.accountName;
+        }
     } else if (hasMonnifyCode && !nextMonnifyCode) {
         updateData.monnifyBankCode = null;
         updateData.monnifyVerifiedAt = null;
