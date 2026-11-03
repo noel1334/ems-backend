@@ -1,0 +1,21 @@
+export const PAYMENT_PROVIDER = Object.freeze({
+  PAYSTACK: "PAYSTACK",
+  FLUTTERWAVE: "FLUTTERWAVE",
+});
+
+export const PAYMENT_STATUS = Object.freeze({
+  PENDING: "PENDING",
+  SUCCESSFUL: "SUCCESSFUL",
+  FAILED: "FAILED",
+  CANCELLED: "CANCELLED",
+  REVERSED: "REVERSED",
+});
+
+export const PAYMENT_PURPOSE = Object.freeze({
+  WALLET_FUNDING: "WALLET_FUNDING",
+  SUBSCRIPTION: "SUBSCRIPTION",
+});
+
+export const PAYMENT_CURRENCY = "NGN";
+
+export const PAYMENT_REFERENCE_PREFIX = "PAY";

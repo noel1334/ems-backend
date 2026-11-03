@@ -1,0 +1,12 @@
+import { Router } from "express";
+import authenticate from "../../middleware/auth.middleware.js";
+import requirePermission from "../../middleware/permission.middleware.js";
+import deviceAuth from "./device.middleware.js";
+import { deviceGatewayRateLimit } from "../../middleware/rate-limit.middleware.js";
+import * as controller from "./device.controller.js";
+const router=Router();
+router.post("/register", authenticate, requirePermission("biometrics","biometrics","MANAGE"), controller.register);
+router.post("/:id/credentials/:credentialId/rotate", authenticate, requirePermission("biometrics","biometrics","MANAGE"), controller.rotateCredential);
+router.get("/gateway/heartbeat", deviceAuth, deviceGatewayRateLimit, controller.heartbeat);
+router.post("/gateway/events", deviceAuth, deviceGatewayRateLimit, controller.event);
+export default router;

@@ -1,0 +1,10 @@
+import { z } from "zod";
+
+export const locationSchema = z.object({ name: z.string().trim().min(2).max(120), code: z.string().trim().min(2).max(40), address: z.string().trim().max(300).optional().nullable() });
+export const supplierSchema = z.object({ name: z.string().trim().min(2).max(160), email: z.string().email().optional().nullable(), phone: z.string().trim().max(40).optional().nullable(), address: z.string().trim().max(300).optional().nullable() });
+export const itemSchema = z.object({ locationId: z.string().uuid().optional().nullable(), sku: z.string().trim().min(2).max(80), barcode: z.string().trim().min(2).max(120), name: z.string().trim().min(2).max(160), category: z.string().trim().max(100).optional().nullable(), unit: z.string().trim().min(1).max(30).default("piece"), minimumQuantity: z.coerce.number().int().min(0).default(0) });
+export const receiveSchema = z.object({ itemId: z.string().uuid(), quantity: z.coerce.number().int().positive(), supplierId: z.string().uuid().optional().nullable(), reference: z.string().trim().min(2).max(120), note: z.string().trim().max(500).optional().nullable() });
+export const adjustSchema = z.object({ itemId: z.string().uuid(), quantity: z.coerce.number().int().positive(), type: z.enum(["ADJUSTMENT","DAMAGE","LOSS"]), reference: z.string().trim().min(2).max(120), note: z.string().trim().min(2).max(500) });
+export const verifySchema = z.object({ employeeId: z.string().uuid(), method: z.enum(["FINGERPRINT","FACE"]), templateReference: z.string().trim().min(3).max(300), deviceReference: z.string().trim().max(120).optional().nullable() });
+export const transactionSchema = z.object({ itemId: z.string().uuid(), employeeId: z.string().uuid(), locationId: z.string().uuid().optional().nullable(), type: z.enum(["ISSUE","RETURN"]), quantity: z.coerce.number().int().positive(), verificationReference: z.string().trim().min(10).max(100), note: z.string().trim().max(500).optional().nullable() });
+export const confirmSchema = z.object({ note: z.string().trim().max(500).optional().nullable() });
