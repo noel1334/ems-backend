@@ -4,6 +4,7 @@ import prisma from "../../../config/database.js";
 import AppError from "../../../common/errors/AppError.js";
 import { encryptCompanyPaystackSecret, decryptCompanyPaystackSecret } from "./company-paystack.crypto.js";
 import { companyPaystackEndpoints } from "./company-paystack.client.js";
+import { explainPaystackAccountError, recipientFailureSummary, shouldResolvePaystackAccounts } from "./company-paystack.utils.js";
 import { estimatePaystackTransferFee } from "../../payroll/payroll.payout.config.js";
 
 const asText = (value) => String(value ?? "").trim();
@@ -112,7 +113,7 @@ async function preparePreview(companyId, periodId) {
   });
   const response = await companyPaystackEndpoints.banks(connection);
   const supported = new Set((response.data || []).filter((bank) => bank.active !== false).map((bank) => String(bank.code)));
-  const shouldResolve = connection.environment === "live" || String(process.env.PAYROLL_PAYOUT_VALIDATE_BANK_ACCOUNTS_IN_SANDBOX || "false").toLowerCase() === "true";
+  const shouldResolve = shouldResolvePaystackAccounts(connection.environment);
   const employees = await mapWithConcurrency(rows, 4, async (row) => {
     const selected = bankForEmployee(row.employee);
     const errors = [];
@@ -125,13 +126,16 @@ async function preparePreview(companyId, periodId) {
       try {
         const result = await companyPaystackEndpoints.resolveAccount(connection, selected.account.accountNumber, selected.bankCode);
         resolved = result.data;
-        if (!namesCompatible(selected.account.accountName, resolved.account_name)) errors.push(`The bank account resolves to "${resolved.account_name || "unknown name"}", which does not sufficiently match the employee's saved account name.`);
-      } catch (error) { errors.push(error.message || "Paystack could not resolve this bank account."); }
+        if (resolved?.account_number && String(resolved.account_number) !== String(selected.account.accountNumber)) {
+          errors.push("Paystack returned a different account number than the one saved for this employee. Re-check the employee's account details before continuing.");
+        }
+        if (!namesCompatible(selected.account.accountName, resolved?.account_name)) errors.push(`The bank account resolves to "${resolved?.account_name || "unknown name"}", which does not sufficiently match the employee's saved account name.`);
+      } catch (error) { errors.push(explainPaystackAccountError(error.message, selected.bankCode)); }
     }
     let estimatedFee = 0;
     try { estimatedFee = estimatePaystackTransferFee(Number(row.amount)); }
     catch (error) { errors.push(error.message || "Paystack transfer fee could not be estimated."); }
-    return { disbursementId: row.id, employee: employeeName(row.employee), employeeId: row.employeeId, bankName: selected.account?.bankName || null, accountName: selected.account?.accountName || null, resolvedAccountName: resolved?.account_name || null, accountNumberLast4: selected.account?.accountNumber ? String(selected.account.accountNumber).slice(-4) : null, amount: new Decimal(row.amount).toFixed(2), estimatedFee: new Decimal(estimatedFee).toFixed(2), valid: errors.length === 0, errors, _bankAccountId: selected.account?.id || null, _bankCode: selected.bankCode || null, _accountNumber: selected.account?.accountNumber || null, _accountName: selected.account?.accountName || null, _email: row.employee?.email || null };
+    return { disbursementId: row.id, employee: employeeName(row.employee), employeeId: row.employeeId, bankName: selected.account?.bankName || null, accountName: selected.account?.accountName || null, resolvedAccountName: resolved?.account_name || null, accountNumberLast4: selected.account?.accountNumber ? String(selected.account.accountNumber).slice(-4) : null, amount: new Decimal(row.amount).toFixed(2), estimatedFee: new Decimal(estimatedFee).toFixed(2), valid: errors.length === 0, validationStatus: errors.length ? "BLOCKED" : shouldResolve ? "PROVIDER_VERIFIED" : "LOCAL_ONLY", errors, _bankAccountId: selected.account?.id || null, _bankCode: selected.bankCode || null, _accountNumber: selected.account?.accountNumber || null, _accountName: selected.account?.accountName || null, _email: row.employee?.email || null };
   });
   if (!rows.length) throw new AppError("There are no pending disbursements in this payroll register. Refresh existing Paystack batches instead of submitting again.", 409, { code: "PAYSTACK_NO_PENDING_DISBURSEMENTS" });
   const digest = secretDigest(decryptCompanyPaystackSecret(connection.secretKeyCiphertext));
@@ -140,7 +144,7 @@ async function preparePreview(companyId, periodId) {
   const validCount = employees.filter((item) => item.valid).length;
   const totalAmount = employees.reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
   const estimatedFees = employees.reduce((sum, item) => sum.plus(item.estimatedFee), new Decimal(0));
-  return { connection, period, employees, fingerprint, totalAmount: totalAmount.toFixed(2), estimatedFees: estimatedFees.toFixed(2), estimatedRequiredBalance: totalAmount.plus(estimatedFees).toFixed(2), validCount, invalidCount: employees.length - validCount, balance: null };
+  return { connection, period, employees, fingerprint, totalAmount: totalAmount.toFixed(2), estimatedFees: estimatedFees.toFixed(2), estimatedRequiredBalance: totalAmount.plus(estimatedFees).toFixed(2), validCount, invalidCount: employees.length - validCount, accountValidationMode: shouldResolve ? "PAYSTACK_RESOLVED" : "LOCAL_FORMAT_ONLY", providerValidationComplete: shouldResolve, balance: null };
 }
 
 export async function previewPayroll(companyId, periodId) {
@@ -150,7 +154,7 @@ export async function previewPayroll(companyId, periodId) {
   catch (error) { balanceError = error.message; }
   if (balanceError) throw new AppError(`Could not confirm the company's Paystack balance: ${balanceError}`, 502, { code: "PAYSTACK_BALANCE_CHECK_FAILED" });
   const insufficientBalance = preview.connection.environment === "live" && balance.balance < Number(preview.estimatedRequiredBalance);
-  return { payrollPeriodId: periodId, environment: preview.connection.environment, balance: balance.balance, balanceKobo: balance.balanceKobo, totalAmount: preview.totalAmount, estimatedFees: preview.estimatedFees, estimatedRequiredBalance: preview.estimatedRequiredBalance, totalTransactions: preview.employees.length, validCount: preview.validCount, invalidCount: preview.invalidCount, insufficientBalance, canSubmit: preview.invalidCount === 0 && !insufficientBalance, previewFingerprint: preview.fingerprint, employees: preview.employees.map(({ _bankAccountId, _bankCode, _accountNumber, _accountName, _email, ...publicItem }) => publicItem), notes: [preview.connection.environment === "test" ? "Sandbox/test mode does not move real money. Paystack test transfers are simulated." : "Live transfers use this company's Paystack NGN balance, not its ordinary bank account or the EMS internal wallet.", "Bulk transfer requires Transfers OTP to be disabled in this company's Paystack Dashboard. A single transfer may require OTP authorization.", "Bulk payroll is split into groups of at most 100 and Paystack requests are spaced by at least five seconds.", "The fee total is an estimate using the published Nigerian transfer pricing and the backend fee settings. Paystack checks the actual transfer amount plus fee before accepting each request.", "If this company has configured a Paystack Transfer Approval URL, that separate approval callback is not implemented in this version; configure and test it before using that integration."] };
+  return { payrollPeriodId: periodId, environment: preview.connection.environment, balance: balance.balance, balanceKobo: balance.balanceKobo, totalAmount: preview.totalAmount, estimatedFees: preview.estimatedFees, estimatedRequiredBalance: preview.estimatedRequiredBalance, totalTransactions: preview.employees.length, validCount: preview.validCount, invalidCount: preview.invalidCount, accountValidationMode: preview.accountValidationMode, providerValidationComplete: preview.providerValidationComplete, insufficientBalance, canSubmit: preview.invalidCount === 0 && !insufficientBalance && preview.providerValidationComplete, previewFingerprint: preview.fingerprint, employees: preview.employees.map(({ _bankAccountId, _bankCode, _accountNumber, _accountName, _email, ...publicItem }) => publicItem), notes: [preview.connection.environment === "test" ? "Sandbox/test mode does not move real money. EMS resolves each account with Paystack before allowing recipient creation; use a Paystack-supported test beneficiary and the matching Paystack bank code." : "Live transfers use this company's Paystack NGN balance, not its ordinary bank account or the EMS internal wallet.", preview.providerValidationComplete ? "Every listed employee bank account was resolved by this company's Paystack integration during this preview." : "WARNING: Paystack account resolution is disabled for this sandbox connection. EMS performed format checks only and has disabled submission until provider validation is enabled.", "Bulk transfer requires Transfers OTP to be disabled in this company's Paystack Dashboard. A single transfer may require OTP authorization.", "Bulk payroll is split into groups of at most 100 and Paystack requests are spaced by at least five seconds.", "The fee total is an estimate using the published Nigerian transfer pricing and the backend fee settings. Paystack checks the actual transfer amount plus fee before accepting each request.", "If this company has configured a Paystack Transfer Approval URL, that separate approval callback is not implemented in this version; configure and test it before using that integration."] };
 }
 
 async function getOrCreateRecipient(companyId, connection, row) {
@@ -237,14 +241,43 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   const mode = preview.employees.length === 1 ? "SINGLE" : "BULK";
   const batch = await prisma.companyPaystackBatch.create({ data: { companyId, payrollPeriodId: periodId, batchReference, providerStatus: "SUBMITTING", environment: connection.environment, transferMode: mode, totalAmount: new Decimal(preview.totalAmount), totalTransactions: preview.employees.length, submittedBy: userId } });
   try {
-    // Recipient creation is one API request per uncached employee. Limit concurrency so
-    // larger companies do not serialize hundreds of requests or flood Paystack's API.
-    const prepared = await mapWithConcurrency(preview.employees, 4, async (row) => ({
-      ...row,
-      recipientCode: await getOrCreateRecipient(companyId, connection, row),
-      reference: newReference(),
-      amountKobo: toKobo(row.amount),
-    }));
+    // Prepare every recipient before sending any salary transfer. Collect failures
+    // per employee rather than allowing the first rejected bank account to hide the
+    // remaining problems behind one generic batch failure.
+    const recipientPreparation = await mapWithConcurrency(preview.employees, 4, async (row) => {
+      try {
+        return {
+          ok: true,
+          item: {
+            ...row,
+            recipientCode: await getOrCreateRecipient(companyId, connection, row),
+            reference: newReference(),
+            amountKobo: toKobo(row.amount),
+          },
+        };
+      } catch (error) {
+        return { ok: false, row, error };
+      }
+    });
+    const recipientFailures = recipientPreparation
+      .filter((result) => !result.ok)
+      .map((result) => recipientFailureSummary(result.row, result.error));
+    if (recipientFailures.length) {
+      const details = recipientFailures.slice(0, 3).map((failure) => `${failure.employee} (${failure.bankName}${failure.accountNumberLast4 ? ` •••• ${failure.accountNumberLast4}` : ""}): ${failure.message}`).join(" | ");
+      const summary = `Paystack could not prepare ${recipientFailures.length} transfer recipient${recipientFailures.length === 1 ? "" : "s"}. No salary transfers were initiated. ${details}${recipientFailures.length > 3 ? ` | and ${recipientFailures.length - 3} more` : ""}`;
+      await prisma.companyPaystackBatch.update({
+        where: { id: batch.id },
+        data: {
+          providerStatus: "FAILED",
+          providerResponse: { phase: "RECIPIENT_PREPARATION", error: summary, recipientFailures, transfersInitiated: false },
+        },
+      });
+      throw new AppError(summary, 422, {
+        code: "PAYSTACK_RECIPIENT_PREPARATION_FAILED",
+        details: { recipientFailures, transfersInitiated: false },
+      });
+    }
+    const prepared = recipientPreparation.map((result) => result.item);
     if (mode === "SINGLE") {
       const item = prepared[0];
       await prisma.payrollDisbursement.update({ where: { id: item.disbursementId }, data: { provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", externalReference: item.reference, status: "PROCESSING", providerStatus: "SUBMITTING", providerResponse: { phase: "SUBMITTING" }, failureReason: null } });
@@ -406,7 +439,17 @@ export async function refreshBatch(companyId, batchId) {
 }
 
 export async function listBatches(companyId) {
-  return prisma.companyPaystackBatch.findMany({ where: { companyId }, orderBy: { createdAt: "desc" }, take: 25, select: { id: true, payrollPeriodId: true, batchReference: true, providerStatus: true, environment: true, transferMode: true, totalAmount: true, totalTransactions: true, authorizedAt: true, lastCheckedAt: true, createdAt: true } });
+  const rows = await prisma.companyPaystackBatch.findMany({
+    where: { companyId }, orderBy: { createdAt: "desc" }, take: 25,
+    select: { id: true, payrollPeriodId: true, batchReference: true, providerStatus: true, environment: true, transferMode: true, totalAmount: true, totalTransactions: true, authorizedAt: true, lastCheckedAt: true, createdAt: true, providerResponse: true },
+  });
+  return rows.map(({ providerResponse, ...batch }) => {
+    const references = Array.isArray(providerResponse?._emsTransactionMap) ? providerResponse._emsTransactionMap : [];
+    const failures = Array.isArray(providerResponse?.recipientFailures) ? providerResponse.recipientFailures : [];
+    const rawError = providerResponse?.error;
+    const failureMessage = typeof rawError === "string" ? rawError : rawError?.message || null;
+    return { ...batch, recipientFailures: failures, failureMessage, canVerify: references.length > 0 };
+  });
 }
 
 export async function processCompanyPaystackWebhook(rawBody, signature, payload) {

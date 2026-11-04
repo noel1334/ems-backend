@@ -16,7 +16,11 @@ export async function companyPaystackRequest(connection, method, path, { data, p
       headers: { Authorization: `Bearer ${secretKey}`, "Content-Type": "application/json" },
     });
     if (response.data?.status !== true) {
-      throw new AppError(response.data?.message || "Paystack rejected the request.", 422, { code: "PAYSTACK_COMPANY_REQUEST_FAILED", provider: "PAYSTACK" });
+      const providerMessage = response.data?.message || "Paystack rejected the request.";
+      throw new AppError(providerMessage, 422, {
+        code: response.data?.code || "PAYSTACK_COMPANY_REQUEST_FAILED",
+        details: { provider: "PAYSTACK", endpoint: path, providerStatus: response.status, providerMessage },
+      });
     }
     return response.data;
   } catch (error) {
@@ -26,9 +30,7 @@ export async function companyPaystackRequest(connection, method, path, { data, p
     const details = error?.response?.data;
     throw new AppError(message, status >= 400 && status < 500 ? status : 502, {
       code: details?.code || (status === 401 ? "PAYSTACK_COMPANY_AUTH_FAILED" : "PAYSTACK_COMPANY_UPSTREAM_ERROR"),
-      provider: "PAYSTACK",
-      providerStatus: status,
-      providerMessage: message,
+      details: { provider: "PAYSTACK", endpoint: path, providerStatus: status, providerMessage: message },
     });
   }
 }
