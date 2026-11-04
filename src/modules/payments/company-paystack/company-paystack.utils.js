@@ -1,15 +1,30 @@
-const FALSE_VALUES = new Set(["false", "0", "no", "off"]);
+const TRUE_VALUES = new Set(["true", "1", "yes", "on"]);
 
 /**
- * Resolve every Nigerian bank account before a transfer recipient is created.
- * Live mode always requires provider validation. In test mode it is enabled by
- * default; an explicit false setting is retained as a diagnostic-only escape
- * hatch for providers that temporarily make the resolver unavailable.
+ * Live payroll must always resolve beneficiaries before submission. Paystack's
+ * TEST environment has a small daily allowance for resolving real bank
+ * accounts, so sandbox previews skip /bank/resolve by default and rely on
+ * recipient creation as the provider-side preflight before any test transfer.
+ * Operators may opt in to consume a sandbox lookup with the env flag.
  */
 export function shouldResolvePaystackAccounts(environment, env = process.env) {
   if (String(environment).toLowerCase() === "live") return true;
-  const configured = String(env.PAYSTACK_COMPANY_VALIDATE_BANK_ACCOUNTS_IN_SANDBOX ?? "true").trim().toLowerCase();
-  return !FALSE_VALUES.has(configured);
+  const configured = String(env.PAYSTACK_COMPANY_VALIDATE_BANK_ACCOUNTS_IN_SANDBOX ?? "false").trim().toLowerCase();
+  return TRUE_VALUES.has(configured);
+}
+
+/** Detect Paystack's observed TEST-mode daily cap for real bank lookups. */
+export function isPaystackSandboxResolveLimitError(message) {
+  const raw = String(message || "");
+  return /test\s+mode.*daily\s+limit.*(?:\d+|three).*live\s+bank\s+resolves?\s+exceeded/i.test(raw)
+    || /daily\s+limit.*live\s+bank\s+resolves?\s+exceeded/i.test(raw);
+}
+
+/** Sandbox can proceed after local checks; recipient creation is preflighted before transfers. */
+export function canSubmitPaystackPreview({ environment, invalidCount, insufficientBalance, providerValidationComplete }) {
+  if (Number(invalidCount || 0) > 0 || Boolean(insufficientBalance)) return false;
+  if (String(environment).toLowerCase() === "test") return true;
+  return Boolean(providerValidationComplete);
 }
 
 /** Translate Paystack's common account-resolution failure into a safe action. */

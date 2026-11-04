@@ -4,7 +4,7 @@ import prisma from "../../../config/database.js";
 import AppError from "../../../common/errors/AppError.js";
 import { encryptCompanyPaystackSecret, decryptCompanyPaystackSecret } from "./company-paystack.crypto.js";
 import { companyPaystackEndpoints } from "./company-paystack.client.js";
-import { explainPaystackAccountError, recipientFailureSummary, shouldResolvePaystackAccounts } from "./company-paystack.utils.js";
+import { canSubmitPaystackPreview, explainPaystackAccountError, isPaystackSandboxResolveLimitError, recipientFailureSummary, shouldResolvePaystackAccounts } from "./company-paystack.utils.js";
 import { estimatePaystackTransferFee } from "../../payroll/payroll.payout.config.js";
 
 const asText = (value) => String(value ?? "").trim();
@@ -122,6 +122,7 @@ async function preparePreview(companyId, periodId) {
     try { toKobo(row.amount); } catch (error) { errors.push(error.message); }
     if (selected.account && !supported.has(selected.bankCode)) errors.push(`Bank code ${selected.bankCode} is not in this company's Paystack NGN bank directory. Update the employee's Paystack bank selection.`);
     let resolved = null;
+    let sandboxResolutionDeferred = false;
     if (selected.account && !errors.length && shouldResolve) {
       try {
         const result = await companyPaystackEndpoints.resolveAccount(connection, selected.account.accountNumber, selected.bankCode);
@@ -130,12 +131,22 @@ async function preparePreview(companyId, periodId) {
           errors.push("Paystack returned a different account number than the one saved for this employee. Re-check the employee's account details before continuing.");
         }
         if (!namesCompatible(selected.account.accountName, resolved?.account_name)) errors.push(`The bank account resolves to "${resolved?.account_name || "unknown name"}", which does not sufficiently match the employee's saved account name.`);
-      } catch (error) { errors.push(explainPaystackAccountError(error.message, selected.bankCode)); }
+      } catch (error) {
+        if (connection.environment === "test" && isPaystackSandboxResolveLimitError(error.message)) {
+          // A TEST-mode lookup quota is not evidence that an employee's bank
+          // details are wrong. Defer provider acceptance to recipient creation.
+          // All recipients are prepared before the first test transfer request.
+          sandboxResolutionDeferred = true;
+        } else {
+          errors.push(explainPaystackAccountError(error.message, selected.bankCode));
+        }
+      }
     }
     let estimatedFee = 0;
     try { estimatedFee = estimatePaystackTransferFee(Number(row.amount)); }
     catch (error) { errors.push(error.message || "Paystack transfer fee could not be estimated."); }
-    return { disbursementId: row.id, employee: employeeName(row.employee), employeeId: row.employeeId, bankName: selected.account?.bankName || null, accountName: selected.account?.accountName || null, resolvedAccountName: resolved?.account_name || null, accountNumberLast4: selected.account?.accountNumber ? String(selected.account.accountNumber).slice(-4) : null, amount: new Decimal(row.amount).toFixed(2), estimatedFee: new Decimal(estimatedFee).toFixed(2), valid: errors.length === 0, validationStatus: errors.length ? "BLOCKED" : shouldResolve ? "PROVIDER_VERIFIED" : "LOCAL_ONLY", errors, _bankAccountId: selected.account?.id || null, _bankCode: selected.bankCode || null, _accountNumber: selected.account?.accountNumber || null, _accountName: selected.account?.accountName || null, _email: row.employee?.email || null };
+    const sandboxPreflight = connection.environment === "test" && (!shouldResolve || sandboxResolutionDeferred);
+    return { disbursementId: row.id, employee: employeeName(row.employee), employeeId: row.employeeId, bankName: selected.account?.bankName || null, accountName: selected.account?.accountName || null, resolvedAccountName: resolved?.account_name || null, accountNumberLast4: selected.account?.accountNumber ? String(selected.account.accountNumber).slice(-4) : null, amount: new Decimal(row.amount).toFixed(2), estimatedFee: new Decimal(estimatedFee).toFixed(2), valid: errors.length === 0, validationStatus: errors.length ? "BLOCKED" : sandboxPreflight ? "SANDBOX_RECIPIENT_PREFLIGHT" : shouldResolve ? "PROVIDER_VERIFIED" : "LOCAL_ONLY", warnings: sandboxResolutionDeferred ? ["Paystack's TEST-mode daily live bank-lookup limit was reached. EMS will check this beneficiary during test recipient creation before sending any test transfer."] : [], errors, _bankAccountId: selected.account?.id || null, _bankCode: selected.bankCode || null, _accountNumber: selected.account?.accountNumber || null, _accountName: selected.account?.accountName || null, _email: row.employee?.email || null };
   });
   if (!rows.length) throw new AppError("There are no pending disbursements in this payroll register. Refresh existing Paystack batches instead of submitting again.", 409, { code: "PAYSTACK_NO_PENDING_DISBURSEMENTS" });
   const digest = secretDigest(decryptCompanyPaystackSecret(connection.secretKeyCiphertext));
@@ -144,7 +155,9 @@ async function preparePreview(companyId, periodId) {
   const validCount = employees.filter((item) => item.valid).length;
   const totalAmount = employees.reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
   const estimatedFees = employees.reduce((sum, item) => sum.plus(item.estimatedFee), new Decimal(0));
-  return { connection, period, employees, fingerprint, totalAmount: totalAmount.toFixed(2), estimatedFees: estimatedFees.toFixed(2), estimatedRequiredBalance: totalAmount.plus(estimatedFees).toFixed(2), validCount, invalidCount: employees.length - validCount, accountValidationMode: shouldResolve ? "PAYSTACK_RESOLVED" : "LOCAL_FORMAT_ONLY", providerValidationComplete: shouldResolve, balance: null };
+  const providerValidationComplete = employees.every((item) => item.validationStatus === "PROVIDER_VERIFIED");
+  const accountValidationMode = providerValidationComplete ? "PAYSTACK_RESOLVED" : connection.environment === "test" ? "SANDBOX_RECIPIENT_PREFLIGHT" : "LOCAL_FORMAT_ONLY";
+  return { connection, period, employees, fingerprint, totalAmount: totalAmount.toFixed(2), estimatedFees: estimatedFees.toFixed(2), estimatedRequiredBalance: totalAmount.plus(estimatedFees).toFixed(2), validCount, invalidCount: employees.length - validCount, accountValidationMode, providerValidationComplete, balance: null };
 }
 
 export async function previewPayroll(companyId, periodId) {
@@ -154,7 +167,12 @@ export async function previewPayroll(companyId, periodId) {
   catch (error) { balanceError = error.message; }
   if (balanceError) throw new AppError(`Could not confirm the company's Paystack balance: ${balanceError}`, 502, { code: "PAYSTACK_BALANCE_CHECK_FAILED" });
   const insufficientBalance = preview.connection.environment === "live" && balance.balance < Number(preview.estimatedRequiredBalance);
-  return { payrollPeriodId: periodId, environment: preview.connection.environment, balance: balance.balance, balanceKobo: balance.balanceKobo, totalAmount: preview.totalAmount, estimatedFees: preview.estimatedFees, estimatedRequiredBalance: preview.estimatedRequiredBalance, totalTransactions: preview.employees.length, validCount: preview.validCount, invalidCount: preview.invalidCount, accountValidationMode: preview.accountValidationMode, providerValidationComplete: preview.providerValidationComplete, insufficientBalance, canSubmit: preview.invalidCount === 0 && !insufficientBalance && preview.providerValidationComplete, previewFingerprint: preview.fingerprint, employees: preview.employees.map(({ _bankAccountId, _bankCode, _accountNumber, _accountName, _email, ...publicItem }) => publicItem), notes: [preview.connection.environment === "test" ? "Sandbox/test mode does not move real money. EMS resolves each account with Paystack before allowing recipient creation; use a Paystack-supported test beneficiary and the matching Paystack bank code." : "Live transfers use this company's Paystack NGN balance, not its ordinary bank account or the EMS internal wallet.", preview.providerValidationComplete ? "Every listed employee bank account was resolved by this company's Paystack integration during this preview." : "WARNING: Paystack account resolution is disabled for this sandbox connection. EMS performed format checks only and has disabled submission until provider validation is enabled.", "Bulk transfer requires Transfers OTP to be disabled in this company's Paystack Dashboard. A single transfer may require OTP authorization.", "Bulk payroll is split into groups of at most 100 and Paystack requests are spaced by at least five seconds.", "The fee total is an estimate using the published Nigerian transfer pricing and the backend fee settings. Paystack checks the actual transfer amount plus fee before accepting each request.", "If this company has configured a Paystack Transfer Approval URL, that separate approval callback is not implemented in this version; configure and test it before using that integration."] };
+  const canSubmit = canSubmitPaystackPreview({ environment: preview.connection.environment, invalidCount: preview.invalidCount, insufficientBalance, providerValidationComplete: preview.providerValidationComplete });
+  const sandboxMode = preview.connection.environment === "test";
+  const hasDeferredResolve = preview.employees.some((item) => item.validationStatus === "SANDBOX_RECIPIENT_PREFLIGHT" && item.warnings?.length);
+  const sandboxNote = "TEST mode: EMS skips Paystack /bank/resolve lookups by default because the TEST account has a small daily allowance for real-bank lookups. The preview performs local checks only; when you submit, EMS creates every test transfer recipient first and sends no test transfers if any recipient fails. Paystack TEST transfers are simulated and do not send salary money to employees. This is not live account-name verification.";
+  const notes = [sandboxMode ? sandboxNote : "Live transfers use this company's Paystack NGN balance, not its ordinary bank account or the EMS internal wallet.", preview.providerValidationComplete ? "Every listed employee bank account was resolved by this company's Paystack integration during this preview." : sandboxMode ? (hasDeferredResolve ? "The Paystack TEST lookup quota was reached for some employees; recipient creation will be used as the sandbox preflight." : "Paystack bank-name resolution was intentionally skipped in TEST mode. Test recipient creation is checked before any simulated transfer is sent.") : "WARNING: provider account resolution is incomplete; live submission is disabled.", "Do not replace a real employee's saved Paystack bank code with a test-only lookup code. Keep each employee's actual Paystack bank selection unchanged.", "Bulk transfer requires Transfers OTP to be disabled in this company's Paystack Dashboard. A single transfer may require OTP authorization.", "Bulk payroll is split into groups of at most 100 and Paystack requests are spaced by at least five seconds.", "The fee total is an estimate using the published Nigerian transfer pricing and the backend fee settings. Paystack checks the actual transfer amount plus fee before accepting each request.", "If this company has configured a Paystack Transfer Approval URL, that separate approval callback is not implemented in this version; configure and test it before using that integration."];
+  return { payrollPeriodId: periodId, environment: preview.connection.environment, balance: balance.balance, balanceKobo: balance.balanceKobo, totalAmount: preview.totalAmount, estimatedFees: preview.estimatedFees, estimatedRequiredBalance: preview.estimatedRequiredBalance, totalTransactions: preview.employees.length, validCount: preview.validCount, invalidCount: preview.invalidCount, accountValidationMode: preview.accountValidationMode, providerValidationComplete: preview.providerValidationComplete, insufficientBalance, canSubmit, previewFingerprint: preview.fingerprint, employees: preview.employees.map(({ _bankAccountId, _bankCode, _accountNumber, _accountName, _email, ...publicItem }) => publicItem), notes };
 }
 
 async function getOrCreateRecipient(companyId, connection, row) {
