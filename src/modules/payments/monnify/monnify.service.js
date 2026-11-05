@@ -4,6 +4,13 @@ import AppError from "../../../common/errors/AppError.js";
 import { encryptMonnifySecret, decryptMonnifySecret } from "./monnify.crypto.js";
 import { monnifyEndpoints } from "./monnify.client.js";
 import { canonicalMonnifyBankName, normalizeMonnifyBanks } from "./monnify.utils.js";
+import {
+  monnifyTransactionFailureReason,
+  monnifyTransactionReference,
+  monnifyTransactionStatus,
+  normalizeMonnifyTransactionMap,
+  unwrapMonnifyTransactionRows,
+} from "./monnify.reconciliation.utils.js";
 
 const OPEN_BATCH_STATUSES = [
   "SUBMITTING",
@@ -654,93 +661,192 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   }
 }
 
-const unwrapMonnifyRows = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  for (const key of ["content", "transactions", "items", "data", "responseBody", "records"]) {
-    if (Array.isArray(payload?.[key])) return payload[key];
-    const nested = payload?.[key];
-    if (nested && typeof nested === "object") {
-      for (const nestedKey of ["content", "transactions", "items", "records"]) if (Array.isArray(nested[nestedKey])) return nested[nestedKey];
-    }
-  }
-  return [];
-};
-
-const transactionReferenceOf = (row) => String(row?.reference ?? row?.transactionReference ?? row?.transactionRef ?? row?.transactionReferenceNo ?? row?.paymentReference ?? "").trim();
-const transactionStatusOf = (row) => String(row?.status ?? row?.transactionStatus ?? row?.paymentStatus ?? "").trim().toUpperCase();
-const finalPaidStatuses = new Set(["SUCCESS", "COMPLETED"]);
-const finalFailedStatuses = new Set(["FAILED", "EXPIRED", "REVERSED"]);
-
 export async function refreshPayrollBatch(companyId, batchId) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
   if (!batch) throw new AppError("Monnify payroll batch not found.", 404);
+  if (!batch.payrollPeriodId) throw new AppError("This Monnify batch is not linked to a payroll period and cannot update employee payroll records.", 409);
+
   const connection = await requiredConnection(companyId);
   assertBatchEnvironment(connection, batch);
-  const [summary, transactionPayload] = await Promise.all([
-    monnifyEndpoints.batchStatus(connection, batch.batchReference),
-    monnifyEndpoints.batchTransactions(connection, batch.batchReference),
-  ]);
-  const transactionRows = unwrapMonnifyRows(transactionPayload);
-  const storedMap = batch.providerResponse?._emsTransactionMap || batch.providerResponse?.providerResponse?._emsTransactionMap || {};
-  const summaryStatus = String(summary.batchStatus || summary.status || batch.providerStatus).toUpperCase();
-  const updates = [];
-  if (!transactionRows.length && ["FAILED", "FAILED_ON_ACCOUNTS_VALIDATION"].includes(summaryStatus)) {
-    for (const disbursementId of Object.values(storedMap)) {
-      if (typeof disbursementId !== "string") continue;
-      updates.push({ disbursementId, data: { status: "FAILED", providerStatus: summaryStatus, failureReason: String(summary.responseMessage || `Monnify batch failed: ${summaryStatus}`).slice(0, 500), paidAt: null } });
-    }
+
+  // A failure in one read endpoint should not prevent us from reconciling the
+  // individual transfers returned by the other endpoint. Never infer individual
+  // employee outcomes from aggregate batch counts alone.
+  let summary = null;
+  let summaryError = null;
+  try {
+    summary = await monnifyEndpoints.batchStatus(connection, batch.batchReference);
+  } catch (error) {
+    summaryError = error;
   }
+
+  let transactionPayload = null;
+  let transactionError = null;
+  try {
+    transactionPayload = await monnifyEndpoints.batchTransactions(connection, batch.batchReference);
+  } catch (error) {
+    transactionError = error;
+  }
+
+  if (!summary && !transactionPayload) {
+    const sourceError = transactionError || summaryError;
+    throw new AppError(
+      `EMS could not retrieve Monnify's batch or individual transaction statuses. ${sourceError?.message || "Check the Monnify connection and try again."}`,
+      sourceError?.status || 502,
+      {
+        code: "MONNIFY_RECONCILIATION_READ_FAILED",
+        details: {
+          batchReference: batch.batchReference,
+          summaryError: summaryError?.message || null,
+          transactionError: transactionError?.message || null,
+          providerCode: sourceError?.details?.providerCode || sourceError?.code || null,
+        },
+      },
+    );
+  }
+
+  const transactionRows = unwrapMonnifyTransactionRows(transactionPayload);
+  const storedMap = normalizeMonnifyTransactionMap(batch.providerResponse);
+  const references = [...new Set(transactionRows.map(monnifyTransactionReference).filter(Boolean))];
+
+  // Keep a database-reference fallback. This covers older batch records where
+  // providerResponse was wrapped differently or the original in-memory map was
+  // not retained, while still requiring the same company, period and batch.
+  const fallbackRecords = references.length
+    ? await prisma.payrollDisbursement.findMany({
+        where: {
+          companyId,
+          periodId: batch.payrollPeriodId,
+          provider: "MONNIFY",
+          providerTransferId: batch.batchReference,
+          externalReference: { in: references },
+        },
+        select: { id: true, externalReference: true },
+      })
+    : [];
+  const fallbackMap = Object.fromEntries(fallbackRecords.map((row) => [row.externalReference, row.id]));
+
+  const summaryStatus = String(summary?.batchStatus || summary?.status || batch.providerStatus).toUpperCase();
+  const updates = [];
+  const unmatchedReferences = [];
+
   for (const transaction of transactionRows) {
-    const reference = transactionReferenceOf(transaction);
-    const disbursementId = storedMap[reference];
-    const status = transactionStatusOf(transaction);
-    if (!disbursementId || !status) continue;
+    const reference = monnifyTransactionReference(transaction);
+    const disbursementId = (reference && storedMap[reference]) || (reference && fallbackMap[reference]);
+    const status = monnifyTransactionStatus(transaction);
+    if (!reference || !disbursementId || !status) {
+      unmatchedReferences.push(reference || "<missing-reference>");
+      continue;
+    }
+
     const data = {
       providerStatus: status,
       providerResponse: transaction,
-      failureReason: finalFailedStatuses.has(status) ? String(transaction?.responseMessage || transaction?.narration || `Monnify transfer status: ${status}`).slice(0, 500) : null,
+      failureReason: monnifyTransactionFailureReason(transaction, status),
     };
-    if (finalPaidStatuses.has(status)) {
+
+    if (["SUCCESS", "COMPLETED"].includes(status)) {
       data.status = "PAID";
       data.paidAt = new Date();
       data.verifiedAt = new Date();
-    } else if (finalFailedStatuses.has(status)) {
+    } else if (["FAILED", "EXPIRED", "REVERSED"].includes(status)) {
+      // A reversal is not a successful salary payment. Keep the exact provider
+      // result in providerStatus and show it as failed in the payroll register.
       data.status = "FAILED";
       data.paidAt = null;
+      data.verifiedAt = new Date();
     } else {
       data.status = "PROCESSING";
+      data.paidAt = null;
+      data.verifiedAt = null;
     }
-    updates.push({ disbursementId, data });
+
+    updates.push({ reference, disbursementId, data });
   }
 
+  let updatedDisbursementCount = 0;
+  let finalCounts = { paid: 0, failed: 0, processing: 0, pending: 0 };
   await prisma.$transaction(async (tx) => {
     for (const update of updates) {
-      await tx.payrollDisbursement.updateMany({ where: { id: update.disbursementId, companyId, provider: "MONNIFY" }, data: update.data });
+      const result = await tx.payrollDisbursement.updateMany({
+        where: {
+          id: update.disbursementId,
+          companyId,
+          periodId: batch.payrollPeriodId,
+          provider: "MONNIFY",
+          providerTransferId: batch.batchReference,
+        },
+        data: update.data,
+      });
+      updatedDisbursementCount += result.count;
+      if (!result.count) unmatchedReferences.push(update.reference);
     }
+
     await tx.companyMonnifyBatch.update({
       where: { id: batch.id },
       data: {
-        providerStatus: summaryStatus,
-        providerResponse: { summary, transactions: transactionPayload, _emsTransactionMap: storedMap },
+        providerStatus: transactionRows.length ? summaryStatus : batch.providerStatus,
+        providerResponse: {
+          ...(summary ? { summary } : {}),
+          ...(transactionPayload ? { transactions: transactionPayload } : {}),
+          _emsTransactionMap: storedMap,
+          ...(summaryError ? { _summaryReadError: summaryError.message } : {}),
+          ...(transactionError ? { _transactionReadError: transactionError.message } : {}),
+        },
         lastCheckedAt: new Date(),
       },
     });
-    const all = await tx.payrollDisbursement.findMany({ where: { companyId, periodId: batch.payrollPeriodId }, select: { status: true } });
+
+    const all = await tx.payrollDisbursement.findMany({
+      where: { companyId, periodId: batch.payrollPeriodId },
+      select: { status: true },
+    });
+    const batchRows = await tx.payrollDisbursement.findMany({
+      where: { companyId, periodId: batch.payrollPeriodId, provider: "MONNIFY", providerTransferId: batch.batchReference },
+      select: { status: true },
+    });
+    finalCounts = {
+      paid: batchRows.filter((row) => row.status === "PAID").length,
+      failed: batchRows.filter((row) => row.status === "FAILED").length,
+      processing: batchRows.filter((row) => ["PROCESSING", "SUBMITTED", "INITIATED", "UNKNOWN", "REQUIRES_VERIFICATION", "REQUIRES_REVIEW"].includes(row.status)).length,
+      pending: batchRows.filter((row) => row.status === "PENDING").length,
+    };
+
     if (all.length && all.every((row) => row.status === "PAID")) {
       await tx.payrollPeriod.updateMany({ where: { id: batch.payrollPeriodId, companyId }, data: { status: "PAID" } });
       await tx.payrollItem.updateMany({ where: { companyId, periodId: batch.payrollPeriodId }, data: { status: "PAID" } });
+    } else {
+      // A previously paid period must return to FINALIZED if a later provider
+      // reconciliation reports a failed or reversed transfer.
+      const currentPeriod = await tx.payrollPeriod.findFirst({
+        where: { id: batch.payrollPeriodId, companyId },
+        select: { status: true },
+      });
+      if (currentPeriod?.status === "PAID") {
+        await tx.payrollPeriod.updateMany({ where: { id: batch.payrollPeriodId, companyId }, data: { status: "FINALIZED" } });
+        await tx.payrollItem.updateMany({ where: { companyId, periodId: batch.payrollPeriodId, status: "PAID" }, data: { status: "FINALIZED" } });
+      }
     }
   });
+
+  const warningParts = [];
+  if (summaryError) warningParts.push(`Batch summary unavailable: ${summaryError.message}`);
+  if (transactionError) warningParts.push(`Individual transaction list unavailable: ${transactionError.message}`);
+  if (unmatchedReferences.length) warningParts.push(`${unmatchedReferences.length} provider transaction(s) could not be matched to an EMS payroll record`);
+  if (!transactionRows.length && summary) warningParts.push("Monnify returned the batch summary but no individual transaction rows; employee statuses were not inferred from aggregate counts");
 
   return {
     batchReference: batch.batchReference,
     environment: batch.environment,
+    providerStatus: transactionRows.length ? summaryStatus : batch.providerStatus,
     summary,
-    transactions: transactionPayload,
-    reconciledTransactions: updates.length,
+    reconciledTransactions: updatedDisbursementCount,
+    totalProviderTransactions: transactionRows.length,
+    unmatchedTransactions: [...new Set(unmatchedReferences)],
+    counts: finalCounts,
+    warning: warningParts.length ? warningParts.join(". ") : null,
   };
 }
-
 
 export async function authorizeBatch(companyId, batchId, otp) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
