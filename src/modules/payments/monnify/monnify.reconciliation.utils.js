@@ -91,6 +91,7 @@ export function monnifyTransactionFailureReason(row, status) {
     row?.message,
     row?.statusMessage,
     row?.responseDescription,
+    row?.transactionDescription,
     row?.description,
     row?.transaction?.responseMessage,
     row?.transaction?.comment,
@@ -126,4 +127,10 @@ export function normalizeMonnifyTransactionMap(providerResponse) {
   return Object.fromEntries(Object.entries(source)
     .map(([reference, disbursementId]) => [cleanText(reference), cleanText(disbursementId)])
     .filter(([reference, disbursementId]) => reference && disbursementId));
+}
+
+export function isMonnifyBatchFullyReconciled(batch, disbursements = []) {
+  const expected = Number(batch?.totalTransactions || 0);
+  if (!Number.isInteger(expected) || expected <= 0 || disbursements.length !== expected) return false;
+  return disbursements.every((row) => ["PAID", "FAILED"].includes(String(row?.status || "").toUpperCase()));
 }

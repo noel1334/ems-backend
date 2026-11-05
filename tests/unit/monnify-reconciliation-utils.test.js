@@ -5,6 +5,7 @@ import {
   monnifyTransactionStatus,
   normalizeMonnifyTransactionMap,
   unwrapMonnifyTransactionRows,
+  isMonnifyBatchFullyReconciled,
 } from "../../src/modules/payments/monnify/monnify.reconciliation.utils.js";
 
 describe("Monnify payroll reconciliation response mapping", () => {
@@ -38,6 +39,28 @@ describe("Monnify payroll reconciliation response mapping", () => {
     expect(statuses.filter((status) => status === "SUCCESS")).toHaveLength(2);
     expect(statuses.filter((status) => status === "FAILED")).toHaveLength(3);
     expect(rows.filter((row) => monnifyTransactionFailureReason(row, row.status) === "Invalid Bank Code")).toHaveLength(3);
+  });
+
+  it("clears an aggregate open-batch lock only after every submitted beneficiary has a terminal result", () => {
+    const batch = { totalTransactions: 5 };
+    expect(isMonnifyBatchFullyReconciled(batch, [
+      { status: "PAID" },
+      { status: "PAID" },
+      { status: "FAILED" },
+      { status: "FAILED" },
+      { status: "FAILED" },
+    ])).toBe(true);
+    expect(isMonnifyBatchFullyReconciled(batch, [
+      { status: "PAID" },
+      { status: "PAID" },
+      { status: "FAILED" },
+      { status: "FAILED" },
+      { status: "PROCESSING" },
+    ])).toBe(false);
+    expect(isMonnifyBatchFullyReconciled(batch, [
+      { status: "PAID" },
+      { status: "FAILED" },
+    ])).toBe(false);
   });
 
   it("supports both current object maps and older reference-map arrays", () => {

@@ -10,6 +10,7 @@ import {
   monnifyTransactionStatus,
   normalizeMonnifyTransactionMap,
   unwrapMonnifyTransactionRows,
+  isMonnifyBatchFullyReconciled,
 } from "./monnify.reconciliation.utils.js";
 
 const OPEN_BATCH_STATUSES = [
@@ -73,10 +74,32 @@ const requiredConnection = async (companyId) => {
   return row;
 };
 
-const findOpenBatch = (companyId) => prisma.companyMonnifyBatch.findFirst({
-  where: { companyId, providerStatus: { in: OPEN_BATCH_STATUSES } },
-  select: { id: true, batchReference: true, providerStatus: true, environment: true },
-});
+const findOpenBatch = async (companyId, db = prisma) => {
+  const candidates = await db.companyMonnifyBatch.findMany({
+    where: { companyId, providerStatus: { in: OPEN_BATCH_STATUSES } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, payrollPeriodId: true, batchReference: true, providerStatus: true, environment: true, totalTransactions: true },
+  });
+
+  for (const batch of candidates) {
+    const disbursements = batch.payrollPeriodId
+      ? await db.payrollDisbursement.findMany({
+          where: { companyId, periodId: batch.payrollPeriodId, provider: "MONNIFY", providerTransferId: batch.batchReference },
+          select: { status: true },
+        })
+      : [];
+
+    // Some Monnify accounts leave the aggregate batch at AWAITING_PROCESSING
+    // after every beneficiary already has a final result. Trust only a complete
+    // one-to-one set of per-employee terminal outcomes, never aggregate counts.
+    if (isMonnifyBatchFullyReconciled(batch, disbursements)) {
+      await db.companyMonnifyBatch.update({ where: { id: batch.id }, data: { providerStatus: "COMPLETED" } });
+      continue;
+    }
+    return batch;
+  }
+  return null;
+};
 
 const assertBatchEnvironment = (connection, batch) => {
   if (String(connection.environment).toLowerCase() !== String(batch.environment || "sandbox").toLowerCase()) {
@@ -229,10 +252,7 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
   if (!period) throw new AppError("Payroll period not found for this company.", 404);
   if (period.status !== "FINALIZED") throw new AppError("Only finalized payroll can be submitted to Monnify.", 409);
 
-  const duplicateActiveBatch = await prisma.companyMonnifyBatch.findFirst({
-    where: { companyId, payrollPeriodId, providerStatus: { in: OPEN_BATCH_STATUSES } },
-    select: { id: true, batchReference: true, providerStatus: true },
-  });
+  const duplicateActiveBatch = await findOpenBatch(companyId);
   if (duplicateActiveBatch) {
     throw new AppError(`This payroll period already has a Monnify batch (${duplicateActiveBatch.batchReference}) with status ${duplicateActiveBatch.providerStatus}. Refresh and reconcile it; do not submit a duplicate batch.`, 409, { code: "MONNIFY_DUPLICATE_PAYROLL_BATCH" });
   }
@@ -582,10 +602,7 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   // Serialize the company-wallet lock check and batch creation to prevent two admins
   // from submitting overlapping batches against the same Monnify wallet concurrently.
   const savedBatch = await prisma.$transaction(async (tx) => {
-    const openBatch = await tx.companyMonnifyBatch.findFirst({
-      where: { companyId, providerStatus: { in: OPEN_BATCH_STATUSES } },
-      select: { batchReference: true, providerStatus: true },
-    });
+    const openBatch = await findOpenBatch(companyId, tx);
     if (openBatch) throw new AppError(`This company's Monnify wallet already has an open batch (${openBatch.batchReference}, ${openBatch.providerStatus}). Reconcile it before submitting another payroll batch.`, 409, { code: "MONNIFY_DUPLICATE_PAYROLL_BATCH" });
     return tx.companyMonnifyBatch.create({
       data: {
@@ -732,7 +749,9 @@ export async function refreshPayrollBatch(companyId, batchId) {
 
   for (const transaction of transactionRows) {
     const reference = monnifyTransactionReference(transaction);
-    const disbursementId = (reference && storedMap[reference]) || (reference && fallbackMap[reference]);
+    // Prefer a live database match scoped to this company, payroll period and
+    // batch. The persisted JSON map is only a fallback for older or migrated data.
+    const disbursementId = (reference && fallbackMap[reference]) || (reference && storedMap[reference]);
     const status = monnifyTransactionStatus(transaction);
     if (!reference || !disbursementId || !status) {
       unmatchedReferences.push(reference || "<missing-reference>");
@@ -765,7 +784,9 @@ export async function refreshPayrollBatch(companyId, batchId) {
   }
 
   let updatedDisbursementCount = 0;
-  let finalCounts = { paid: 0, failed: 0, processing: 0, pending: 0 };
+  let finalCounts = { paid: 0, failed: 0, processing: 0, pending: 0, total: 0 };
+  let fullyReconciled = false;
+  let effectiveBatchStatus = batch.providerStatus;
   await prisma.$transaction(async (tx) => {
     for (const update of updates) {
       const result = await tx.payrollDisbursement.updateMany({
@@ -782,21 +803,6 @@ export async function refreshPayrollBatch(companyId, batchId) {
       if (!result.count) unmatchedReferences.push(update.reference);
     }
 
-    await tx.companyMonnifyBatch.update({
-      where: { id: batch.id },
-      data: {
-        providerStatus: transactionRows.length ? summaryStatus : batch.providerStatus,
-        providerResponse: {
-          ...(summary ? { summary } : {}),
-          ...(transactionPayload ? { transactions: transactionPayload } : {}),
-          _emsTransactionMap: storedMap,
-          ...(summaryError ? { _summaryReadError: summaryError.message } : {}),
-          ...(transactionError ? { _transactionReadError: transactionError.message } : {}),
-        },
-        lastCheckedAt: new Date(),
-      },
-    });
-
     const all = await tx.payrollDisbursement.findMany({
       where: { companyId, periodId: batch.payrollPeriodId },
       select: { status: true },
@@ -810,7 +816,32 @@ export async function refreshPayrollBatch(companyId, batchId) {
       failed: batchRows.filter((row) => row.status === "FAILED").length,
       processing: batchRows.filter((row) => ["PROCESSING", "SUBMITTED", "INITIATED", "UNKNOWN", "REQUIRES_VERIFICATION", "REQUIRES_REVIEW"].includes(row.status)).length,
       pending: batchRows.filter((row) => row.status === "PENDING").length,
+      total: batchRows.length,
     };
+    fullyReconciled = isMonnifyBatchFullyReconciled(batch, batchRows);
+    effectiveBatchStatus = fullyReconciled ? "COMPLETED" : (transactionRows.length ? summaryStatus : batch.providerStatus);
+
+    await tx.companyMonnifyBatch.update({
+      where: { id: batch.id },
+      data: {
+        providerStatus: effectiveBatchStatus,
+        providerResponse: {
+          ...(summary ? { summary } : {}),
+          ...(transactionPayload ? { transactions: transactionPayload } : {}),
+          _emsTransactionMap: storedMap,
+          ...(summaryError ? { _summaryReadError: summaryError.message } : {}),
+          ...(transactionError ? { _transactionReadError: transactionError.message } : {}),
+          _emsReconciliation: {
+            expectedTransactions: Number(batch.totalTransactions || 0),
+            matchedTransactions: batchRows.length,
+            paid: finalCounts.paid,
+            failed: finalCounts.failed,
+            fullyReconciled,
+          },
+        },
+        lastCheckedAt: new Date(),
+      },
+    });
 
     if (all.length && all.every((row) => row.status === "PAID")) {
       await tx.payrollPeriod.updateMany({ where: { id: batch.payrollPeriodId, companyId }, data: { status: "PAID" } });
@@ -838,12 +869,13 @@ export async function refreshPayrollBatch(companyId, batchId) {
   return {
     batchReference: batch.batchReference,
     environment: batch.environment,
-    providerStatus: transactionRows.length ? summaryStatus : batch.providerStatus,
+    providerStatus: effectiveBatchStatus,
     summary,
     reconciledTransactions: updatedDisbursementCount,
     totalProviderTransactions: transactionRows.length,
     unmatchedTransactions: [...new Set(unmatchedReferences)],
     counts: finalCounts,
+    fullyReconciled,
     warning: warningParts.length ? warningParts.join(". ") : null,
   };
 }
@@ -911,7 +943,7 @@ export async function refreshBatch(companyId, batchId) {
 }
 
 export async function listBatches(companyId) {
-  return prisma.companyMonnifyBatch.findMany({
+  const batches = await prisma.companyMonnifyBatch.findMany({
     where: { companyId },
     orderBy: { createdAt: "desc" },
     take: 50,
@@ -927,5 +959,39 @@ export async function listBatches(companyId) {
       lastCheckedAt: true,
       createdAt: true,
     },
+  });
+  if (!batches.length) return [];
+
+  // Attach real per-transfer counts to each batch. The batch-level provider
+  // status alone cannot tell finance which employees were paid or failed.
+  const references = batches.map((batch) => batch.batchReference);
+  const rows = await prisma.payrollDisbursement.findMany({
+    where: { companyId, provider: "MONNIFY", providerTransferId: { in: references } },
+    select: { providerTransferId: true, status: true },
+  });
+  const countsByBatch = new Map();
+  for (const row of rows) {
+    if (!row.providerTransferId) continue;
+    const counts = countsByBatch.get(row.providerTransferId) || { paid: 0, failed: 0, processing: 0, pending: 0, total: 0 };
+    counts.total += 1;
+    if (row.status === "PAID") counts.paid += 1;
+    else if (["FAILED", "REVERSED"].includes(row.status)) counts.failed += 1;
+    else if (["PROCESSING", "SUBMITTED", "INITIATED", "UNKNOWN", "REQUIRES_VERIFICATION", "REQUIRES_REVIEW"].includes(row.status)) counts.processing += 1;
+    else counts.pending += 1;
+    countsByBatch.set(row.providerTransferId, counts);
+  }
+  return batches.map((batch) => {
+    const counts = countsByBatch.get(batch.batchReference) || { paid: 0, failed: 0, processing: 0, pending: 0, total: 0 };
+    const fullyReconciled = Number(batch.totalTransactions || 0) > 0
+      && counts.total === Number(batch.totalTransactions)
+      && counts.paid + counts.failed === Number(batch.totalTransactions)
+      && counts.processing === 0
+      && counts.pending === 0;
+    return {
+      ...batch,
+      providerStatus: fullyReconciled ? "COMPLETED" : batch.providerStatus,
+      fullyReconciled,
+      counts,
+    };
   });
 }

@@ -33,8 +33,39 @@ async function leave(companyId, query) {
 }
 async function payroll(companyId, query) {
   const { start, end } = range(query.from, query.to);
-  const rows = await prisma.payrollItem.findMany({ where:{companyId,period:{startDate:{lte:end},endDate:{gte:start}}}, orderBy:{employee:{employeeNumber:"asc"}}, take:MAX_ROWS, include:{employee:{select:{employeeNumber:true,firstName:true,lastName:true,department:{select:{name:true}}}},period:{select:{name:true,startDate:true,endDate:true}},lines:true} });
-  return rows.map(r=>({period:r.period.name,periodStart:r.period.startDate.toISOString().slice(0,10),periodEnd:r.period.endDate.toISOString().slice(0,10),employeeNumber:r.employee.employeeNumber,employee:`${r.employee.firstName} ${r.employee.lastName}`.trim(),department:r.employee.department?.name||"",basicSalary:money(r.basicSalary),earnings:money(r.totalEarnings),deductions:money(r.totalDeductions),grossSalary:money(r.grossSalary),netSalary:money(r.netSalary),status:r.status}));
+  const rows = await prisma.payrollItem.findMany({
+    where: { companyId, period: { startDate: { lte: end }, endDate: { gte: start } } },
+    orderBy: { employee: { employeeNumber: "asc" } },
+    take: MAX_ROWS,
+    include: {
+      employee: { select: { employeeNumber: true, firstName: true, lastName: true, department: { select: { name: true } } } },
+      period: { select: { name: true, startDate: true, endDate: true } },
+      lines: true,
+      disbursement: { select: { status: true, provider: true, providerStatus: true, externalReference: true, providerTransferId: true, failureReason: true, paidAt: true, verifiedAt: true } },
+    },
+  });
+  return rows.map((r) => ({
+    period: r.period.name,
+    periodStart: r.period.startDate.toISOString().slice(0, 10),
+    periodEnd: r.period.endDate.toISOString().slice(0, 10),
+    employeeNumber: r.employee.employeeNumber,
+    employee: `${r.employee.firstName} ${r.employee.lastName}`.trim(),
+    department: r.employee.department?.name || "",
+    basicSalary: money(r.basicSalary),
+    earnings: money(r.totalEarnings),
+    deductions: money(r.totalDeductions),
+    grossSalary: money(r.grossSalary),
+    netSalary: money(r.netSalary),
+    status: r.status,
+    paymentStatus: r.disbursement?.status || "NOT_PREPARED",
+    paymentProvider: r.disbursement?.provider || "",
+    paymentProviderStatus: r.disbursement?.providerStatus || "",
+    paymentReference: r.disbursement?.externalReference || "",
+    paymentBatchReference: r.disbursement?.providerTransferId || "",
+    paymentFailureReason: r.disbursement?.failureReason || "",
+    paymentPaidAt: r.disbursement?.paidAt?.toISOString() || "",
+    paymentVerifiedAt: r.disbursement?.verifiedAt?.toISOString() || "",
+  }));
 }
 async function employees(companyId) {
   const rows = await prisma.employee.findMany({where:{companyId},orderBy:{employeeNumber:"asc"},take:MAX_ROWS,include:{department:{select:{name:true}},designation:{select:{name:true}}}});
