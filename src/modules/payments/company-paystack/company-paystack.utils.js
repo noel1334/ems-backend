@@ -1,5 +1,21 @@
 const TRUE_VALUES = new Set(["true", "1", "yes", "on"]);
 
+const ACCOUNT_VALIDATION_ERROR = /cannot resolve account|invalid account(?: number)?|account number.{0,50}(?:invalid|does not match|mismatch|not found)|(?:bank|recipient|beneficiar).{0,50}(?:invalid|unsupported|does not match|mismatch|not found)|(?:invalid|unsupported).{0,50}(?:bank code|recipient|beneficiar)|fraud watchlist/i;
+
+/** Only account/beneficiary-specific 4xx responses are safe to skip per employee.
+ * Authentication, throttling, network and provider failures must abort the whole
+ * preparation phase before any transfer is initiated.
+ */
+export function isSkippablePaystackAccountError(error) {
+  const status = Number(error?.statusCode || error?.response?.status || 0);
+  const message = String(error?.message || error?.details?.providerMessage || error?.details?.message || "");
+  return (status === 400 || status === 422) && ACCOUNT_VALIDATION_ERROR.test(message);
+}
+
+export function isSkippablePaystackRecipientError(error) {
+  return isSkippablePaystackAccountError(error);
+}
+
 /**
  * Live payroll must always resolve beneficiaries before submission. Paystack's
  * TEST environment has a small daily allowance for resolving real bank
@@ -20,11 +36,53 @@ export function isPaystackSandboxResolveLimitError(message) {
     || /daily\s+limit.*live\s+bank\s+resolves?\s+exceeded/i.test(raw);
 }
 
-/** Sandbox can proceed after local checks; recipient creation is preflighted before transfers. */
-export function canSubmitPaystackPreview({ environment, invalidCount, insufficientBalance, providerValidationComplete }) {
-  if (Number(invalidCount || 0) > 0 || Boolean(insufficientBalance)) return false;
+/** Partition only rows that passed the preview's actual checks. In TEST mode this is
+ * intentionally a local/simulation eligibility check, not a claim of live bank verification. */
+export function partitionPaystackEmployees(employees = []) {
+  const rows = Array.isArray(employees) ? employees : [];
+  return {
+    eligible: rows.filter((employee) => employee?.valid === true),
+    skipped: rows.filter((employee) => employee?.valid !== true),
+  };
+}
+
+/** A preview can proceed with partial eligibility, but never with zero eligible employees. */
+export function canSubmitPaystackPreview({ environment, validCount, insufficientBalance, providerValidationComplete }) {
+  if (Number(validCount || 0) < 1 || Boolean(insufficientBalance)) return false;
   if (String(environment).toLowerCase() === "test") return true;
   return Boolean(providerValidationComplete);
+}
+
+
+/** Prepare recipients independently so one bad beneficiary does not block valid colleagues. */
+export async function preparePaystackRecipients(employees, createRecipient, summarizeFailure, concurrency = 4) {
+  const rows = Array.isArray(employees) ? employees : [];
+  const results = new Array(rows.length);
+  let nextIndex = 0;
+  let hasFatalFailure = false;
+  const runnerCount = Math.min(Math.max(1, Number(concurrency) || 1), rows.length);
+  await Promise.all(Array.from({ length: runnerCount }, async () => {
+    while (true) {
+      if (hasFatalFailure) return;
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= rows.length) return;
+      const row = rows[index];
+      try {
+        results[index] = { ok: true, item: await createRecipient(row) };
+      } catch (error) {
+        const failure = summarizeFailure(row, error);
+        const skippable = isSkippablePaystackRecipientError(error);
+        if (!skippable) hasFatalFailure = true;
+        results[index] = { ok: false, skippable, row, failure, error };
+      }
+    }
+  }));
+  return {
+    prepared: results.filter((result) => result?.ok).map((result) => result.item),
+    failed: results.filter((result) => result && !result.ok && result.skippable).map(({ row, failure }) => ({ row, failure })),
+    fatal: results.filter((result) => result && !result.ok && !result.skippable).map(({ row, failure, error }) => ({ row, failure, error })),
+  };
 }
 
 /** Translate Paystack's common account-resolution failure into a safe action. */

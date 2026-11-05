@@ -4,7 +4,7 @@ import prisma from "../../../config/database.js";
 import AppError from "../../../common/errors/AppError.js";
 import { encryptCompanyPaystackSecret, decryptCompanyPaystackSecret } from "./company-paystack.crypto.js";
 import { companyPaystackEndpoints } from "./company-paystack.client.js";
-import { canSubmitPaystackPreview, explainPaystackAccountError, isPaystackSandboxResolveLimitError, recipientFailureSummary, shouldResolvePaystackAccounts } from "./company-paystack.utils.js";
+import { canSubmitPaystackPreview, explainPaystackAccountError, isPaystackSandboxResolveLimitError, isSkippablePaystackAccountError, partitionPaystackEmployees, preparePaystackRecipients, recipientFailureSummary, shouldResolvePaystackAccounts } from "./company-paystack.utils.js";
 import { estimatePaystackTransferFee } from "../../payroll/payroll.payout.config.js";
 
 const asText = (value) => String(value ?? "").trim();
@@ -137,8 +137,12 @@ async function preparePreview(companyId, periodId) {
           // details are wrong. Defer provider acceptance to recipient creation.
           // All recipients are prepared before the first test transfer request.
           sandboxResolutionDeferred = true;
-        } else {
+        } else if (isSkippablePaystackAccountError(error)) {
           errors.push(explainPaystackAccountError(error.message, selected.bankCode));
+        } else {
+          // A 401/429/5xx/network failure is not proof that this employee's
+          // account is invalid. Abort preview rather than silently skip a good employee.
+          throw error;
         }
       }
     }
@@ -146,18 +150,21 @@ async function preparePreview(companyId, periodId) {
     try { estimatedFee = estimatePaystackTransferFee(Number(row.amount)); }
     catch (error) { errors.push(error.message || "Paystack transfer fee could not be estimated."); }
     const sandboxPreflight = connection.environment === "test" && (!shouldResolve || sandboxResolutionDeferred);
-    return { disbursementId: row.id, employee: employeeName(row.employee), employeeId: row.employeeId, bankName: selected.account?.bankName || null, accountName: selected.account?.accountName || null, resolvedAccountName: resolved?.account_name || null, accountNumberLast4: selected.account?.accountNumber ? String(selected.account.accountNumber).slice(-4) : null, amount: new Decimal(row.amount).toFixed(2), estimatedFee: new Decimal(estimatedFee).toFixed(2), valid: errors.length === 0, validationStatus: errors.length ? "BLOCKED" : sandboxPreflight ? "SANDBOX_RECIPIENT_PREFLIGHT" : shouldResolve ? "PROVIDER_VERIFIED" : "LOCAL_ONLY", warnings: sandboxResolutionDeferred ? ["Paystack's TEST-mode daily live bank-lookup limit was reached. EMS will check this beneficiary during test recipient creation before sending any test transfer."] : [], errors, _bankAccountId: selected.account?.id || null, _bankCode: selected.bankCode || null, _accountNumber: selected.account?.accountNumber || null, _accountName: selected.account?.accountName || null, _email: row.employee?.email || null };
+    return { disbursementId: row.id, employee: employeeName(row.employee), employeeId: row.employeeId, bankName: selected.account?.bankName || null, accountName: selected.account?.accountName || null, resolvedAccountName: resolved?.account_name || null, accountNumberLast4: selected.account?.accountNumber ? String(selected.account.accountNumber).slice(-4) : null, amount: new Decimal(row.amount).toFixed(2), estimatedFee: new Decimal(estimatedFee).toFixed(2), valid: errors.length === 0, validationStatus: errors.length ? "BLOCKED" : sandboxPreflight ? "SANDBOX_RECIPIENT_PREFLIGHT" : shouldResolve ? "PROVIDER_VERIFIED" : "LOCAL_ONLY", warnings: sandboxResolutionDeferred ? ["Paystack's TEST-mode daily live bank-lookup limit was reached. This beneficiary passed local checks only and is not bank-account verified in TEST mode."] : [], errors, _bankAccountId: selected.account?.id || null, _bankCode: selected.bankCode || null, _accountNumber: selected.account?.accountNumber || null, _accountName: selected.account?.accountName || null, _email: row.employee?.email || null };
   });
   if (!rows.length) throw new AppError("There are no pending disbursements in this payroll register. Refresh existing Paystack batches instead of submitting again.", 409, { code: "PAYSTACK_NO_PENDING_DISBURSEMENTS" });
   const digest = secretDigest(decryptCompanyPaystackSecret(connection.secretKeyCiphertext));
   const fingerprintSource = { companyId, periodId, environment: connection.environment, digest, rows: employees.map(({ disbursementId, amount, _bankAccountId, _bankCode, _accountNumber, _accountName }) => ({ disbursementId, amount, _bankAccountId, _bankCode, _accountNumber, _accountName })) };
   const fingerprint = crypto.createHash("sha256").update(JSON.stringify(fingerprintSource)).digest("hex");
-  const validCount = employees.filter((item) => item.valid).length;
-  const totalAmount = employees.reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
-  const estimatedFees = employees.reduce((sum, item) => sum.plus(item.estimatedFee), new Decimal(0));
-  const providerValidationComplete = employees.every((item) => item.validationStatus === "PROVIDER_VERIFIED");
+  const { eligible } = partitionPaystackEmployees(employees);
+  const validCount = eligible.length;
+  const invalidCount = employees.length - validCount;
+  // Preview totals and required balance include only employees who can enter the batch.
+  const totalAmount = eligible.reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
+  const estimatedFees = eligible.reduce((sum, item) => sum.plus(item.estimatedFee), new Decimal(0));
+  const providerValidationComplete = validCount > 0 && eligible.every((item) => item.validationStatus === "PROVIDER_VERIFIED");
   const accountValidationMode = providerValidationComplete ? "PAYSTACK_RESOLVED" : connection.environment === "test" ? "SANDBOX_RECIPIENT_PREFLIGHT" : "LOCAL_FORMAT_ONLY";
-  return { connection, period, employees, fingerprint, totalAmount: totalAmount.toFixed(2), estimatedFees: estimatedFees.toFixed(2), estimatedRequiredBalance: totalAmount.plus(estimatedFees).toFixed(2), validCount, invalidCount: employees.length - validCount, accountValidationMode, providerValidationComplete, balance: null };
+  return { connection, period, employees, fingerprint, totalAmount: totalAmount.toFixed(2), estimatedFees: estimatedFees.toFixed(2), estimatedRequiredBalance: totalAmount.plus(estimatedFees).toFixed(2), validCount, invalidCount, accountValidationMode, providerValidationComplete, balance: null };
 }
 
 export async function previewPayroll(companyId, periodId) {
@@ -167,12 +174,12 @@ export async function previewPayroll(companyId, periodId) {
   catch (error) { balanceError = error.message; }
   if (balanceError) throw new AppError(`Could not confirm the company's Paystack balance: ${balanceError}`, 502, { code: "PAYSTACK_BALANCE_CHECK_FAILED" });
   const insufficientBalance = preview.connection.environment === "live" && balance.balance < Number(preview.estimatedRequiredBalance);
-  const canSubmit = canSubmitPaystackPreview({ environment: preview.connection.environment, invalidCount: preview.invalidCount, insufficientBalance, providerValidationComplete: preview.providerValidationComplete });
+  const canSubmit = canSubmitPaystackPreview({ environment: preview.connection.environment, validCount: preview.validCount, insufficientBalance, providerValidationComplete: preview.providerValidationComplete });
   const sandboxMode = preview.connection.environment === "test";
   const hasDeferredResolve = preview.employees.some((item) => item.validationStatus === "SANDBOX_RECIPIENT_PREFLIGHT" && item.warnings?.length);
-  const sandboxNote = "TEST mode: EMS skips Paystack /bank/resolve lookups by default because the TEST account has a small daily allowance for real-bank lookups. The preview performs local checks only; when you submit, EMS creates every test transfer recipient first and sends no test transfers if any recipient fails. Paystack TEST transfers are simulated and do not send salary money to employees. This is not live account-name verification.";
-  const notes = [sandboxMode ? sandboxNote : "Live transfers use this company's Paystack NGN balance, not its ordinary bank account or the EMS internal wallet.", preview.providerValidationComplete ? "Every listed employee bank account was resolved by this company's Paystack integration during this preview." : sandboxMode ? (hasDeferredResolve ? "The Paystack TEST lookup quota was reached for some employees; recipient creation will be used as the sandbox preflight." : "Paystack bank-name resolution was intentionally skipped in TEST mode. Test recipient creation is checked before any simulated transfer is sent.") : "WARNING: provider account resolution is incomplete; live submission is disabled.", "Do not replace a real employee's saved Paystack bank code with a test-only lookup code. Keep each employee's actual Paystack bank selection unchanged.", "Bulk transfer requires Transfers OTP to be disabled in this company's Paystack Dashboard. A single transfer may require OTP authorization.", "Bulk payroll is split into groups of at most 100 and Paystack requests are spaced by at least five seconds.", "The fee total is an estimate using the published Nigerian transfer pricing and the backend fee settings. Paystack checks the actual transfer amount plus fee before accepting each request.", "If this company has configured a Paystack Transfer Approval URL, that separate approval callback is not implemented in this version; configure and test it before using that integration."];
-  return { payrollPeriodId: periodId, environment: preview.connection.environment, balance: balance.balance, balanceKobo: balance.balanceKobo, totalAmount: preview.totalAmount, estimatedFees: preview.estimatedFees, estimatedRequiredBalance: preview.estimatedRequiredBalance, totalTransactions: preview.employees.length, validCount: preview.validCount, invalidCount: preview.invalidCount, accountValidationMode: preview.accountValidationMode, providerValidationComplete: preview.providerValidationComplete, insufficientBalance, canSubmit, previewFingerprint: preview.fingerprint, employees: preview.employees.map(({ _bankAccountId, _bankCode, _accountNumber, _accountName, _email, ...publicItem }) => publicItem), notes };
+  const sandboxNote = "TEST mode: EMS skips Paystack /bank/resolve lookups by default because the TEST account has a small daily allowance for real-bank lookups. The preview performs local format and bank-directory checks only. Creating a transfer recipient is not bank-account verification; Paystack's own recipient example can return account_name=null. Paystack TEST bulk transfers are simulated and return success without real bank processing, so TEST mode cannot prove that a real employee account number and bank code will receive a live salary. Do not mark a TEST recipient as verified.";
+  const notes = [sandboxMode ? sandboxNote : "Live transfers use this company's Paystack NGN balance, not its ordinary bank account or the EMS internal wallet.", preview.providerValidationComplete ? "Every eligible employee bank account was resolved by this company's Paystack integration during this preview." : sandboxMode ? (hasDeferredResolve ? "The Paystack TEST lookup quota was reached for some employees. They have only passed local checks; recipient creation does not verify the underlying account name or prove live creditability." : "Paystack bank-name resolution was intentionally skipped in TEST mode. Employees pass local format and bank-directory checks only; live account verification is unavailable from this TEST preview.") : "WARNING: provider account resolution is incomplete; live submission is disabled.", preview.invalidCount ? `${preview.invalidCount} blocked employee(s) will be skipped. They will not be included in this Paystack batch and will remain pending for correction and later payment.` : "All listed employees passed the preview checks.", "Do not replace a real employee's saved Paystack bank code with a test-only lookup code. Keep each employee's actual Paystack bank selection unchanged.", "Paystack bulk transfers require Transfers OTP to be disabled in this company's Paystack Dashboard. OTP authorization is supported for a single transfer only; multiple transfers cannot be approved with one Paystack bulk OTP.", "Bulk payroll is split into groups of at most 100 and Paystack requests are spaced by at least five seconds.", "The fee total is an estimate using the published Nigerian transfer pricing and the backend fee settings. Paystack checks the actual transfer amount plus fee before accepting each request.", "If this company has configured a Paystack Transfer Approval URL, that separate approval callback is not implemented in this version; configure and test it before using that integration."];
+  return { payrollPeriodId: periodId, environment: preview.connection.environment, balance: balance.balance, balanceKobo: balance.balanceKobo, totalAmount: preview.totalAmount, estimatedFees: preview.estimatedFees, estimatedRequiredBalance: preview.estimatedRequiredBalance, totalTransactions: preview.validCount, totalEmployees: preview.employees.length, validCount: preview.validCount, invalidCount: preview.invalidCount, skippedCount: preview.invalidCount, accountValidationMode: preview.accountValidationMode, providerValidationComplete: preview.providerValidationComplete, insufficientBalance, canSubmit, previewFingerprint: preview.fingerprint, employees: preview.employees.map(({ _bankAccountId, _bankCode, _accountNumber, _accountName, _email, ...publicItem }) => publicItem), notes };
 }
 
 async function getOrCreateRecipient(companyId, connection, row) {
@@ -249,64 +256,142 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   const connection = await requiredConnection(companyId);
   const preview = await preparePreview(companyId, periodId);
   if (!previewFingerprint || previewFingerprint !== preview.fingerprint) throw new AppError("Payroll or bank details changed after preview. Generate a new preview before submitting.", 409, { code: "PAYSTACK_PREVIEW_STALE" });
-  if (preview.invalidCount) throw new AppError("Some employees have invalid bank details. Correct the blockers before submitting the payroll.", 422, { code: "PAYSTACK_PREVIEW_HAS_ERRORS", invalidCount: preview.invalidCount });
-  const currentBalance = balanceDetails(await companyPaystackEndpoints.balance(connection));
-  if (connection.environment === "live" && currentBalance.balance < Number(preview.estimatedRequiredBalance)) throw new AppError("The company's Paystack balance is lower than salary principal plus the estimated transfer fees. Fund its Paystack balance and preview again.", 409, { code: "PAYSTACK_INSUFFICIENT_BALANCE", balance: currentBalance.balance, required: preview.estimatedRequiredBalance, totalAmount: preview.totalAmount, estimatedFees: preview.estimatedFees });
+
+  const { eligible, skipped: previewSkipped } = partitionPaystackEmployees(preview.employees);
+  if (!eligible.length) {
+    throw new AppError("No employee passed Paystack's preview checks. No transfer batch was created. Correct the blocked bank or payroll records and preview again.", 422, {
+      code: "PAYSTACK_NO_VALID_BENEFICIARIES",
+      details: { skippedCount: previewSkipped.length, skippedEmployees: previewSkipped.map((row) => ({ employee: row.employee, bankName: row.bankName, accountNumberLast4: row.accountNumberLast4, code: "PAYSTACK_PREVIEW_BLOCKED", message: (row.errors || []).join(" ") || "Failed local/provider validation." })), transfersInitiated: false },
+    });
+  }
+
   const activeBatch = await prisma.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId, providerStatus: { in: ["SUBMITTING", "SUBMISSION_UNKNOWN", "PENDING_AUTHORIZATION", "AWAITING_VERIFICATION", "PROCESSING", "PENDING"] } } });
   if (activeBatch) throw new AppError("A Paystack batch already exists for this payroll period. Refresh or reconcile it before another submission.", 409, { code: "PAYSTACK_BATCH_ALREADY_EXISTS", batchReference: activeBatch.batchReference });
 
-  const batchReference = newReference();
-  const mode = preview.employees.length === 1 ? "SINGLE" : "BULK";
-  const batch = await prisma.companyPaystackBatch.create({ data: { companyId, payrollPeriodId: periodId, batchReference, providerStatus: "SUBMITTING", environment: connection.environment, transferMode: mode, totalAmount: new Decimal(preview.totalAmount), totalTransactions: preview.employees.length, submittedBy: userId } });
-  try {
-    // Prepare every recipient before sending any salary transfer. Collect failures
-    // per employee rather than allowing the first rejected bank account to hide the
-    // remaining problems behind one generic batch failure.
-    const recipientPreparation = await mapWithConcurrency(preview.employees, 4, async (row) => {
-      try {
-        return {
-          ok: true,
-          item: {
-            ...row,
-            recipientCode: await getOrCreateRecipient(companyId, connection, row),
-            reference: newReference(),
-            amountKobo: toKobo(row.amount),
-          },
-        };
-      } catch (error) {
-        return { ok: false, row, error };
-      }
+  // Prepare each eligible recipient independently. A rejected bank/account is skipped,
+  // while the remaining valid beneficiaries continue. No transfer endpoint is called
+  // until every recipient-preparation attempt has completed.
+  const recipientResult = await preparePaystackRecipients(
+    eligible,
+    async (row) => ({
+      ...row,
+      recipientCode: await getOrCreateRecipient(companyId, connection, row),
+      reference: newReference(),
+      amountKobo: toKobo(row.amount),
+    }),
+    (row, error) => ({
+      ...recipientFailureSummary(row, error),
+      code: error?.code || error?.details?.code || "PAYSTACK_RECIPIENT_FAILED",
+      phase: "RECIPIENT_PREPARATION",
+    }),
+    4,
+  );
+  const recipientFailures = recipientResult.failed.map((result) => result.failure);
+  const fatalRecipientFailures = recipientResult.fatal.map((result) => result.failure);
+  const skippedEmployees = [
+    ...previewSkipped.map((row) => ({
+      employee: row.employee,
+      bankName: row.bankName || "Unknown bank",
+      accountNumberLast4: row.accountNumberLast4 || "",
+      code: "PAYSTACK_PREVIEW_BLOCKED",
+      phase: "PREVIEW_VALIDATION",
+      message: (row.errors || []).join(" ") || "This employee did not pass Paystack preview validation.",
+    })),
+    ...recipientFailures,
+  ];
+
+  // Keep skipped disbursements pending and unattached to a Paystack batch so they
+  // can be corrected and submitted later without affecting successful colleagues.
+  for (const result of recipientResult.failed) {
+    await prisma.payrollDisbursement.updateMany({
+      where: { id: result.row.disbursementId, companyId, periodId, status: "PENDING", provider: null },
+      data: { failureReason: `${result.failure.code}: ${result.failure.message}`.slice(0, 500) },
     });
-    const recipientFailures = recipientPreparation
-      .filter((result) => !result.ok)
-      .map((result) => recipientFailureSummary(result.row, result.error));
-    if (recipientFailures.length) {
-      const details = recipientFailures.slice(0, 3).map((failure) => `${failure.employee} (${failure.bankName}${failure.accountNumberLast4 ? ` •••• ${failure.accountNumberLast4}` : ""}): ${failure.message}`).join(" | ");
-      const summary = `Paystack could not prepare ${recipientFailures.length} transfer recipient${recipientFailures.length === 1 ? "" : "s"}. No salary transfers were initiated. ${details}${recipientFailures.length > 3 ? ` | and ${recipientFailures.length - 3} more` : ""}`;
-      await prisma.companyPaystackBatch.update({
-        where: { id: batch.id },
-        data: {
-          providerStatus: "FAILED",
-          providerResponse: { phase: "RECIPIENT_PREPARATION", error: summary, recipientFailures, transfersInitiated: false },
-        },
-      });
-      throw new AppError(summary, 422, {
-        code: "PAYSTACK_RECIPIENT_PREPARATION_FAILED",
-        details: { recipientFailures, transfersInitiated: false },
+  }
+
+  // Do not convert operational failures (auth, rate limiting, timeout, provider
+  // outage) into employee skips. No transfer batch exists yet, so safely abort.
+  if (fatalRecipientFailures.length) {
+    throw new AppError("Paystack recipient preparation encountered an operational error. No salary transfers were initiated. Retry after resolving the Paystack connection or provider issue.", 502, {
+      code: "PAYSTACK_RECIPIENT_PREPARATION_INCOMPLETE",
+      details: { transfersInitiated: false, preparedCount: recipientResult.prepared.length, skippedCount: skippedEmployees.length, skippedEmployees, operationalFailures: fatalRecipientFailures },
+    });
+  }
+
+  const prepared = recipientResult.prepared;
+  if (!prepared.length) {
+    throw new AppError("Every otherwise eligible employee failed Paystack recipient preparation. No salary transfers were initiated; all affected employees remain pending.", 422, {
+      code: "PAYSTACK_NO_PREPARED_RECIPIENTS",
+      details: { skippedCount: skippedEmployees.length, skippedEmployees, transfersInitiated: false },
+    });
+  }
+
+  const submittedTotal = prepared.reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
+  const submittedFees = prepared.reduce((sum, item) => sum.plus(item.estimatedFee || 0), new Decimal(0));
+  const submittedRequired = submittedTotal.plus(submittedFees);
+  if (connection.environment === "live") {
+    const currentBalance = balanceDetails(await companyPaystackEndpoints.balance(connection));
+    if (currentBalance.balance < Number(submittedRequired.toFixed(2))) {
+      throw new AppError("The company's Paystack balance is lower than the eligible salary total plus estimated fees. Fund the Paystack balance and preview again. No salary transfers were initiated.", 409, {
+        code: "PAYSTACK_INSUFFICIENT_BALANCE",
+        balance: currentBalance.balance,
+        required: submittedRequired.toFixed(2),
+        totalAmount: submittedTotal.toFixed(2),
+        estimatedFees: submittedFees.toFixed(2),
       });
     }
-    const prepared = recipientPreparation.map((result) => result.item);
+  }
+
+  const batchReference = newReference();
+  const mode = prepared.length === 1 ? "SINGLE" : "BULK";
+  const skippedMetadata = { skippedEmployees, skippedCount: skippedEmployees.length, recipientFailures, transfersInitiated: false };
+  // Re-check under a serializable transaction after recipient preparation so concurrent
+  // admins cannot create two payroll batches for the same period.
+  const batch = await prisma.$transaction(async (tx) => {
+    const openBatch = await tx.companyPaystackBatch.findFirst({
+      where: { companyId, payrollPeriodId: periodId, providerStatus: { in: ["SUBMITTING", "SUBMISSION_UNKNOWN", "PENDING_AUTHORIZATION", "AWAITING_VERIFICATION", "PROCESSING", "PENDING"] } },
+      select: { batchReference: true, providerStatus: true },
+    });
+    if (openBatch) throw new AppError(`A Paystack batch already exists for this payroll period (${openBatch.batchReference}, ${openBatch.providerStatus}). Reconcile it before submitting another batch.`, 409, { code: "PAYSTACK_BATCH_ALREADY_EXISTS", batchReference: openBatch.batchReference });
+    return tx.companyPaystackBatch.create({
+      data: {
+        companyId,
+        payrollPeriodId: periodId,
+        batchReference,
+        providerStatus: "SUBMITTING",
+        environment: connection.environment,
+        transferMode: mode,
+        totalAmount: submittedTotal,
+        totalTransactions: prepared.length,
+        submittedBy: userId,
+        providerResponse: { phase: "RECIPIENTS_PREPARED", ...skippedMetadata },
+      },
+    });
+  }, { isolationLevel: "Serializable" });
+
+  try {
     if (mode === "SINGLE") {
       const item = prepared[0];
+      const referenceMap = [{ reference: item.reference, disbursementId: item.disbursementId }];
       await prisma.payrollDisbursement.update({ where: { id: item.disbursementId }, data: { provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", externalReference: item.reference, status: "PROCESSING", providerStatus: "SUBMITTING", providerResponse: { phase: "SUBMITTING" }, failureReason: null } });
-      await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerResponse: { _emsTransactionMap: [{ reference: item.reference, disbursementId: item.disbursementId }], reference: item.reference } } });
+      await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerResponse: { ...skippedMetadata, transfersInitiated: true, _emsTransactionMap: referenceMap, reference: item.reference } } });
       const result = await companyPaystackEndpoints.initiateSingle(connection, { source: "balance", amount: item.amountKobo, recipient: item.recipientCode, reference: item.reference, reason: `EMS salary ${periodId}`.slice(0, 100), currency: "NGN" });
       const data = result.data || {};
       await updateDisbursement({ id: item.disbursementId }, data, item.reference, connection.environment, false);
       const status = paystackStatus(data);
       const providerStatus = status === "otp" ? "PENDING_AUTHORIZATION" : (connection.environment !== "live" && status === "success" ? "TEST_SUCCESS" : status === "success" ? "AWAITING_VERIFICATION" : "PROCESSING");
-      await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus, providerResponse: { data, reference: item.reference, transferCode: data.transfer_code || null, _emsTransactionMap: [{ reference: item.reference, disbursementId: item.disbursementId }] }, ...(status === "otp" ? {} : { authorizedAt: new Date() }) } });
-      return { id: batch.id, batchReference, transferMode: mode, status: providerStatus, requiresOtp: status === "otp", totalAmount: preview.totalAmount, totalTransactions: 1 };
+      await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus, providerResponse: { ...skippedMetadata, data, reference: item.reference, transferCode: data.transfer_code || null, _emsTransactionMap: referenceMap }, ...(status === "otp" ? {} : { authorizedAt: new Date() }) } });
+      return {
+        id: batch.id,
+        batchReference,
+        transferMode: mode,
+        status: providerStatus,
+        requiresOtp: status === "otp",
+        totalAmount: Number(submittedTotal.toFixed(2)),
+        totalTransactions: 1,
+        skippedCount: skippedEmployees.length,
+        skippedEmployees,
+      };
     }
 
     const chunks = [];
@@ -316,44 +401,46 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
       const chunk = chunks[chunkIndex];
       const chunkReferences = chunk.map((item) => ({ reference: item.reference, disbursementId: item.disbursementId }));
-      // Persist references before the provider request. If the network drops after Paystack
-      // accepts a request, the webhook/reconciliation path can still identify every employee.
-      await prisma.payrollDisbursement.updateMany({ where: { id: { in: chunk.map((item) => item.disbursementId) }, companyId }, data: { provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", status: "PROCESSING", providerStatus: "SUBMITTING", failureReason: null } });
+      await prisma.payrollDisbursement.updateMany({
+        where: { id: { in: chunk.map((item) => item.disbursementId) }, companyId, status: "PENDING", provider: null },
+        data: { provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", status: "PROCESSING", providerStatus: "SUBMITTING", failureReason: null },
+      });
       transactionMap.push(...chunkReferences);
       const chunkMeta = { index: chunkIndex + 1, status: "SUBMITTING", count: chunk.length, references: chunkReferences.map((item) => item.reference) };
       chunkResults.push(chunkMeta);
-      await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: chunkIndex === 0 ? "SUBMITTING" : "PROCESSING", providerResponse: { _emsTransactionMap: transactionMap, chunks: chunkResults } } });
+      await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: chunkIndex === 0 ? "SUBMITTING" : "PROCESSING", providerResponse: { ...skippedMetadata, _emsTransactionMap: transactionMap, chunks: chunkResults } } });
       try {
+        // Persist intent immediately before the provider call. If the network drops,
+        // the batch is treated as uncertain and reconciled rather than resubmitted.
+        await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerResponse: { ...skippedMetadata, transfersInitiated: true, _emsTransactionMap: transactionMap, chunks: chunkResults } } });
         const transfers = chunk.map((item) => ({ amount: item.amountKobo, recipient: item.recipientCode, reference: item.reference, reason: `EMS salary ${periodId}`.slice(0, 100) }));
         const result = await companyPaystackEndpoints.initiateBulk(connection, { source: "balance", currency: "NGN", transfers });
         const returned = Array.isArray(result.data) ? result.data : Array.isArray(result.data?.transfers) ? result.data.transfers : [];
         if (returned.length !== chunk.length) throw new AppError("Paystack accepted a response that could not be matched to every employee in this batch. The batch is locked for reconciliation; do not submit it again.", 502, { code: "PAYSTACK_RESPONSE_MAPPING_INCOMPLETE" });
         for (const item of chunk) {
           const providerItem = returned.find((candidate) => candidate.reference === item.reference);
-          if (!providerItem) throw new AppError("A transfer reference was missing from Paystack's bulk response. The batch is locked for reconciliation.", 502, { code: "PAYSTACK_RESPONSE_REFERENCE_MISSING" });
+          if (!providerItem) throw new AppError("A transfer reference was missing from Paystack's bulk response. The batch is locked for reconciliation; do not submit it again.", 502, { code: "PAYSTACK_RESPONSE_REFERENCE_MISSING" });
           await updateDisbursement({ id: item.disbursementId }, providerItem, item.reference, connection.environment, false);
         }
         chunkMeta.status = "ACCEPTED";
         chunkMeta.response = returned;
-        await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: "PROCESSING", providerResponse: { _emsTransactionMap: transactionMap, chunks: chunkResults } } });
+        await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: "PROCESSING", providerResponse: { ...skippedMetadata, _emsTransactionMap: transactionMap, chunks: chunkResults } } });
       } catch (error) {
         const definitive = Boolean(error?.statusCode && error.statusCode >= 400 && error.statusCode < 500);
         if (definitive) {
-          // A rejected request was not accepted: release only this unsent chunk so it can be
-          // previewed again after the administrator corrects the account or dashboard setting.
-          await prisma.payrollDisbursement.updateMany({ where: { id: { in: chunk.map((item) => item.disbursementId) }, companyId, provider: "PAYSTACK_COMPANY", providerStatus: "SUBMITTING" }, data: { provider: null, method: "MANUAL_BANK_TRANSFER", externalReference: null, providerTransferId: null, providerStatus: null, providerResponse: null, status: "PENDING", failureReason: null } });
+          await prisma.payrollDisbursement.updateMany({ where: { id: { in: chunk.map((item) => item.disbursementId) }, companyId, provider: "PAYSTACK_COMPANY", providerStatus: "SUBMITTING", verifiedAt: null }, data: { provider: null, method: "MANUAL_BANK_TRANSFER", externalReference: null, providerTransferId: null, providerStatus: null, providerResponse: null, status: "PENDING", failureReason: null, paidAt: null, verifiedAt: null } });
           transactionMap.splice(transactionMap.length - chunkReferences.length, chunkReferences.length);
           chunkMeta.status = "REJECTED";
           chunkMeta.error = error.message;
-          await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: transactionMap.length ? "PROCESSING" : "FAILED", providerResponse: { _emsTransactionMap: transactionMap, chunks: chunkResults, error: error.message } } });
+          await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: transactionMap.length ? "PROCESSING" : "FAILED", providerResponse: { ...skippedMetadata, transfersInitiated: transactionMap.length > 0, _emsTransactionMap: transactionMap, chunks: chunkResults, error: error.message } } });
         } else {
           chunkMeta.status = "SUBMISSION_UNKNOWN";
           chunkMeta.error = error.message;
-          await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: "SUBMISSION_UNKNOWN", providerResponse: { _emsTransactionMap: transactionMap, chunks: chunkResults, error: error.message } } });
+          await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: "SUBMISSION_UNKNOWN", providerResponse: { ...skippedMetadata, _emsTransactionMap: transactionMap, chunks: chunkResults, error: error.message } } });
         }
         const providerMessage = String(error?.message || "");
         if (/otp|one.?time password|transfer approval|two.?factor/i.test(providerMessage)) {
-          throw new AppError("Paystack rejected the bulk request because Transfers OTP/approval is enabled. For bulk payroll, the company must disable Transfers OTP in its own Paystack Dashboard, then preview and submit again. EMS cannot change this security setting.", 409, { code: "PAYSTACK_BULK_OTP_ENABLED" });
+          throw new AppError("Paystack rejected the bulk request because Transfers OTP/approval is enabled. Paystack's bulk endpoint cannot use OTP; disable Transfers OTP in this company's Paystack Dashboard for multi-employee payroll. A single eligible employee can use the single-transfer OTP flow.", 409, { code: "PAYSTACK_BULK_OTP_ENABLED" });
         }
         throw error;
       }
@@ -362,15 +449,23 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
     const acceptedStatuses = chunkResults.flatMap((chunk) => chunk.response || []).map((item) => paystackStatus(item));
     const allSuccess = acceptedStatuses.length === prepared.length && acceptedStatuses.every((status) => status === "success");
     const finalStatus = allSuccess ? (connection.environment === "live" ? "AWAITING_VERIFICATION" : "TEST_SUCCESS") : "PROCESSING";
-    await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: finalStatus, providerResponse: { _emsTransactionMap: transactionMap, chunks: chunkResults } } });
-    return { id: batch.id, batchReference, transferMode: mode, status: finalStatus, requiresOtp: false, totalAmount: preview.totalAmount, totalTransactions: prepared.length, chunks: chunks.length };
-
+    await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: finalStatus, providerResponse: { ...skippedMetadata, _emsTransactionMap: transactionMap, chunks: chunkResults } } });
+    return {
+      id: batch.id,
+      batchReference,
+      transferMode: mode,
+      status: finalStatus,
+      requiresOtp: false,
+      totalAmount: Number(submittedTotal.toFixed(2)),
+      totalTransactions: prepared.length,
+      chunks: chunks.length,
+      skippedCount: skippedEmployees.length,
+      skippedEmployees,
+    };
   } catch (error) {
     const current = await prisma.companyPaystackBatch.findUnique({ where: { id: batch.id } });
     if (current?.providerStatus === "SUBMITTING") {
       const savedReferences = current.providerResponse?._emsTransactionMap || [];
-      // Recipient creation happens before any transfer is sent. If there is no persisted
-      // transfer reference, there is no salary debit to reconcile and the batch can fail safely.
       const definitive = savedReferences.length === 0 || Boolean(error?.statusCode && error.statusCode >= 400 && error.statusCode < 500);
       if (definitive && savedReferences.length) {
         await prisma.payrollDisbursement.updateMany({
@@ -378,11 +473,11 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
           data: { provider: null, method: "MANUAL_BANK_TRANSFER", externalReference: null, providerTransferId: null, providerStatus: null, providerResponse: null, status: "PENDING", failureReason: null, paidAt: null, verifiedAt: null },
         });
       }
-      await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: definitive ? "FAILED" : "SUBMISSION_UNKNOWN", providerResponse: { ...((current.providerResponse && typeof current.providerResponse === "object") ? current.providerResponse : {}), error: { message: error.message, code: error?.code || "UPSTREAM_ERROR" } } } });
+      await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: definitive ? "FAILED" : "SUBMISSION_UNKNOWN", providerResponse: { ...((current.providerResponse && typeof current.providerResponse === "object") ? current.providerResponse : {}), ...(definitive && savedReferences.length ? { transfersInitiated: false } : {}), error: { message: error.message, code: error?.code || "UPSTREAM_ERROR" } } } });
     }
     const providerMessage = String(error?.message || "");
     if (mode === "BULK" && /otp|one.?time password|transfer approval|two.?factor/i.test(providerMessage)) {
-      throw new AppError("Paystack rejected the bulk request because Transfers OTP/approval is enabled. For bulk payroll, the company must disable Transfers OTP in its own Paystack Dashboard, then preview and submit again. EMS cannot change this security setting.", 409, { code: "PAYSTACK_BULK_OTP_ENABLED" });
+      throw new AppError("Paystack rejected the bulk request because Transfers OTP/approval is enabled. Paystack's bulk endpoint cannot use OTP; disable Transfers OTP in this company's Paystack Dashboard for multi-employee payroll. A single eligible employee can use the single-transfer OTP flow.", 409, { code: "PAYSTACK_BULK_OTP_ENABLED" });
     }
     throw error;
   }
@@ -404,7 +499,16 @@ export async function authorizeSingleTransfer(companyId, batchId, otp) {
   const transferStatus = paystackStatus(data);
   await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerStatus: connection.environment !== "live" && transferStatus === "success" ? "TEST_SUCCESS" : transferStatus === "success" ? "AWAITING_VERIFICATION" : "PROCESSING", providerResponse: { ...batch.providerResponse, data }, authorizedAt: new Date() } });
   await markPayrollPaidIfComplete(companyId, batch.payrollPeriodId);
-  return { batchReference: batch.batchReference, status: paystackStatus(data).toUpperCase() };
+  const storedStatus = connection.environment !== "live" && transferStatus === "success" ? "TEST_SUCCESS" : transferStatus === "success" ? "AWAITING_VERIFICATION" : "PROCESSING";
+  return {
+    batchReference: batch.batchReference,
+    status: storedStatus,
+    authorizationAccepted: true,
+    finalStatusConfirmed: false,
+    message: connection.environment === "live"
+      ? "Paystack accepted the OTP and queued the transfer. This is not final payment confirmation; verify the transfer or wait for the transfer webhook."
+      : "Paystack accepted the OTP for this TEST transfer. The result is simulated and does not mean real salary money was sent.",
+  };
 }
 
 async function recordVerifiedTransfer(companyId, reference, data) {
@@ -464,9 +568,10 @@ export async function listBatches(companyId) {
   return rows.map(({ providerResponse, ...batch }) => {
     const references = Array.isArray(providerResponse?._emsTransactionMap) ? providerResponse._emsTransactionMap : [];
     const failures = Array.isArray(providerResponse?.recipientFailures) ? providerResponse.recipientFailures : [];
+    const skipped = Array.isArray(providerResponse?.skippedEmployees) ? providerResponse.skippedEmployees : [];
     const rawError = providerResponse?.error;
     const failureMessage = typeof rawError === "string" ? rawError : rawError?.message || null;
-    return { ...batch, recipientFailures: failures, failureMessage, canVerify: references.length > 0 };
+    return { ...batch, recipientFailures: failures, skippedEmployees: skipped, skippedCount: Number(providerResponse?.skippedCount ?? skipped.length), failureMessage, canVerify: references.length > 0 };
   });
 }
 
