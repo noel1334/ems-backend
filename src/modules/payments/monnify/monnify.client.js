@@ -2,7 +2,6 @@ import axios from "axios";
 import AppError from "../../../common/errors/AppError.js";
 import { decryptMonnifySecret } from "./monnify.crypto.js";
 import { monnifyFailureMessage } from "./monnify.utils.js";
-import { unwrapMonnifyTransactionRows } from "./monnify.reconciliation.utils.js";
 
 const baseUrl = (environment) => environment === "live" ? "https://api.monnify.com" : "https://sandbox.monnify.com";
 const unwrap = (response) => { const body = response?.data; if (!body?.requestSuccessful) { const providerCode = String(body?.responseCode || "MONNIFY_REQUEST_FAILED"); throw new AppError(monnifyFailureMessage(providerCode, body?.responseMessage), providerCode === "99" ? 502 : 422, { code: providerCode, details: { provider: "MONNIFY", providerCode, providerMessage: body?.responseMessage || null } }); } return body.responseBody ?? body; };
@@ -44,6 +43,9 @@ export const monnifyEndpoints = {
   },
   balance: (connection, accountNumber) => monnifyRequest(connection, "GET", "/api/v2/disbursements/wallet-balance", { params: { accountNumber } }),
   submitBatch: (connection, payload) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch", { data: payload }),
+  submitSingle: (connection, payload) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single", { data: payload }),
+  authorizeSingle: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single/validate-otp", { data: { reference, authorizationCode } }),
+  singleStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/single/summary", { params: { reference } }),
   authorizeBatch: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch/validate-otp", { data: { reference, authorizationCode } }),
   resendBatchOtp: (connection, reference) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single/resend-otp", { data: { reference } }),
   batchStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/summary", { params: { batchReference: reference } }),
@@ -57,22 +59,10 @@ export const monnifyEndpoints = {
       // Monnify's Get Bulk Transfer Transactions endpoint places the batch reference
       // in the URL path: /bulk/{batchReference}/transactions?pageNo=0&pageSize=100.
       const payload = await monnifyRequest(connection, "GET", `/api/v2/disbursements/bulk/${encodeURIComponent(reference)}/transactions`, { params: { pageNo: page, pageSize } });
-      const rows = unwrapMonnifyTransactionRows(payload);
-      all.push(...rows);
-      const findTotalPages = (value, depth = 0) => {
-        if (!value || typeof value !== "object" || depth > 5) return null;
-        for (const candidate of [value.totalPages, value.pageable?.totalPages, value.page?.totalPages]) {
-          const parsed = Number(candidate);
-          if (candidate !== undefined && candidate !== null && Number.isFinite(parsed) && parsed >= 0) return parsed;
-        }
-        for (const key of ["data", "responseBody", "pageable", "page"]) {
-          const nested = findTotalPages(value[key], depth + 1);
-          if (nested !== null) return nested;
-        }
-        return null;
-      };
-      const pages = findTotalPages(payload);
-      if (pages !== null) totalPages = pages;
+      const rows = Array.isArray(payload) ? payload : (payload?.content || payload?.transactions || payload?.items || payload?.data?.content || []);
+      if (Array.isArray(rows)) all.push(...rows);
+      const pages = Number(payload?.totalPages ?? payload?.data?.totalPages ?? payload?.page?.totalPages);
+      if (Number.isFinite(pages) && pages > 0) totalPages = pages;
       if (totalPages !== null) {
         page += 1;
       } else {

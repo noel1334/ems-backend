@@ -4,14 +4,6 @@ import AppError from "../../../common/errors/AppError.js";
 import { encryptMonnifySecret, decryptMonnifySecret } from "./monnify.crypto.js";
 import { monnifyEndpoints } from "./monnify.client.js";
 import { canonicalMonnifyBankName, normalizeMonnifyBanks } from "./monnify.utils.js";
-import {
-  monnifyTransactionFailureReason,
-  monnifyTransactionReference,
-  monnifyTransactionStatus,
-  normalizeMonnifyTransactionMap,
-  unwrapMonnifyTransactionRows,
-  isMonnifyBatchFullyReconciled,
-} from "./monnify.reconciliation.utils.js";
 
 const OPEN_BATCH_STATUSES = [
   "SUBMITTING",
@@ -74,32 +66,10 @@ const requiredConnection = async (companyId) => {
   return row;
 };
 
-const findOpenBatch = async (companyId, db = prisma) => {
-  const candidates = await db.companyMonnifyBatch.findMany({
-    where: { companyId, providerStatus: { in: OPEN_BATCH_STATUSES } },
-    orderBy: { createdAt: "asc" },
-    select: { id: true, payrollPeriodId: true, batchReference: true, providerStatus: true, environment: true, totalTransactions: true },
-  });
-
-  for (const batch of candidates) {
-    const disbursements = batch.payrollPeriodId
-      ? await db.payrollDisbursement.findMany({
-          where: { companyId, periodId: batch.payrollPeriodId, provider: "MONNIFY", providerTransferId: batch.batchReference },
-          select: { status: true },
-        })
-      : [];
-
-    // Some Monnify accounts leave the aggregate batch at AWAITING_PROCESSING
-    // after every beneficiary already has a final result. Trust only a complete
-    // one-to-one set of per-employee terminal outcomes, never aggregate counts.
-    if (isMonnifyBatchFullyReconciled(batch, disbursements)) {
-      await db.companyMonnifyBatch.update({ where: { id: batch.id }, data: { providerStatus: "COMPLETED" } });
-      continue;
-    }
-    return batch;
-  }
-  return null;
-};
+const findOpenBatch = (companyId) => prisma.companyMonnifyBatch.findFirst({
+  where: { companyId, providerStatus: { in: OPEN_BATCH_STATUSES } },
+  select: { id: true, batchReference: true, providerStatus: true, environment: true },
+});
 
 const assertBatchEnvironment = (connection, batch) => {
   if (String(connection.environment).toLowerCase() !== String(batch.environment || "sandbox").toLowerCase()) {
@@ -221,9 +191,17 @@ const resolveBatchBank = (transaction, banks, index) => {
   let bank = null;
 
   if (suppliedCode) {
-    // A code explicitly selected from Monnify's own directory is authoritative.
-    // The canonical bankName may legitimately differ from Monnify's display label.
+    // First trust a code only when it exists in Monnify's own current directory.
     bank = banks.find((candidate) => candidate.code === suppliedCode) || null;
+    // Older records may contain a NIP/other-provider code (for example, Moniepoint
+    // NIP 090405) in the Monnify field. Never submit that foreign code. If the
+    // employee's saved bank name maps uniquely to Monnify's directory, use the
+    // Monnify-issued code (Moniepoint MFB is 50515 in the current directory).
+    if (!bank && bankName) {
+      const bankKey = bankMatchKey(bankName);
+      const matches = banks.filter((candidate) => bankMatchKey(candidate.name) === bankKey);
+      bank = matches.length === 1 ? matches[0] : null;
+    }
   } else if (bankName) {
     // Backward compatibility for older employee accounts without a saved Monnify code.
     const bankKey = bankMatchKey(bankName);
@@ -252,7 +230,10 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
   if (!period) throw new AppError("Payroll period not found for this company.", 404);
   if (period.status !== "FINALIZED") throw new AppError("Only finalized payroll can be submitted to Monnify.", 409);
 
-  const duplicateActiveBatch = await findOpenBatch(companyId);
+  const duplicateActiveBatch = await prisma.companyMonnifyBatch.findFirst({
+    where: { companyId, payrollPeriodId, providerStatus: { in: OPEN_BATCH_STATUSES } },
+    select: { id: true, batchReference: true, providerStatus: true },
+  });
   if (duplicateActiveBatch) {
     throw new AppError(`This payroll period already has a Monnify batch (${duplicateActiveBatch.batchReference}) with status ${duplicateActiveBatch.providerStatus}. Refresh and reconcile it; do not submit a duplicate batch.`, 409, { code: "MONNIFY_DUPLICATE_PAYROLL_BATCH" });
   }
@@ -483,9 +464,19 @@ async function buildPayrollPreview(companyId, periodId) {
 
     const selectedMonnifyCode = String(bankAccount.monnifyBankCode || "").trim();
     let bank = null;
+    let bankCodeRecovered = false;
     if (selectedMonnifyCode) {
       bank = banks.find((candidate) => candidate.code === selectedMonnifyCode) || null;
-      if (!bank) return { ...result, message: `The saved Monnify bank code “${selectedMonnifyCode}” is no longer present in the current Monnify bank directory. Re-select the bank from Monnify's directory.`, validationCode: "MONNIFY_BANK_CODE_NOT_IN_DIRECTORY" };
+      if (!bank) {
+        // A legacy import may have stored a NIP or another provider's code in the
+        // Monnify field. Recover only by a unique exact bank-name match against
+        // Monnify's own live directory; never convert or submit the foreign code.
+        const wantedBank = bankMatchKey(bankAccount.bankName);
+        const matchingBanks = banks.filter((candidate) => bankMatchKey(candidate.name) === wantedBank);
+        if (matchingBanks.length !== 1) return { ...result, message: `The saved Monnify code “${selectedMonnifyCode}” is not in Monnify's directory and the bank name cannot be mapped uniquely. Edit this employee's bank account and select the bank from Monnify's directory.`, validationCode: "MONNIFY_BANK_CODE_NOT_IN_DIRECTORY" };
+        bank = matchingBanks[0];
+        bankCodeRecovered = true;
+      }
     } else {
       // Backward compatibility for older records created before provider-specific codes were stored.
       const wantedBank = bankMatchKey(bankAccount.bankName);
@@ -494,6 +485,7 @@ async function buildPayrollPreview(companyId, periodId) {
         return { ...result, message: matchingBanks.length ? "The saved bank name matches more than one Monnify bank record. Select the precise bank from Monnify's directory." : `The saved bank name “${bankAccount.bankName}” could not be matched to Monnify's current bank directory. Edit the employee account and select its Monnify bank code.`, validationCode: "MONNIFY_BANK_NOT_MAPPED" };
       }
       bank = matchingBanks[0];
+      bankCodeRecovered = true;
     }
 
     try {
@@ -512,8 +504,10 @@ async function buildPayrollPreview(companyId, periodId) {
         bankCode: bank.code,
         accountName: verifiedName,
         accountNumber,
+        bankAccountId: bankAccount.id,
+        bankCodeRecovered,
         status: "VALID",
-        message: "Beneficiary account verified by Monnify.",
+        message: bankCodeRecovered ? `Beneficiary verified. EMS matched the bank name to Monnify's directory code ${bank.code}; the provider-specific code will be corrected when the batch is submitted.` : "Beneficiary account verified by Monnify.",
       };
     } catch (error) {
       const code = providerErrorCode(error);
@@ -561,6 +555,7 @@ async function buildPayrollPreview(companyId, periodId) {
       const source = snapshotRows.find((row) => row.id === employee.disbursementId);
       return {
         disbursementId: employee.disbursementId,
+        bankAccountId: employee.bankAccountId,
         employeeId: employee.employeeId,
         employeeName: employee.employeeName,
         amount: Number(employee.amount.toFixed(2)),
@@ -602,7 +597,10 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   // Serialize the company-wallet lock check and batch creation to prevent two admins
   // from submitting overlapping batches against the same Monnify wallet concurrently.
   const savedBatch = await prisma.$transaction(async (tx) => {
-    const openBatch = await findOpenBatch(companyId, tx);
+    const openBatch = await tx.companyMonnifyBatch.findFirst({
+      where: { companyId, providerStatus: { in: OPEN_BATCH_STATUSES } },
+      select: { batchReference: true, providerStatus: true },
+    });
     if (openBatch) throw new AppError(`This company's Monnify wallet already has an open batch (${openBatch.batchReference}, ${openBatch.providerStatus}). Reconcile it before submitting another payroll batch.`, 409, { code: "MONNIFY_DUPLICATE_PAYROLL_BATCH" });
     return tx.companyMonnifyBatch.create({
       data: {
@@ -658,6 +656,10 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
           failureReason: null,
         },
       })));
+      await Promise.all(transactions.filter((transaction) => transaction.bankAccountId).map((transaction) => tx.employeeBankAccount.updateMany({
+        where: { id: transaction.bankAccountId },
+        data: { monnifyBankCode: transaction.bankCode, monnifyVerifiedAt: new Date(), accountName: transaction.accountName },
+      })));
     });
     return {
       id: savedBatch.id,
@@ -678,207 +680,210 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   }
 }
 
+const unwrapMonnifyRows = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  for (const key of ["content", "transactions", "items", "data", "responseBody", "records"]) {
+    if (Array.isArray(payload?.[key])) return payload[key];
+    const nested = payload?.[key];
+    if (nested && typeof nested === "object") {
+      for (const nestedKey of ["content", "transactions", "items", "records"]) if (Array.isArray(nested[nestedKey])) return nested[nestedKey];
+    }
+  }
+  return [];
+};
+
+const transactionReferenceOf = (row) => String(row?.reference ?? row?.transactionReference ?? row?.transactionRef ?? row?.transactionReferenceNo ?? row?.paymentReference ?? "").trim();
+const transactionStatusOf = (row) => String(row?.status ?? row?.transactionStatus ?? row?.paymentStatus ?? "").trim().toUpperCase();
+const finalPaidStatuses = new Set(["SUCCESS", "COMPLETED"]);
+const finalFailedStatuses = new Set(["FAILED", "EXPIRED", "REVERSED"]);
+
 export async function refreshPayrollBatch(companyId, batchId) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
   if (!batch) throw new AppError("Monnify payroll batch not found.", 404);
-  if (!batch.payrollPeriodId) throw new AppError("This Monnify batch is not linked to a payroll period and cannot update employee payroll records.", 409);
-
   const connection = await requiredConnection(companyId);
   assertBatchEnvironment(connection, batch);
-
-  // A failure in one read endpoint should not prevent us from reconciling the
-  // individual transfers returned by the other endpoint. Never infer individual
-  // employee outcomes from aggregate batch counts alone.
-  let summary = null;
-  let summaryError = null;
-  try {
-    summary = await monnifyEndpoints.batchStatus(connection, batch.batchReference);
-  } catch (error) {
-    summaryError = error;
-  }
-
-  let transactionPayload = null;
-  let transactionError = null;
-  try {
-    transactionPayload = await monnifyEndpoints.batchTransactions(connection, batch.batchReference);
-  } catch (error) {
-    transactionError = error;
-  }
-
-  if (!summary && !transactionPayload) {
-    const sourceError = transactionError || summaryError;
-    throw new AppError(
-      `EMS could not retrieve Monnify's batch or individual transaction statuses. ${sourceError?.message || "Check the Monnify connection and try again."}`,
-      sourceError?.status || 502,
-      {
-        code: "MONNIFY_RECONCILIATION_READ_FAILED",
-        details: {
-          batchReference: batch.batchReference,
-          summaryError: summaryError?.message || null,
-          transactionError: transactionError?.message || null,
-          providerCode: sourceError?.details?.providerCode || sourceError?.code || null,
-        },
-      },
-    );
-  }
-
-  const transactionRows = unwrapMonnifyTransactionRows(transactionPayload);
-  const storedMap = normalizeMonnifyTransactionMap(batch.providerResponse);
-  const references = [...new Set(transactionRows.map(monnifyTransactionReference).filter(Boolean))];
-
-  // Keep a database-reference fallback. This covers older batch records where
-  // providerResponse was wrapped differently or the original in-memory map was
-  // not retained, while still requiring the same company, period and batch.
-  const fallbackRecords = references.length
-    ? await prisma.payrollDisbursement.findMany({
-        where: {
-          companyId,
-          periodId: batch.payrollPeriodId,
-          provider: "MONNIFY",
-          providerTransferId: batch.batchReference,
-          externalReference: { in: references },
-        },
-        select: { id: true, externalReference: true },
-      })
-    : [];
-  const fallbackMap = Object.fromEntries(fallbackRecords.map((row) => [row.externalReference, row.id]));
-
-  const summaryStatus = String(summary?.batchStatus || summary?.status || batch.providerStatus).toUpperCase();
+  const [summary, transactionPayload] = await Promise.all([
+    monnifyEndpoints.batchStatus(connection, batch.batchReference),
+    monnifyEndpoints.batchTransactions(connection, batch.batchReference),
+  ]);
+  const transactionRows = unwrapMonnifyRows(transactionPayload);
+  const storedMap = batch.providerResponse?._emsTransactionMap || batch.providerResponse?.providerResponse?._emsTransactionMap || {};
+  const summaryStatus = String(summary.batchStatus || summary.status || batch.providerStatus).toUpperCase();
   const updates = [];
-  const unmatchedReferences = [];
-
-  for (const transaction of transactionRows) {
-    const reference = monnifyTransactionReference(transaction);
-    // Prefer a live database match scoped to this company, payroll period and
-    // batch. The persisted JSON map is only a fallback for older or migrated data.
-    const disbursementId = (reference && fallbackMap[reference]) || (reference && storedMap[reference]);
-    const status = monnifyTransactionStatus(transaction);
-    if (!reference || !disbursementId || !status) {
-      unmatchedReferences.push(reference || "<missing-reference>");
-      continue;
+  if (!transactionRows.length && ["FAILED", "FAILED_ON_ACCOUNTS_VALIDATION"].includes(summaryStatus)) {
+    for (const disbursementId of Object.values(storedMap)) {
+      if (typeof disbursementId !== "string") continue;
+      updates.push({ disbursementId, data: { status: "FAILED", providerStatus: summaryStatus, failureReason: String(summary.responseMessage || `Monnify batch failed: ${summaryStatus}`).slice(0, 500), paidAt: null } });
     }
-
+  }
+  for (const transaction of transactionRows) {
+    const reference = transactionReferenceOf(transaction);
+    const disbursementId = storedMap[reference];
+    const status = transactionStatusOf(transaction);
+    if (!disbursementId || !status) continue;
     const data = {
       providerStatus: status,
       providerResponse: transaction,
-      failureReason: monnifyTransactionFailureReason(transaction, status),
+      failureReason: finalFailedStatuses.has(status) ? String(transaction?.responseMessage || transaction?.narration || `Monnify transfer status: ${status}`).slice(0, 500) : null,
     };
-
-    if (["SUCCESS", "COMPLETED"].includes(status)) {
+    if (finalPaidStatuses.has(status)) {
       data.status = "PAID";
       data.paidAt = new Date();
       data.verifiedAt = new Date();
-    } else if (["FAILED", "EXPIRED", "REVERSED"].includes(status)) {
-      // A reversal is not a successful salary payment. Keep the exact provider
-      // result in providerStatus and show it as failed in the payroll register.
+    } else if (finalFailedStatuses.has(status)) {
       data.status = "FAILED";
       data.paidAt = null;
-      data.verifiedAt = new Date();
     } else {
       data.status = "PROCESSING";
-      data.paidAt = null;
-      data.verifiedAt = null;
     }
-
-    updates.push({ reference, disbursementId, data });
+    updates.push({ disbursementId, data });
   }
 
-  let updatedDisbursementCount = 0;
-  let finalCounts = { paid: 0, failed: 0, processing: 0, pending: 0, total: 0 };
-  let fullyReconciled = false;
-  let effectiveBatchStatus = batch.providerStatus;
   await prisma.$transaction(async (tx) => {
     for (const update of updates) {
-      const result = await tx.payrollDisbursement.updateMany({
-        where: {
-          id: update.disbursementId,
-          companyId,
-          periodId: batch.payrollPeriodId,
-          provider: "MONNIFY",
-          providerTransferId: batch.batchReference,
-        },
-        data: update.data,
-      });
-      updatedDisbursementCount += result.count;
-      if (!result.count) unmatchedReferences.push(update.reference);
+      await tx.payrollDisbursement.updateMany({ where: { id: update.disbursementId, companyId, provider: "MONNIFY" }, data: update.data });
     }
-
-    const all = await tx.payrollDisbursement.findMany({
-      where: { companyId, periodId: batch.payrollPeriodId },
-      select: { status: true },
-    });
-    const batchRows = await tx.payrollDisbursement.findMany({
-      where: { companyId, periodId: batch.payrollPeriodId, provider: "MONNIFY", providerTransferId: batch.batchReference },
-      select: { status: true },
-    });
-    finalCounts = {
-      paid: batchRows.filter((row) => row.status === "PAID").length,
-      failed: batchRows.filter((row) => row.status === "FAILED").length,
-      processing: batchRows.filter((row) => ["PROCESSING", "SUBMITTED", "INITIATED", "UNKNOWN", "REQUIRES_VERIFICATION", "REQUIRES_REVIEW"].includes(row.status)).length,
-      pending: batchRows.filter((row) => row.status === "PENDING").length,
-      total: batchRows.length,
-    };
-    fullyReconciled = isMonnifyBatchFullyReconciled(batch, batchRows);
-    effectiveBatchStatus = fullyReconciled ? "COMPLETED" : (transactionRows.length ? summaryStatus : batch.providerStatus);
-
     await tx.companyMonnifyBatch.update({
       where: { id: batch.id },
       data: {
-        providerStatus: effectiveBatchStatus,
-        providerResponse: {
-          ...(summary ? { summary } : {}),
-          ...(transactionPayload ? { transactions: transactionPayload } : {}),
-          _emsTransactionMap: storedMap,
-          ...(summaryError ? { _summaryReadError: summaryError.message } : {}),
-          ...(transactionError ? { _transactionReadError: transactionError.message } : {}),
-          _emsReconciliation: {
-            expectedTransactions: Number(batch.totalTransactions || 0),
-            matchedTransactions: batchRows.length,
-            paid: finalCounts.paid,
-            failed: finalCounts.failed,
-            fullyReconciled,
-          },
-        },
+        providerStatus: summaryStatus,
+        providerResponse: { summary, transactions: transactionPayload, _emsTransactionMap: storedMap },
         lastCheckedAt: new Date(),
       },
     });
-
+    const all = await tx.payrollDisbursement.findMany({ where: { companyId, periodId: batch.payrollPeriodId }, select: { status: true } });
     if (all.length && all.every((row) => row.status === "PAID")) {
       await tx.payrollPeriod.updateMany({ where: { id: batch.payrollPeriodId, companyId }, data: { status: "PAID" } });
       await tx.payrollItem.updateMany({ where: { companyId, periodId: batch.payrollPeriodId }, data: { status: "PAID" } });
-    } else {
-      // A previously paid period must return to FINALIZED if a later provider
-      // reconciliation reports a failed or reversed transfer.
-      const currentPeriod = await tx.payrollPeriod.findFirst({
-        where: { id: batch.payrollPeriodId, companyId },
-        select: { status: true },
-      });
-      if (currentPeriod?.status === "PAID") {
-        await tx.payrollPeriod.updateMany({ where: { id: batch.payrollPeriodId, companyId }, data: { status: "FINALIZED" } });
-        await tx.payrollItem.updateMany({ where: { companyId, periodId: batch.payrollPeriodId, status: "PAID" }, data: { status: "FINALIZED" } });
-      }
     }
   });
-
-  const warningParts = [];
-  if (summaryError) warningParts.push(`Batch summary unavailable: ${summaryError.message}`);
-  if (transactionError) warningParts.push(`Individual transaction list unavailable: ${transactionError.message}`);
-  if (unmatchedReferences.length) warningParts.push(`${unmatchedReferences.length} provider transaction(s) could not be matched to an EMS payroll record`);
-  if (!transactionRows.length && summary) warningParts.push("Monnify returned the batch summary but no individual transaction rows; employee statuses were not inferred from aggregate counts");
 
   return {
     batchReference: batch.batchReference,
     environment: batch.environment,
-    providerStatus: effectiveBatchStatus,
     summary,
-    reconciledTransactions: updatedDisbursementCount,
-    totalProviderTransactions: transactionRows.length,
-    unmatchedTransactions: [...new Set(unmatchedReferences)],
-    counts: finalCounts,
-    fullyReconciled,
-    warning: warningParts.length ? warningParts.join(". ") : null,
+    transactions: transactionPayload,
+    reconciledTransactions: updates.length,
   };
 }
+
+
+const normalizeSingleTransferResult = (response) => {
+  const status = String(response?.status ?? response?.transactionStatus ?? "PROCESSING").toUpperCase();
+  const paid = finalPaidStatuses.has(status);
+  const failed = finalFailedStatuses.has(status);
+  return {
+    status: paid ? "PAID" : failed ? "FAILED" : "PROCESSING",
+    providerStatus: status,
+    providerTransferId: String(response?.transactionReference ?? response?.transactionId ?? response?.reference ?? "").trim() || null,
+    failureReason: failed ? String(response?.responseMessage ?? response?.transactionDescription ?? response?.narration ?? `Monnify transfer status: ${status}`).slice(0, 500) : null,
+    paidAt: paid ? new Date() : null,
+    verifiedAt: paid || failed ? new Date() : null,
+  };
+};
+
+export async function submitSinglePayrollTransfer(companyId, periodId, disbursementId, userId) {
+  const connection = await requiredConnection(companyId);
+  const row = await prisma.payrollDisbursement.findFirst({
+    where: { id: disbursementId, companyId, periodId },
+    include: { employee: { select: { id: true, firstName: true, middleName: true, lastName: true, employeeNumber: true, bankAccounts: { where: { isActive: true }, orderBy: [{ isPrimary: "desc" }, { updatedAt: "desc" }], take: 1 } } } },
+  });
+  if (!row) throw new AppError("Payroll disbursement was not found.", 404);
+  if (row.status !== "FAILED" || row.provider !== "MONNIFY") {
+    throw new AppError("Single-transfer retry is available only for a Monnify payroll transfer confirmed as FAILED. Reconcile processing transfers before retrying.", 409, { code: "MONNIFY_SINGLE_RETRY_NOT_ALLOWED" });
+  }
+  if (!finalFailedStatuses.has(String(row.providerStatus || "").toUpperCase())) {
+    throw new AppError("Monnify has not confirmed a final failure for this transfer. Refresh its original reference before retrying.", 409, { code: "MONNIFY_SINGLE_RETRY_UNVERIFIED" });
+  }
+  const account = row.employee?.bankAccounts?.[0];
+  if (!account) throw new AppError("This employee has no active bank account. Update the employee bank details first.", 422);
+  const banks = normalizeMonnifyBanks(await monnifyEndpoints.banks(connection));
+  const bank = resolveBatchBank({ bankName: account.bankName, bankCode: account.monnifyBankCode, employeeName: employeeDisplayName(row.employee) }, banks, 0);
+  const verified = await monnifyEndpoints.validateAccount(connection, account.accountNumber, bank.code);
+  const verifiedName = String(verified?.accountName ?? verified?.account_name ?? verified?.name ?? "").trim();
+  const verifiedNumber = String(verified?.accountNumber ?? verified?.account_number ?? account.accountNumber).trim();
+  const verifiedCode = String(verified?.bankCode ?? verified?.bank_code ?? bank.code).trim();
+  if (verifiedName.length < 2 || verifiedNumber !== account.accountNumber || verifiedCode !== bank.code || !accountNamesCompatible(account.accountName, verifiedName)) {
+    throw new AppError("The employee's saved bank details do not match Monnify's current Name Enquiry result. Update and verify the bank account before retrying.", 422, { code: "MONNIFY_SINGLE_BENEFICIARY_MISMATCH" });
+  }
+  // Self-heal legacy records that stored a NIP/other-provider code in the Monnify
+  // field. Persist only the code returned by Monnify's current bank directory.
+  if (String(account.monnifyBankCode || "") !== bank.code) {
+    await prisma.employeeBankAccount.updateMany({ where: { id: account.id }, data: { monnifyBankCode: bank.code, monnifyVerifiedAt: new Date(), accountName: verifiedName } });
+  }
+  const reference = `EMS-SINGLE-${crypto.randomUUID()}`;
+  const claim = await prisma.payrollDisbursement.updateMany({
+    where: { id: row.id, companyId, status: "FAILED", provider: "MONNIFY", providerStatus: { in: [...finalFailedStatuses] } },
+    data: { status: "PROCESSING", providerStatus: "SUBMITTING_SINGLE", externalReference: reference, providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING" }, failureReason: null, updatedBy: userId },
+  });
+  if (claim.count !== 1) throw new AppError("This failed payment is already being retried or its status changed. Refresh the payment before trying again.", 409, { code: "MONNIFY_SINGLE_RETRY_ALREADY_CLAIMED" });
+  let response;
+  try {
+    response = await monnifyEndpoints.submitSingle(connection, {
+      amount: Number(row.amount), reference,
+      narration: `Salary payment - ${employeeDisplayName(row.employee)}`.slice(0, 80),
+      destinationBankCode: bank.code,
+      destinationAccountNumber: account.accountNumber,
+      destinationAccountName: verifiedName,
+      currency: "NGN",
+      sourceAccountNumber: connection.sourceAccountNumber,
+    });
+  } catch (error) {
+    await prisma.payrollDisbursement.updateMany({ where: { id: row.id, companyId, externalReference: reference }, data: { status: "REQUIRES_REVIEW", providerStatus: "SUBMISSION_UNKNOWN", failureReason: "Monnify submission outcome is uncertain. Check this exact reference in Monnify before attempting another transfer.", providerResponse: { _emsSingleTransfer: true, error: String(error?.message || "Unknown provider error") } } });
+    throw new AppError("Monnify's response was not conclusive. Do not retry this salary until you check the saved reference in Monnify.", 502, { code: "MONNIFY_SINGLE_SUBMISSION_UNKNOWN", details: { reference } });
+  }
+  const result = normalizeSingleTransferResult(response);
+  await prisma.payrollDisbursement.update({ where: { id: row.id }, data: {
+    ...result, provider: "MONNIFY", providerResponse: { ...response, _emsSingleTransfer: true },
+    externalReference: reference, updatedBy: userId,
+    failureReason: result.failureReason,
+  } });
+  if (result.status === "PAID") {
+    const remaining = await prisma.payrollDisbursement.count({ where: { companyId, periodId, status: { not: "PAID" } } });
+    if (remaining === 0) {
+      await prisma.payrollPeriod.updateMany({ where: { id: periodId, companyId }, data: { status: "PAID" } });
+      await prisma.payrollItem.updateMany({ where: { companyId, periodId }, data: { status: "PAID" } });
+    }
+  }
+  return { disbursementId: row.id, reference, ...result, requiresOtp: result.providerStatus === "PENDING_AUTHORIZATION" };
+}
+
+export async function authorizeSinglePayrollTransfer(companyId, disbursementId, otp) {
+  const row = await prisma.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId, provider: "MONNIFY" } });
+  if (!row || !row.externalReference) throw new AppError("Monnify single transfer reference was not found.", 404);
+  if (!/^\d{4,10}$/.test(String(otp || ""))) throw new AppError("Enter a valid OTP.", 400);
+  if (String(row.providerStatus).toUpperCase() !== "PENDING_AUTHORIZATION") throw new AppError("This transfer is not waiting for OTP authorization.", 409);
+  const connection = await requiredConnection(companyId);
+  const response = await monnifyEndpoints.authorizeSingle(connection, row.externalReference, String(otp || "").trim());
+  const result = normalizeSingleTransferResult(response);
+  await prisma.payrollDisbursement.update({ where: { id: row.id }, data: { ...result, providerResponse: { ...response, _emsSingleTransfer: true } } });
+  if (result.status === "PAID") {
+    const remaining = await prisma.payrollDisbursement.count({ where: { companyId, periodId: row.periodId, status: { not: "PAID" } } });
+    if (remaining === 0) {
+      await prisma.payrollPeriod.updateMany({ where: { id: row.periodId, companyId }, data: { status: "PAID" } });
+      await prisma.payrollItem.updateMany({ where: { companyId, periodId: row.periodId }, data: { status: "PAID" } });
+    }
+  }
+  return { disbursementId: row.id, reference: row.externalReference, ...result };
+}
+
+export async function refreshSinglePayrollTransfer(companyId, disbursementId) {
+  const row = await prisma.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId, provider: "MONNIFY" } });
+  if (!row || !row.externalReference) throw new AppError("Monnify single transfer reference was not found.", 404);
+  const connection = await requiredConnection(companyId);
+  const response = await monnifyEndpoints.singleStatus(connection, row.externalReference);
+  const result = normalizeSingleTransferResult(response);
+  await prisma.payrollDisbursement.update({ where: { id: row.id }, data: { ...result, providerResponse: { ...response, _emsSingleTransfer: true } } });
+  if (result.status === "PAID") {
+    const remaining = await prisma.payrollDisbursement.count({ where: { companyId: row.companyId, periodId: row.periodId, status: { not: "PAID" } } });
+    if (remaining === 0) {
+      await prisma.payrollPeriod.updateMany({ where: { id: row.periodId, companyId }, data: { status: "PAID" } });
+      await prisma.payrollItem.updateMany({ where: { companyId, periodId: row.periodId }, data: { status: "PAID" } });
+    }
+  }
+  return { disbursementId: row.id, reference: row.externalReference, ...result };
+}
+
 
 export async function authorizeBatch(companyId, batchId, otp) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
@@ -943,7 +948,7 @@ export async function refreshBatch(companyId, batchId) {
 }
 
 export async function listBatches(companyId) {
-  const batches = await prisma.companyMonnifyBatch.findMany({
+  return prisma.companyMonnifyBatch.findMany({
     where: { companyId },
     orderBy: { createdAt: "desc" },
     take: 50,
@@ -959,39 +964,5 @@ export async function listBatches(companyId) {
       lastCheckedAt: true,
       createdAt: true,
     },
-  });
-  if (!batches.length) return [];
-
-  // Attach real per-transfer counts to each batch. The batch-level provider
-  // status alone cannot tell finance which employees were paid or failed.
-  const references = batches.map((batch) => batch.batchReference);
-  const rows = await prisma.payrollDisbursement.findMany({
-    where: { companyId, provider: "MONNIFY", providerTransferId: { in: references } },
-    select: { providerTransferId: true, status: true },
-  });
-  const countsByBatch = new Map();
-  for (const row of rows) {
-    if (!row.providerTransferId) continue;
-    const counts = countsByBatch.get(row.providerTransferId) || { paid: 0, failed: 0, processing: 0, pending: 0, total: 0 };
-    counts.total += 1;
-    if (row.status === "PAID") counts.paid += 1;
-    else if (["FAILED", "REVERSED"].includes(row.status)) counts.failed += 1;
-    else if (["PROCESSING", "SUBMITTED", "INITIATED", "UNKNOWN", "REQUIRES_VERIFICATION", "REQUIRES_REVIEW"].includes(row.status)) counts.processing += 1;
-    else counts.pending += 1;
-    countsByBatch.set(row.providerTransferId, counts);
-  }
-  return batches.map((batch) => {
-    const counts = countsByBatch.get(batch.batchReference) || { paid: 0, failed: 0, processing: 0, pending: 0, total: 0 };
-    const fullyReconciled = Number(batch.totalTransactions || 0) > 0
-      && counts.total === Number(batch.totalTransactions)
-      && counts.paid + counts.failed === Number(batch.totalTransactions)
-      && counts.processing === 0
-      && counts.pending === 0;
-    return {
-      ...batch,
-      providerStatus: fullyReconciled ? "COMPLETED" : batch.providerStatus,
-      fullyReconciled,
-      counts,
-    };
   });
 }

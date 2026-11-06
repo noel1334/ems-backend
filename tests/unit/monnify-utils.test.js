@@ -26,6 +26,12 @@ describe("Monnify beneficiary safeguards", () => {
     ]);
   });
 
+  it("preserves Moniepoint's Monnify directory code instead of substituting its NIP code", () => {
+    const banks = normalizeMonnifyBanks([{ name: "Moniepoint Microfinance Bank", code: "50515" }]);
+    expect(banks).toEqual([{ name: "Moniepoint Microfinance Bank", code: "50515" }]);
+    expect(banks[0].code).not.toBe("090405");
+  });
+
   it("does not describe Monnify code 99 as a confirmed invalid beneficiary", () => {
     const message = monnifyFailureMessage("99", "Invalid account details supplied");
     expect(message).toMatch(/unexpected processing error/i);
