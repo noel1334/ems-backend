@@ -37,7 +37,9 @@ export async function companyPaystackRequest(connection, method, path, { data, p
 
 export const companyPaystackEndpoints = {
   balance: (connection) => companyPaystackRequest(connection, "GET", "/balance", { params: { currency: "NGN" } }),
-  banks: (connection) => companyPaystackRequest(connection, "GET", "/bank", { params: { currency: "NGN", perPage: 200 } }),
+  banks: (connection) => companyPaystackRequest(connection, "GET", "/bank", { params: { country: "nigeria", currency: "NGN", perPage: 100 } }),
+  initializeTransaction: (connection, payload) => companyPaystackRequest(connection, "POST", "/transaction/initialize", { data: { ...payload, metadata: JSON.stringify(payload.metadata || {}) } }),
+  verifyTransaction: (connection, reference) => companyPaystackRequest(connection, "GET", `/transaction/verify/${encodeURIComponent(reference)}`),
   resolveAccount: (connection, accountNumber, bankCode) => companyPaystackRequest(connection, "GET", "/bank/resolve", { params: { account_number: accountNumber, bank_code: bankCode } }),
   createRecipient: (connection, payload) => companyPaystackRequest(connection, "POST", "/transferrecipient", { data: payload }),
   initiateSingle: (connection, payload) => companyPaystackRequest(connection, "POST", "/transfer", { data: payload }),

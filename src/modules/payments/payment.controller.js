@@ -28,9 +28,12 @@ export const paystackWebhook = async (req, res) => {
   const payload = JSON.parse(rawBody.toString("utf8"));
   // Tenant-owned transfers use the secret key saved for the company that owns the transfer.
   // Existing platform Paystack wallet/payment webhooks continue through the original handler.
-  const companyResult = await processCompanyPaystackWebhook(rawBody, req.headers["x-paystack-signature"], payload);
+  const signature = req.headers["x-paystack-signature"];
+  const walletResult = await service.processCompanyPaystackWalletWebhook(rawBody, signature, payload);
+  if (walletResult?.matched) return res.json({ success: true, data: walletResult });
+  const companyResult = await processCompanyPaystackWebhook(rawBody, signature, payload);
   if (companyResult?.matched) return res.json({ success: true, data: companyResult });
-  return res.json(await service.processPaystackWebhook(rawBody, req.headers["x-paystack-signature"], payload));
+  return res.json(await service.processPaystackWebhook(rawBody, signature, payload));
 };
 
 export const flutterwaveWebhook = async (req, res) =>

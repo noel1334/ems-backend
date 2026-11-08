@@ -10,3 +10,7 @@ export const preview = async (req, res) => ok(res, await service.previewPayroll(
 export const submit = async (req, res) => ok(res, await service.submitPayroll(req.user.companyId, req.body?.payrollPeriodId, req.user.userId, req.body?.previewFingerprint), 202);
 export const authorize = async (req, res) => ok(res, await service.authorizeSingleTransfer(req.user.companyId, req.params.id, req.body?.otp));
 export const refresh = async (req, res) => ok(res, await service.refreshBatch(req.user.companyId, req.params.id));
+
+export const singlePayrollSubmit = async (req, res) => ok(res, await service.submitSinglePayrollTransfer(req.user.companyId, req.params.periodId, req.params.disbursementId, req.user.userId), 202);
+export const singlePayrollAuthorize = async (req, res) => ok(res, await service.authorizeSinglePayrollTransfer(req.user.companyId, req.params.disbursementId, req.body?.otp));
+export const singlePayrollRefresh = async (req, res) => ok(res, await service.refreshSinglePayrollTransfer(req.user.companyId, req.params.disbursementId));

@@ -9,11 +9,14 @@ import { mapPayment, mapPayments } from "./payment.mapper.js";
 import { PAYMENT_PROVIDER, PAYMENT_STATUS, PAYMENT_PURPOSE, PAYMENT_CURRENCY } from "./payment.constants.js";
 import { creditWalletInTransaction } from "../wallet/wallet.service.js";
 import { processPayrollPayoutWebhook } from "../payroll/payroll.payout.service.js";
+import { companyPaystackEndpoints } from "./company-paystack/company-paystack.client.js";
+import { decryptCompanyPaystackSecret } from "./company-paystack/company-paystack.crypto.js";
 
 const money = (value) => new Decimal(value).toDecimalPlaces(2);
 const generateReference = () => `PAY-${Date.now()}-${crypto.randomBytes(8).toString("hex").toUpperCase()}`;
-const paymentFingerprint = (input) => JSON.stringify({
+const paymentFingerprint = (input, gatewayOwner) => JSON.stringify({
   provider: input.provider,
+  gatewayOwner,
   email: String(input.email || "").trim().toLowerCase(),
   amount: money(input.amount).toFixed(2),
   callbackUrl: input.callbackUrl || null,
@@ -36,30 +39,53 @@ const assertProviderConfiguration = (provider) => {
 };
 
 export const initializePayment = async (companyId, input) => {
-  assertProviderConfiguration(input.provider);
+  if (!companyId) throw new AppError("A company context is required to fund a company wallet.", 403, { code: "WALLET_COMPANY_CONTEXT_REQUIRED" });
   const company = await repository.findCompanyPaymentConfig(companyId);
   if (!company) throw new AppError("Company not found", 404);
 
   const amount = money(input.amount);
   if (!amount.isFinite() || !amount.isPositive()) throw new AppError("Payment amount must be greater than zero", 400);
 
-  const fingerprint = paymentFingerprint(input);
+  // Company wallet funding must settle to the tenant's own provider account.
+  // Platform credentials are reserved for platform-owned products such as future subscriptions.
+  let companyPaystackConnection = null;
+  let gatewayOwner = "PLATFORM_FLUTTERWAVE_SUBACCOUNT";
+  if (input.provider === PAYMENT_PROVIDER.PAYSTACK) {
+    companyPaystackConnection = await prisma.companyPaystackConnection.findUnique({ where: { companyId } });
+    if (!companyPaystackConnection?.isActive) {
+      throw new AppError("Connect this company's Paystack account in Payroll → Paystack connection before funding its wallet. EMS will not collect company wallet funds into the platform's Paystack account.", 409, { code: "PAYSTACK_COMPANY_WALLET_CONNECTION_REQUIRED" });
+    }
+    gatewayOwner = "COMPANY_PAYSTACK";
+  } else if (input.provider === PAYMENT_PROVIDER.FLUTTERWAVE) {
+    assertProviderConfiguration(PAYMENT_PROVIDER.FLUTTERWAVE);
+    if (!company.flutterwaveSubaccountId) {
+      throw new AppError("This company does not have a Flutterwave subaccount configured. Wallet funding is blocked rather than settling into the EMS platform account.", 409, { code: "FLUTTERWAVE_COMPANY_SUBACCOUNT_REQUIRED" });
+    }
+  } else {
+    throw new AppError("Unsupported payment provider", 400, { code: "UNSUPPORTED_PAYMENT_PROVIDER" });
+  }
+
+  const fingerprint = paymentFingerprint(input, gatewayOwner);
   if (input.idempotencyKey) {
     const existing = await repository.findPaymentByIdempotencyKey(companyId, input.idempotencyKey);
     if (existing) {
       const existingFingerprint = existing.metadata?.__idempotencyFingerprint;
       if (existingFingerprint && existingFingerprint !== fingerprint) {
-        throw new AppError("Idempotency key was already used with different payment details", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
+        throw new AppError("Idempotency key was already used with different payment details or a different settlement account", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
       }
       return { payment: mapPayment(existing), providerResponse: existing.metadata?.providerInitialization || null, idempotent: true };
     }
   }
 
-  if (!amount.isPositive()) throw new AppError("Payment amount must be greater than zero", 400);
-
   const reference = generateReference();
   const callbackBaseUrl = (process.env.APP_FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
   const callbackUrl = input.callbackUrl || `${callbackBaseUrl}/app/wallet`;
+  const paymentMetadata = {
+    ...(input.metadata || {}),
+    __idempotencyFingerprint: fingerprint,
+    __gatewayOwner: gatewayOwner,
+    __companyId: companyId,
+  };
 
   let payment;
   try {
@@ -74,7 +100,7 @@ export const initializePayment = async (companyId, input) => {
       idempotencyKey: input.idempotencyKey || null,
       email: input.email,
       callbackUrl,
-      metadata: { ...(input.metadata || {}), __idempotencyFingerprint: fingerprint },
+      metadata: paymentMetadata,
     });
   } catch (error) {
     if (error?.code === "P2002" && input.idempotencyKey) {
@@ -82,7 +108,7 @@ export const initializePayment = async (companyId, input) => {
       if (existing) {
         const existingFingerprint = existing.metadata?.__idempotencyFingerprint;
         if (existingFingerprint && existingFingerprint !== fingerprint) {
-          throw new AppError("Idempotency key was already used with different payment details", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
+          throw new AppError("Idempotency key was already used with different payment details or a different settlement account", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
         }
         return { payment: mapPayment(existing), providerResponse: existing.metadata?.providerInitialization || null, idempotent: true };
       }
@@ -91,16 +117,28 @@ export const initializePayment = async (companyId, input) => {
   }
 
   try {
-    const providerApi = getProviderService(input.provider);
-    const providerResponse = await providerApi.initialize({
-      email: input.email,
-      amount: input.provider === PAYMENT_PROVIDER.PAYSTACK ? amount.mul(100).toFixed(0) : amount.toFixed(2),
-      reference,
-      callbackUrl,
-      currency: PAYMENT_CURRENCY,
-      subaccount: input.provider === PAYMENT_PROVIDER.PAYSTACK ? company.paystackSubaccountId : undefined,
-      metadata: { ...(input.metadata || {}), companyId, paymentId: payment.id, purpose: PAYMENT_PURPOSE.WALLET_FUNDING },
-    });
+    let providerResponse;
+    if (input.provider === PAYMENT_PROVIDER.PAYSTACK) {
+      providerResponse = await companyPaystackEndpoints.initializeTransaction(companyPaystackConnection, {
+        email: input.email,
+        amount: amount.mul(100).toFixed(0),
+        reference,
+        callback_url: callbackUrl,
+        currency: PAYMENT_CURRENCY,
+        metadata: { ...(input.metadata || {}), companyId, paymentId: payment.id, purpose: PAYMENT_PURPOSE.WALLET_FUNDING },
+      });
+    } else {
+      const providerApi = getProviderService(input.provider);
+      providerResponse = await providerApi.initialize({
+        email: input.email,
+        amount: amount.toFixed(2),
+        reference,
+        callbackUrl,
+        currency: PAYMENT_CURRENCY,
+        subaccountId: company.flutterwaveSubaccountId,
+        metadata: { ...(input.metadata || {}), companyId, paymentId: payment.id, purpose: PAYMENT_PURPOSE.WALLET_FUNDING },
+      });
+    }
 
     const providerReference = input.provider === PAYMENT_PROVIDER.FLUTTERWAVE
       ? providerResponse?.data?.id?.toString() || null
@@ -109,7 +147,7 @@ export const initializePayment = async (companyId, input) => {
     const updated = await repository.updatePayment(payment.id, { providerReference, metadata: { ...(payment.metadata || {}), providerInitialization: providerResponse } });
     return { payment: mapPayment(updated), providerResponse };
   } catch (error) {
-    await repository.updatePayment(payment.id, { status: PAYMENT_STATUS.FAILED });
+    await repository.updatePayment(payment.id, { status: PAYMENT_STATUS.FAILED, metadata: { ...(payment.metadata || {}), initializationError: String(error?.message || "Provider initialization failed").slice(0, 500) } });
     throw error;
   }
 };
@@ -157,6 +195,10 @@ const completeSuccessfulPayment = async (paymentId, providerReference, providerR
       }
     }
 
+    if (payment.purpose !== PAYMENT_PURPOSE.WALLET_FUNDING) {
+      throw new AppError("Only WALLET_FUNDING payments can credit a company wallet. Subscription payments must use the platform subscription ledger.", 409, { code: "PAYMENT_PURPOSE_CANNOT_CREDIT_WALLET" });
+    }
+
     await creditWalletInTransaction(tx, payment.companyId, {
       amount: payment.amount,
       reference: `PAYMENT-${payment.reference}`,
@@ -177,17 +219,21 @@ export const verifyPayment = async (companyId, reference, providerTransactionId)
   const payment = await repository.findPaymentByReference(companyId, reference);
   if (!payment) throw new AppError("Payment not found", 404);
   if (payment.status === PAYMENT_STATUS.SUCCESSFUL) return mapPayment(payment);
+  if (payment.purpose !== PAYMENT_PURPOSE.WALLET_FUNDING) throw new AppError("This payment purpose is not handled by company wallet verification.", 409, { code: "PAYMENT_PURPOSE_NOT_WALLET_FUNDING" });
 
-  const providerApi = getProviderService(payment.provider);
   let providerResponse;
-  if (payment.provider === PAYMENT_PROVIDER.PAYSTACK) {
-    providerResponse = await providerApi.verify(payment.reference);
+  if (payment.provider === PAYMENT_PROVIDER.PAYSTACK && payment.metadata?.__gatewayOwner === "COMPANY_PAYSTACK") {
+    const connection = await prisma.companyPaystackConnection.findUnique({ where: { companyId: payment.companyId } });
+    if (!connection?.isActive) throw new AppError("The company's Paystack connection is unavailable. Restore the same provider credentials to verify this pending wallet payment.", 409, { code: "PAYSTACK_COMPANY_CONNECTION_REQUIRED_FOR_VERIFY" });
+    providerResponse = await companyPaystackEndpoints.verifyTransaction(connection, payment.reference);
+  } else if (payment.provider === PAYMENT_PROVIDER.PAYSTACK) {
+    // Backward compatibility: verify already-created legacy platform-collected payments
+    // with the platform key. New company wallet funding never takes this route.
+    providerResponse = await paystack.verify(payment.reference);
   } else {
     const transactionId = providerTransactionId || payment.providerReference;
     if (!transactionId) throw new AppError("Flutterwave transaction ID is not available. Return from checkout and try verification again.", 409);
-    providerResponse = await providerApi.verify(transactionId);
-    // Never trust a transaction ID supplied by the browser unless provider verification
-    // confirms that the verified transaction belongs to this EMS payment reference.
+    providerResponse = await flutterwave.verify(transactionId);
     if (providerResponse?.data?.tx_ref !== payment.reference) {
       throw new AppError("Payment reference mismatch", 400, { code: "PAYMENT_REFERENCE_MISMATCH" });
     }
@@ -198,10 +244,7 @@ export const verifyPayment = async (companyId, reference, providerTransactionId)
     : providerResponse?.status === "success" && providerResponse?.data?.status === "successful";
 
   if (!successful) {
-    const providerStatus = payment.provider === PAYMENT_PROVIDER.PAYSTACK
-      ? providerResponse?.data?.status
-      : providerResponse?.data?.status;
-    // A pending/abandoned checkout is not proof of failure. Keep it retryable.
+    const providerStatus = providerResponse?.data?.status;
     const terminalFailure = ["failed", "abandoned", "reversed"].includes(String(providerStatus || "").toLowerCase());
     const updated = await repository.updatePayment(payment.id, {
       ...(terminalFailure ? { status: PAYMENT_STATUS.FAILED } : {}),
@@ -240,6 +283,34 @@ export const getPayment = async (companyId, id) => {
   const payment = await repository.findPaymentById(companyId, id);
   if (!payment) throw new AppError("Payment not found", 404);
   return mapPayment(payment);
+};
+
+export const processCompanyPaystackWalletWebhook = async (rawBody, signature, payload) => {
+  if (String(payload?.event || "").toLowerCase() !== "charge.success") return { matched: false };
+  const reference = payload?.data?.reference;
+  if (!reference) return { matched: false };
+  const payment = await repository.findPaymentByReferenceFromAnyCompany(reference);
+  if (!payment || payment.provider !== PAYMENT_PROVIDER.PAYSTACK || payment.metadata?.__gatewayOwner !== "COMPANY_PAYSTACK") return { matched: false };
+  if (payment.purpose !== PAYMENT_PURPOSE.WALLET_FUNDING) return { matched: true, received: true, processed: false };
+
+  const connection = await prisma.companyPaystackConnection.findUnique({ where: { companyId: payment.companyId } });
+  if (!connection?.isActive) throw new AppError("The company Paystack connection is missing; cannot authenticate its wallet-funding webhook.", 401, { code: "PAYSTACK_COMPANY_WEBHOOK_CONNECTION_MISSING" });
+  const key = decryptCompanyPaystackSecret(connection.secretKeyCiphertext);
+  const expected = crypto.createHmac("sha512", key).update(rawBody).digest("hex");
+  const receivedBuffer = Buffer.from(String(signature || ""));
+  const expectedBuffer = Buffer.from(expected);
+  if (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) {
+    throw new AppError("Invalid company Paystack wallet webhook signature.", 401, { code: "PAYSTACK_COMPANY_WEBHOOK_SIGNATURE_INVALID" });
+  }
+  if (payment.status === PAYMENT_STATUS.SUCCESSFUL) return { matched: true, received: true, processed: false, duplicate: true };
+
+  const verified = await companyPaystackEndpoints.verifyTransaction(connection, reference);
+  if (verified?.status !== true || verified?.data?.status !== "success") return { matched: true, received: true, processed: false };
+  if (String(verified?.data?.reference || "") !== String(payment.reference)) {
+    throw new AppError("Verified company Paystack charge reference did not match the saved wallet funding reference.", 409, { code: "PAYSTACK_COMPANY_PAYMENT_REFERENCE_MISMATCH" });
+  }
+  const updated = await completeSuccessfulPayment(payment.id, verified.data.id?.toString(), verified);
+  return { matched: true, received: true, processed: true, payment: mapPayment(updated) };
 };
 
 export const processPaystackWebhook = async (rawBody, signature, payload) => {

@@ -24,7 +24,7 @@ const providerRequest = async (provider, method, path, data, params) => {
 };
 
 const fetchPaystackBanks = async () => {
-  const payload = await providerRequest("PAYSTACK", "GET", "/bank", null, { country: "nigeria", currency: "NGN", perPage: 200 });
+  const payload = await providerRequest("PAYSTACK", "GET", "/bank", null, { country: "nigeria", currency: "NGN", perPage: 100 });
   if (payload?.status !== true || !Array.isArray(payload?.data)) throw new AppError("Paystack returned an invalid bank directory.", 502, "BANK_DIRECTORY_INVALID_RESPONSE");
   return payload.data.filter((bank) => bank?.name && bank?.code != null).map((bank) => ({ bankName: String(bank.name).trim(), paystackBankCode: String(bank.code), flutterwaveBankCode: null }));
 };

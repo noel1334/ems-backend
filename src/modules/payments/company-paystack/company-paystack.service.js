@@ -46,23 +46,41 @@ export async function getConnection(companyId) {
   return safeConnection(await prisma.companyPaystackConnection.findUnique({ where: { companyId } }));
 }
 
+async function assertNoUnresolvedPaystackOperations(companyId) {
+  const [openBatches, singleCandidates, pendingWalletPayments] = await Promise.all([
+    prisma.companyPaystackBatch.count({ where: { companyId, providerStatus: { in: ["SUBMITTING", "SUBMISSION_UNKNOWN", "PENDING_AUTHORIZATION", "AWAITING_VERIFICATION", "PROCESSING", "PENDING"] } } }),
+    prisma.payrollDisbursement.findMany({
+      where: { companyId, provider: "PAYSTACK_COMPANY", status: { in: ["PROCESSING", "REQUIRES_REVIEW"] } },
+      select: { providerResponse: true },
+    }),
+    prisma.payment.findMany({
+      where: { companyId, provider: "PAYSTACK", purpose: "WALLET_FUNDING", status: "PENDING" },
+      select: { metadata: true },
+    }),
+  ]);
+  const openSingleTransfers = singleCandidates.filter((row) => row.providerResponse?._emsSingleTransfer === true).length;
+  const companyWalletCheckouts = pendingWalletPayments.filter((row) => row.metadata?.__gatewayOwner === "COMPANY_PAYSTACK").length;
+  if (openBatches || openSingleTransfers || companyWalletCheckouts) {
+    throw new AppError(
+      "This company has unresolved Paystack activity. Verify or reconcile its payroll batches, individual transfers and pending wallet-funding checkout before replacing or removing the secret key.",
+      409,
+      { code: "PAYSTACK_OPEN_OPERATIONS", details: { openBatches, openSingleTransfers, companyWalletCheckouts } },
+    );
+  }
+}
+
 export async function saveConnection(companyId, rawKey) {
   const key = asText(rawKey);
   const environment = environmentOf(key);
   if (!environment || !/^sk_(test|live)_[A-Za-z0-9]+$/.test(key)) throw new AppError("Enter a valid Paystack secret key beginning with sk_test_ or sk_live_. Do not enter a public key.", 400, { code: "PAYSTACK_SECRET_KEY_INVALID" });
-  const current = await prisma.companyPaystackConnection.findUnique({ where: { companyId } });
-  if (current) {
-    const open = await prisma.companyPaystackBatch.count({ where: { companyId, providerStatus: { in: ["SUBMITTING", "SUBMISSION_UNKNOWN", "PENDING_AUTHORIZATION", "AWAITING_VERIFICATION", "PROCESSING", "PENDING"] } } });
-    if (open) throw new AppError("This company has an unresolved Paystack payroll batch. Refresh or reconcile it before replacing its secret key.", 409, { code: "PAYSTACK_OPEN_BATCHES" });
-  }
+  await assertNoUnresolvedPaystackOperations(companyId);
   const data = { secretKeyCiphertext: encryptCompanyPaystackSecret(key), environment, keyLast4: key.slice(-4), isActive: true };
   const row = await prisma.companyPaystackConnection.upsert({ where: { companyId }, create: { companyId, ...data }, update: data });
   return safeConnection(row);
 }
 
 export async function removeConnection(companyId) {
-  const open = await prisma.companyPaystackBatch.count({ where: { companyId, providerStatus: { in: ["SUBMITTING", "SUBMISSION_UNKNOWN", "PENDING_AUTHORIZATION", "AWAITING_VERIFICATION", "PROCESSING", "PENDING"] } } });
-  if (open) throw new AppError("Resolve all pending Paystack batches before disconnecting this company account.", 409, { code: "PAYSTACK_OPEN_BATCHES" });
+  await assertNoUnresolvedPaystackOperations(companyId);
   await prisma.companyPaystackConnection.deleteMany({ where: { companyId } });
   return { connected: false };
 }
@@ -224,7 +242,7 @@ async function updateDisbursement(row, result, reference, environment = "live", 
     provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", externalReference: reference,
     providerTransferId: result?.transfer_code ? String(result.transfer_code) : (result?.id ? String(result.id) : undefined),
     providerStatus, status: confirmedPaid ? "PAID" : confirmedFailed ? "FAILED" : "PROCESSING",
-    providerResponse: result, failureReason: confirmedFailed ? (result?.reason || result?.message || `Paystack transfer status: ${status}`) : null,
+    providerResponse: row?.providerResponse?._emsSingleTransfer ? { ...(result && typeof result === "object" ? result : {}), _emsSingleTransfer: true, attempts: row.providerResponse.attempts || [], attemptNumber: row.providerResponse.attemptNumber } : result, failureReason: confirmedFailed ? (result?.reason || result?.message || `Paystack transfer status: ${status}`) : null,
     paidAt: confirmedPaid ? new Date() : null, verifiedAt: isVerified && (isSuccess || isFailure) ? new Date() : null,
   };
   if (isVerified) return prisma.payrollDisbursement.update({ where: { id: row.id }, data });
@@ -234,22 +252,25 @@ async function updateDisbursement(row, result, reference, environment = "live", 
 }
 
 async function markPayrollPaidIfComplete(companyId, periodId) {
-  const rows = await prisma.payrollDisbursement.findMany({ where: { companyId, periodId }, select: { id: true, status: true, payrollItemId: true } });
-  if (!rows.length) return;
   await prisma.$transaction(async (tx) => {
+    const rows = await tx.payrollDisbursement.findMany({
+      where: { companyId, periodId },
+      select: { id: true, status: true, payrollItemId: true },
+    });
+    if (!rows.length) return;
+
     if (rows.every((row) => row.status === "PAID")) {
       await tx.payrollItem.updateMany({ where: { id: { in: rows.map((row) => row.payrollItemId) }, companyId }, data: { status: "PAID" } });
       await tx.payrollPeriod.updateMany({ where: { id: periodId, companyId }, data: { status: "PAID" } });
       return;
     }
-    // A previously successful transfer can later be reversed. Do not leave the
-    // payroll period marked PAID once any employee's verified transfer is no longer paid.
+
     const period = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId }, select: { status: true } });
     if (period?.status === "PAID") {
       await tx.payrollPeriod.updateMany({ where: { id: periodId, companyId, status: "PAID" }, data: { status: "FINALIZED" } });
       await tx.payrollItem.updateMany({ where: { companyId, periodId, status: "PAID" }, data: { status: "FINALIZED" } });
     }
-  });
+  }, { isolationLevel: "Serializable" });
 }
 
 export async function submitPayroll(companyId, periodId, userId, previewFingerprint) {
@@ -525,6 +546,184 @@ async function recordVerifiedTransfer(companyId, reference, data) {
   await updateDisbursement(row, data, reference, connection?.environment || "live", true);
   await markPayrollPaidIfComplete(companyId, row.periodId);
   return true;
+}
+
+const finalPaystackFailureStatuses = new Set(["FAILED", "REVERSED", "BLOCKED", "REJECTED", "ABANDONED"]);
+
+function singleTransferAudit(row) {
+  const previous = row?.providerResponse && typeof row.providerResponse === "object" ? row.providerResponse : {};
+  const attempts = Array.isArray(previous.attempts) ? [...previous.attempts] : [];
+  if (row?.externalReference) {
+    attempts.push({
+      reference: row.externalReference,
+      status: row.status,
+      providerStatus: row.providerStatus,
+      failureReason: row.failureReason || null,
+      verifiedAt: row.verifiedAt?.toISOString?.() || null,
+      providerResponse: previous,
+    });
+  }
+  return { attempts, attemptNumber: attempts.length + 1 };
+}
+
+export async function submitSinglePayrollTransfer(companyId, periodId, disbursementId, userId) {
+  const connection = await requiredConnection(companyId);
+  const row = await prisma.payrollDisbursement.findFirst({
+    where: { id: disbursementId, companyId, periodId, provider: "PAYSTACK_COMPANY" },
+    include: {
+      employee: {
+        select: {
+          id: true, firstName: true, middleName: true, lastName: true, employeeNumber: true, email: true,
+          bankAccounts: { where: { isActive: true }, orderBy: [{ isPrimary: "desc" }, { updatedAt: "desc" }] },
+        },
+      },
+      payrollItem: { select: { id: true, netSalary: true } },
+    },
+  });
+  if (!row) throw new AppError("Paystack payroll disbursement was not found for this company and payroll period.", 404);
+  if (row.status !== "FAILED") {
+    throw new AppError("Single-transfer retry is available only for an individually confirmed failed Paystack transfer. Processing transfers must be refreshed, not resubmitted.", 409, { code: "PAYSTACK_SINGLE_RETRY_NOT_ALLOWED" });
+  }
+  if (!row.verifiedAt || !finalPaystackFailureStatuses.has(String(row.providerStatus || "").toUpperCase())) {
+    throw new AppError("Paystack has not confirmed a final failure for this transfer. Refresh and reconcile its original reference before retrying.", 409, { code: "PAYSTACK_SINGLE_RETRY_UNVERIFIED" });
+  }
+  const period = await prisma.payrollPeriod.findFirst({ where: { id: periodId, companyId, deletedAt: null }, select: { id: true, status: true } });
+  if (!period || period.status !== "FINALIZED") {
+    throw new AppError("The payroll period must remain finalized before a failed employee payment can be retried.", 409, { code: "PAYSTACK_SINGLE_PERIOD_NOT_FINALIZED" });
+  }
+  if (!row.payrollItem || new Decimal(row.amount).minus(row.payrollItem.netSalary).abs().greaterThan("0.001")) {
+    throw new AppError("The disbursement amount no longer matches the finalized payroll net salary. Do not retry until payroll is reconciled.", 409, { code: "PAYSTACK_SINGLE_AMOUNT_MISMATCH" });
+  }
+
+  const selected = bankForEmployee(row.employee);
+  if (selected.error) throw new AppError(selected.error, 422, { code: "PAYSTACK_SINGLE_BANK_ACCOUNT_REQUIRED" });
+  const account = selected.account;
+  const bankDirectory = await companyPaystackEndpoints.banks(connection);
+  const supported = new Set((bankDirectory.data || []).filter((bank) => bank.active !== false).map((bank) => String(bank.code)));
+  if (!supported.has(selected.bankCode)) {
+    throw new AppError(`Paystack bank code ${selected.bankCode} is not in the current company Paystack bank directory. Update and save the employee's Paystack bank selection before retrying.`, 422, { code: "PAYSTACK_SINGLE_BANK_CODE_UNSUPPORTED" });
+  }
+
+  if (shouldResolvePaystackAccounts(connection.environment)) {
+    const resolved = (await companyPaystackEndpoints.resolveAccount(connection, account.accountNumber, selected.bankCode)).data || {};
+    if (String(resolved.account_number || "") !== String(account.accountNumber) || !namesCompatible(account.accountName, resolved.account_name)) {
+      throw new AppError(`Paystack's current account enquiry does not match the saved employee bank details${resolved.account_name ? ` (provider name: ${resolved.account_name})` : ""}. Update the employee's bank account before retrying.`, 422, { code: "PAYSTACK_SINGLE_BENEFICIARY_MISMATCH" });
+    }
+  }
+
+  const amountKobo = toKobo(row.amount);
+  const estimatedFee = estimatePaystackTransferFee(Number(row.amount));
+  if (connection.environment === "live") {
+    const currentBalance = balanceDetails(await companyPaystackEndpoints.balance(connection));
+    const required = Number(new Decimal(row.amount).plus(estimatedFee).toFixed(2));
+    if (currentBalance.balance < required) {
+      throw new AppError("The company's Paystack balance is insufficient for this salary plus the estimated transfer fee. Fund the company Paystack account and retry.", 409, { code: "PAYSTACK_SINGLE_INSUFFICIENT_BALANCE", balance: currentBalance.balance, required: required.toFixed(2) });
+    }
+  }
+
+  const employee = row.employee || {};
+  const recipientCode = await getOrCreateRecipient(companyId, connection, {
+    disbursementId: row.id,
+    employeeId: row.employeeId,
+    _bankAccountId: account.id,
+    _accountNumber: account.accountNumber,
+    _accountName: account.accountName,
+    _bankCode: selected.bankCode,
+    _email: employee.email || null,
+  });
+  const reference = newReference();
+  const audit = singleTransferAudit(row);
+  const singleMetadata = { _emsSingleTransfer: true, ...audit, status: "SUBMITTING" };
+
+  const claim = await prisma.payrollDisbursement.updateMany({
+    where: {
+      id: row.id, companyId, periodId, provider: "PAYSTACK_COMPANY", status: "FAILED",
+      providerStatus: { in: [...finalPaystackFailureStatuses] }, verifiedAt: { not: null },
+    },
+    data: {
+      status: "PROCESSING", providerStatus: "SUBMITTING_SINGLE", externalReference: reference,
+      providerTransferId: null, providerResponse: singleMetadata, failureReason: null,
+      paidAt: null, verifiedAt: null, updatedBy: userId,
+    },
+  });
+  if (claim.count !== 1) throw new AppError("This failed salary is already being retried or its status changed. Refresh the payroll register before trying again.", 409, { code: "PAYSTACK_SINGLE_RETRY_ALREADY_CLAIMED" });
+
+  let response;
+  try {
+    response = await companyPaystackEndpoints.initiateSingle(connection, {
+      source: "balance", amount: amountKobo, recipient: recipientCode, reference,
+      reason: `EMS salary - ${employeeName(employee)}`.slice(0, 100), currency: "NGN",
+    });
+  } catch (error) {
+    await prisma.payrollDisbursement.updateMany({
+      where: { id: row.id, companyId, externalReference: reference, verifiedAt: null },
+      data: {
+        status: "REQUIRES_REVIEW", providerStatus: "SUBMISSION_UNKNOWN",
+        failureReason: "Paystack's submission response was inconclusive. Verify this exact reference in Paystack before any further retry.",
+        providerResponse: { ...singleMetadata, status: "SUBMISSION_UNKNOWN", submissionError: String(error?.message || "Unknown provider error").slice(0, 500) },
+      },
+    });
+    throw new AppError("Paystack's single-transfer submission outcome is uncertain. Do not submit again; refresh this exact reference first.", 502, { code: "PAYSTACK_SINGLE_SUBMISSION_UNKNOWN", details: { reference } });
+  }
+
+  const data = response?.data || {};
+  const status = paystackStatus(data);
+  const requiresOtp = status === "otp";
+  const storedProviderStatus = requiresOtp ? "PENDING_AUTHORIZATION" : status === "success" ? "AWAITING_VERIFICATION" : status.toUpperCase();
+  const stored = await prisma.payrollDisbursement.updateMany({
+    where: { id: row.id, companyId, externalReference: reference, verifiedAt: null },
+    data: {
+      status: "PROCESSING", providerStatus: storedProviderStatus,
+      providerTransferId: data?.transfer_code ? String(data.transfer_code) : (data?.id ? String(data.id) : null),
+      providerResponse: { ...data, _emsSingleTransfer: true, ...audit, status: storedProviderStatus },
+      failureReason: null,
+    },
+  });
+  if (stored.count !== 1) throw new AppError("Paystack transfer was submitted but the local payment record changed concurrently. Reconcile the saved Paystack reference before taking any further action.", 409, { code: "PAYSTACK_SINGLE_LOCAL_UPDATE_CONFLICT", details: { reference } });
+
+  return {
+    disbursementId: row.id, reference, status: "PROCESSING", providerStatus: storedProviderStatus,
+    requiresOtp, finalStatusConfirmed: false,
+    message: requiresOtp
+      ? "Paystack requires an OTP to authorize this transfer. Authorization does not confirm employee credit; verify the final transfer status afterward."
+      : connection.environment === "live"
+        ? "Paystack accepted the transfer request. EMS will mark the salary paid only after a matching final success is verified by the API or webhook."
+        : "Paystack accepted this TEST-mode transfer. TEST mode is simulated and does not mean real salary money was sent.",
+  };
+}
+
+export async function authorizeSinglePayrollTransfer(companyId, disbursementId, otp) {
+  const row = await prisma.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId, provider: "PAYSTACK_COMPANY" } });
+  if (!row || !row.externalReference || !row.providerResponse?._emsSingleTransfer) throw new AppError("Paystack individual transfer reference was not found.", 404);
+  if (String(row.providerStatus || "").toUpperCase() !== "PENDING_AUTHORIZATION") throw new AppError("This individual Paystack transfer is not waiting for OTP authorization.", 409);
+  if (!/^\d{4,10}$/.test(String(otp || ""))) throw new AppError("Enter the OTP sent by Paystack.", 400);
+  const transferCode = row.providerResponse?.transfer_code || row.providerTransferId;
+  if (!transferCode) throw new AppError("Paystack transfer code is missing. Refresh or reconcile this reference before continuing.", 409);
+  const connection = await requiredConnection(companyId);
+  const response = await companyPaystackEndpoints.finalizeTransfer(connection, String(transferCode), String(otp).trim());
+  const data = response?.data || {};
+  const status = paystackStatus(data);
+  const providerStatus = status === "success" ? "AWAITING_VERIFICATION" : status.toUpperCase();
+  await prisma.payrollDisbursement.updateMany({
+    where: { id: row.id, companyId, externalReference: row.externalReference, status: { in: ["PROCESSING", "REQUIRES_REVIEW"] }, verifiedAt: null },
+    data: { status: "PROCESSING", providerStatus, providerResponse: { ...data, _emsSingleTransfer: true, ...(row.providerResponse?.attempts ? { attempts: row.providerResponse.attempts } : {}), attemptNumber: row.providerResponse?.attemptNumber }, providerTransferId: data?.transfer_code ? String(data.transfer_code) : row.providerTransferId },
+  });
+  return { disbursementId: row.id, reference: row.externalReference, status: "PROCESSING", providerStatus, authorizationAccepted: true, finalStatusConfirmed: false, message: "Paystack accepted the OTP. Refresh the transfer or wait for the verified transfer webhook before treating the employee as paid." };
+}
+
+export async function refreshSinglePayrollTransfer(companyId, disbursementId) {
+  const row = await prisma.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId, provider: "PAYSTACK_COMPANY" } });
+  if (!row || !row.externalReference || !row.providerResponse?._emsSingleTransfer) throw new AppError("Paystack individual transfer reference was not found.", 404);
+  if (!["PROCESSING", "REQUIRES_REVIEW"].includes(row.status)) throw new AppError("Only an in-flight or review-required Paystack individual transfer can be refreshed.", 409);
+  const connection = await requiredConnection(companyId);
+  const response = await companyPaystackEndpoints.verifyTransfer(connection, row.externalReference);
+  const data = response?.data || {};
+  if (String(data.reference || "") !== String(row.externalReference) || String(data.currency || "").toUpperCase() !== "NGN" || Number(data.amount) !== toKobo(row.amount)) {
+    throw new AppError("Paystack verification did not match this employee's saved transfer reference, NGN currency and exact salary amount. No payment status was changed.", 409, { code: "PAYSTACK_SINGLE_VERIFY_MISMATCH" });
+  }
+  await recordVerifiedTransfer(companyId, row.externalReference, data);
+  const updated = await prisma.payrollDisbursement.findUnique({ where: { id: row.id }, select: { status: true, providerStatus: true, failureReason: true, verifiedAt: true } });
+  return { disbursementId: row.id, reference: row.externalReference, ...updated, finalStatusConfirmed: Boolean(updated?.verifiedAt) };
 }
 
 export async function refreshBatch(companyId, batchId) {

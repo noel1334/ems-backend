@@ -18,7 +18,7 @@ const providerError = (error) => new AppError(
   { code: "FLUTTERWAVE_ERROR" }
 );
 
-export const initializeFlutterwaveTransaction = async ({ email, amount, reference, callbackUrl, metadata, currency = "NGN" }) => {
+export const initializeFlutterwaveTransaction = async ({ email, amount, reference, callbackUrl, metadata, currency = "NGN", subaccountId }) => {
   try {
     const response = await client.post("/payments", {
       tx_ref: reference,
@@ -27,6 +27,7 @@ export const initializeFlutterwaveTransaction = async ({ email, amount, referenc
       redirect_url: callbackUrl,
       customer: { email },
       meta: metadata,
+      ...(subaccountId ? { subaccounts: [{ id: subaccountId, transaction_charge_type: "flat", transaction_charge: 0 }] } : {}),
     });
     return response.data;
   } catch (error) {
