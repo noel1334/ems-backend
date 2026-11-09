@@ -196,7 +196,7 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
   let walletBalance = new Decimal(0);
   try {
     const wallet = await getWallet(companyId);
-    walletBalance = money(wallet[walletAccountForPayoutProvider(provider) === "PAYSTACK" ? "paystackBalance" : "balance"]);
+    walletBalance = money(wallet[walletAccountForPayoutProvider(provider) === "PAYSTACK" ? "paystackBalance" : "monnifyBalance"]);
   } catch (error) {
     errors.push({ code: "WALLET_UNAVAILABLE", message: asText(error?.message || "Company wallet balance could not be read.") });
   }
@@ -340,7 +340,7 @@ export const getPayrollPayoutBatch = async (companyId, periodId) => {
     getWallet(companyId),
   ]);
   const walletAccount = batch ? walletAccountForPayoutProvider(batch.provider) : "GENERAL";
-  return { batch, walletBalance: money(wallet[walletAccount === "PAYSTACK" ? "paystackBalance" : "balance"]).toFixed(2) };
+  return { batch, walletBalance: money(wallet[walletAccount === "PAYSTACK" ? "paystackBalance" : "monnifyBalance"]).toFixed(2) };
 };
 
 export const previewPayrollPayoutBatch = async (companyId, periodId, actorId, providerInput) => {
@@ -872,7 +872,7 @@ export const retryFailedPayrollPayout = async (companyId, disbursementId, actorI
   if (mode === "live" && providerBalanceError) throw new AppError(`${provider} available balance could not be verified: ${providerBalanceError}`, 503);
   if (mode === "live" && providerBalance && providerBalance.lessThan(required)) throw new AppError(`${provider} available balance is insufficient for this retry including estimated fee.`, 409, { details: { providerAvailableBalance: providerBalance.toFixed(2), requiredAmount: required.toFixed(2) } });
   const wallet = await getWallet(companyId);
-  const retryWalletBalance = money(wallet[walletAccountForPayoutProvider(provider) === "PAYSTACK" ? "paystackBalance" : "balance"]);
+  const retryWalletBalance = money(wallet[walletAccountForPayoutProvider(provider) === "PAYSTACK" ? "paystackBalance" : "monnifyBalance"]);
   if (retryWalletBalance.lessThan(required)) throw new AppError("Company salary balance is insufficient for this retry including fee.", 409, { details: { walletBalance: retryWalletBalance.toFixed(2), salaryAccount: walletAccountForPayoutProvider(provider), requiredAmount: required.toFixed(2) } });
 
   const attemptNumber = Number(latestAttempt.attemptNumber || 1) + 1;
