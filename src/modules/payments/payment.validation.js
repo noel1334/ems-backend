@@ -9,7 +9,8 @@ export const initializePaymentSchema = z.object({
   amount: positiveAmount,
   email: z.string().trim().email(),
   purpose: z.literal("WALLET_FUNDING").default("WALLET_FUNDING"),
-  provider: z.enum(["PAYSTACK", "FLUTTERWAVE"]),
+  provider: z.enum(["PAYSTACK", "FLUTTERWAVE", "MONNIFY"]),
+  salaryAccount: z.enum(["PAYSTACK", "MONNIFY"]).default("PAYSTACK"),
   callbackUrl: z.string().url().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   idempotencyKey: z.string().trim().min(8).max(128).optional(),
@@ -23,7 +24,7 @@ export const verifyPaymentSchema = z.object({
 export const paymentQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  provider: z.enum(["PAYSTACK", "FLUTTERWAVE"]).optional(),
+  provider: z.enum(["PAYSTACK", "FLUTTERWAVE", "MONNIFY"]).optional(),
   status: z.enum(["PENDING", "SUCCESSFUL", "FAILED", "CANCELLED", "REVERSED"]).optional(),
   purpose: z.literal("WALLET_FUNDING").optional(),
   search: z.string().trim().max(150).optional(),

@@ -8,6 +8,7 @@ const router = Router();
 
 router.post("/webhooks/paystack", controller.paystackWebhook);
 router.post("/webhooks/flutterwave", controller.flutterwaveWebhook);
+router.post("/webhooks/monnify", controller.monnifyWebhook);
 
 router.use(authenticate);
 router.get("/banks", controller.listBanks);

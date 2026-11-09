@@ -11,6 +11,8 @@ import { creditWalletInTransaction } from "../wallet/wallet.service.js";
 import { processPayrollPayoutWebhook } from "../payroll/payroll.payout.service.js";
 import { companyPaystackEndpoints } from "./company-paystack/company-paystack.client.js";
 import { decryptCompanyPaystackSecret } from "./company-paystack/company-paystack.crypto.js";
+import { monnifyEndpoints } from "./monnify/monnify.client.js";
+import { decryptMonnifySecret } from "./monnify/monnify.crypto.js";
 
 const money = (value) => new Decimal(value).toDecimalPlaces(2);
 const generateReference = () => `PAY-${Date.now()}-${crypto.randomBytes(8).toString("hex").toUpperCase()}`;
@@ -26,6 +28,7 @@ const paymentFingerprint = (input, gatewayOwner) => JSON.stringify({
 const getProviderService = (provider) => {
   if (provider === PAYMENT_PROVIDER.PAYSTACK) return paystack;
   if (provider === PAYMENT_PROVIDER.FLUTTERWAVE) return flutterwave;
+  if (provider === PAYMENT_PROVIDER.MONNIFY) return null;
   throw new AppError("Unsupported payment provider", 400, { code: "UNSUPPORTED_PAYMENT_PROVIDER" });
 };
 
@@ -45,10 +48,15 @@ export const initializePayment = async (companyId, input) => {
 
   const amount = money(input.amount);
   if (!amount.isFinite() || !amount.isPositive()) throw new AppError("Payment amount must be greater than zero", 400);
+  const salaryAccount = String(input.salaryAccount || "PAYSTACK").trim().toUpperCase();
+  if (!["PAYSTACK", "MONNIFY"].includes(salaryAccount)) {
+    throw new AppError("Choose either the Paystack or Monnify salary account as the funding destination.", 400, { code: "INVALID_SALARY_ACCOUNT_DESTINATION" });
+  }
 
   // Company wallet funding must settle to the tenant's own provider account.
   // Platform credentials are reserved for platform-owned products such as future subscriptions.
   let companyPaystackConnection = null;
+  let companyMonnifyConnection = null;
   let gatewayOwner = "PLATFORM_FLUTTERWAVE_SUBACCOUNT";
   if (input.provider === PAYMENT_PROVIDER.PAYSTACK) {
     companyPaystackConnection = await prisma.companyPaystackConnection.findUnique({ where: { companyId } });
@@ -61,17 +69,23 @@ export const initializePayment = async (companyId, input) => {
     if (!company.flutterwaveSubaccountId) {
       throw new AppError("This company does not have a Flutterwave subaccount configured. Wallet funding is blocked rather than settling into the EMS platform account.", 409, { code: "FLUTTERWAVE_COMPANY_SUBACCOUNT_REQUIRED" });
     }
+  } else if (input.provider === PAYMENT_PROVIDER.MONNIFY) {
+    companyMonnifyConnection = await prisma.companyMonnifyConnection.findUnique({ where: { companyId } });
+    if (!companyMonnifyConnection?.isActive) {
+      throw new AppError("Connect this company's Monnify account before using Monnify checkout.", 409, { code: "MONNIFY_COMPANY_CONNECTION_REQUIRED" });
+    }
+    gatewayOwner = "COMPANY_MONNIFY";
   } else {
     throw new AppError("Unsupported payment provider", 400, { code: "UNSUPPORTED_PAYMENT_PROVIDER" });
   }
 
-  const fingerprint = paymentFingerprint(input, gatewayOwner);
+  const fingerprint = paymentFingerprint({ ...input, metadata: { ...(input.metadata || {}), salaryAccount: salaryAccount } }, gatewayOwner);
   if (input.idempotencyKey) {
     const existing = await repository.findPaymentByIdempotencyKey(companyId, input.idempotencyKey);
     if (existing) {
       const existingFingerprint = existing.metadata?.__idempotencyFingerprint;
-      if (existingFingerprint && existingFingerprint !== fingerprint) {
-        throw new AppError("Idempotency key was already used with different payment details or a different settlement account", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
+      if (existingFingerprint !== fingerprint) {
+        throw new AppError("Idempotency key was already used with different or unverifiable payment details. Start a new funding request with a fresh idempotency key.", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
       }
       return { payment: mapPayment(existing), providerResponse: existing.metadata?.providerInitialization || null, idempotent: true };
     }
@@ -85,6 +99,10 @@ export const initializePayment = async (companyId, input) => {
     __idempotencyFingerprint: fingerprint,
     __gatewayOwner: gatewayOwner,
     __companyId: companyId,
+    __salaryAccount: salaryAccount,
+    ...(input.provider === PAYMENT_PROVIDER.MONNIFY
+      ? { __monnifyEnvironment: companyMonnifyConnection.environment }
+      : {}),
   };
 
   let payment;
@@ -107,8 +125,8 @@ export const initializePayment = async (companyId, input) => {
       const existing = await repository.findPaymentByIdempotencyKey(companyId, input.idempotencyKey);
       if (existing) {
         const existingFingerprint = existing.metadata?.__idempotencyFingerprint;
-        if (existingFingerprint && existingFingerprint !== fingerprint) {
-          throw new AppError("Idempotency key was already used with different payment details or a different settlement account", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
+        if (existingFingerprint !== fingerprint) {
+          throw new AppError("Idempotency key was already used with different or unverifiable payment details. Start a new funding request with a fresh idempotency key.", 409, { code: "IDEMPOTENCY_KEY_REUSED" });
         }
         return { payment: mapPayment(existing), providerResponse: existing.metadata?.providerInitialization || null, idempotent: true };
       }
@@ -127,7 +145,7 @@ export const initializePayment = async (companyId, input) => {
         currency: PAYMENT_CURRENCY,
         metadata: { ...(input.metadata || {}), companyId, paymentId: payment.id, purpose: PAYMENT_PURPOSE.WALLET_FUNDING },
       });
-    } else {
+    } else if (input.provider === PAYMENT_PROVIDER.FLUTTERWAVE) {
       const providerApi = getProviderService(input.provider);
       providerResponse = await providerApi.initialize({
         email: input.email,
@@ -136,13 +154,42 @@ export const initializePayment = async (companyId, input) => {
         callbackUrl,
         currency: PAYMENT_CURRENCY,
         subaccountId: company.flutterwaveSubaccountId,
-        metadata: { ...(input.metadata || {}), companyId, paymentId: payment.id, purpose: PAYMENT_PURPOSE.WALLET_FUNDING },
+        metadata: { ...(input.metadata || {}), companyId, paymentId: payment.id, purpose: PAYMENT_PURPOSE.WALLET_FUNDING, salaryAccount: salaryAccount },
       });
+    } else {
+      const contractCode = decryptMonnifySecret(companyMonnifyConnection.contractCodeCiphertext);
+      providerResponse = await monnifyEndpoints.initializeTransaction(companyMonnifyConnection, {
+        amount: Number(amount.toFixed(2)),
+        customerName: String(input.metadata?.customerName || input.email).slice(0, 100),
+        customerEmail: input.email,
+        paymentReference: reference,
+        paymentDescription: `EMS ${salaryAccount} salary account funding`.slice(0, 100),
+        currencyCode: PAYMENT_CURRENCY,
+        contractCode,
+        redirectUrl: callbackUrl,
+        paymentMethods: ["CARD", "ACCOUNT_TRANSFER", "USSD", "PHONE_NUMBER"],
+        metadata: { companyId, paymentId: payment.id, purpose: PAYMENT_PURPOSE.WALLET_FUNDING, salaryAccount: salaryAccount },
+      });
+      if (String(providerResponse?.paymentReference || "") !== reference || !providerResponse?.transactionReference) {
+        throw new AppError("Monnify returned a transaction reference that does not match the initialized EMS payment.", 502, { code: "MONNIFY_INITIALIZATION_REFERENCE_MISMATCH" });
+      }
+      let checkoutUrl;
+      try {
+        checkoutUrl = new URL(String(providerResponse?.checkoutUrl || ""));
+      } catch {
+        throw new AppError("Monnify did not return a valid hosted checkout URL.", 502, { code: "MONNIFY_CHECKOUT_URL_INVALID" });
+      }
+      const trustedCheckoutHosts = ["checkout.monnify.com", "sandbox.sdk.monnify.com", "sdk.monnify.com"];
+      if (checkoutUrl.protocol !== "https:" || !trustedCheckoutHosts.includes(checkoutUrl.hostname.toLowerCase())) {
+        throw new AppError("Monnify returned an untrusted hosted checkout URL.", 502, { code: "MONNIFY_CHECKOUT_URL_UNTRUSTED" });
+      }
     }
 
     const providerReference = input.provider === PAYMENT_PROVIDER.FLUTTERWAVE
       ? providerResponse?.data?.id?.toString() || null
-      : providerResponse?.data?.reference || reference;
+      : input.provider === PAYMENT_PROVIDER.MONNIFY
+        ? providerResponse?.transactionReference || null
+        : providerResponse?.data?.reference || reference;
 
     const updated = await repository.updatePayment(payment.id, { providerReference, metadata: { ...(payment.metadata || {}), providerInitialization: providerResponse } });
     return { payment: mapPayment(updated), providerResponse };
@@ -153,29 +200,32 @@ export const initializePayment = async (companyId, input) => {
 };
 
 const assertVerifiedPayment = (payment, providerResponse) => {
-  const data = providerResponse?.data;
-  if (!data) throw new AppError("Provider returned an invalid verification response", 502);
+  const data = payment.provider === PAYMENT_PROVIDER.MONNIFY
+    ? providerResponse?.data || providerResponse
+    : providerResponse?.data;
+  if (!data || typeof data !== "object") throw new AppError("Provider returned an invalid verification response", 502);
 
   const expectedAmount = money(payment.amount);
   const expectedCurrency = payment.currency;
-  const actualCurrency = String(data.currency || "").toUpperCase();
-  const actualReference = payment.provider === PAYMENT_PROVIDER.PAYSTACK ? data.reference : data.tx_ref;
+  const actualCurrency = String(data.currency || data.currencyCode || "").toUpperCase();
+  const actualReference = payment.provider === PAYMENT_PROVIDER.PAYSTACK
+    ? data.reference
+    : payment.provider === PAYMENT_PROVIDER.FLUTTERWAVE
+      ? data.tx_ref
+      : data.paymentReference;
 
-  if (actualReference !== payment.reference) {
-    throw new AppError("Payment reference mismatch", 400, { code: "PAYMENT_REFERENCE_MISMATCH" });
-  }
-  if (actualCurrency !== expectedCurrency) {
-    throw new AppError("Payment currency mismatch", 400, { code: "PAYMENT_CURRENCY_MISMATCH" });
-  }
+  if (actualReference !== payment.reference) throw new AppError("Payment reference mismatch", 400, { code: "PAYMENT_REFERENCE_MISMATCH" });
+  if (actualCurrency !== expectedCurrency) throw new AppError("Payment currency mismatch", 400, { code: "PAYMENT_CURRENCY_MISMATCH" });
 
-  const actualAmount = payment.provider === PAYMENT_PROVIDER.PAYSTACK
-    ? money(new Decimal(data.amount).div(100))
-    : money(data.amount);
-
+  const rawAmount = payment.provider === PAYMENT_PROVIDER.PAYSTACK
+    ? new Decimal(data.amount).div(100)
+    : payment.provider === PAYMENT_PROVIDER.MONNIFY
+      ? data.amountPaid
+      : data.amount;
+  const actualAmount = money(rawAmount);
   if (!actualAmount.eq(expectedAmount)) {
     throw new AppError("Payment amount mismatch", 400, { code: "PAYMENT_AMOUNT_MISMATCH", details: { expected: expectedAmount.toFixed(2), received: actualAmount.toFixed(2) } });
   }
-
   return data;
 };
 
@@ -199,11 +249,14 @@ const completeSuccessfulPayment = async (paymentId, providerReference, providerR
       throw new AppError("Only WALLET_FUNDING payments can credit a company wallet. Subscription payments must use the platform subscription ledger.", 409, { code: "PAYMENT_PURPOSE_CANNOT_CREDIT_WALLET" });
     }
 
+    const salaryAccount = String(payment.metadata?.__salaryAccount || "PAYSTACK").toUpperCase();
+    if (!["PAYSTACK", "MONNIFY"].includes(salaryAccount)) throw new AppError("Payment has an invalid salary account destination", 409, { code: "PAYMENT_SALARY_ACCOUNT_INVALID" });
     await creditWalletInTransaction(tx, payment.companyId, {
       amount: payment.amount,
+      account: salaryAccount,
       reference: `PAYMENT-${payment.reference}`,
-      description: `Wallet funding via ${payment.provider}`,
-      metadata: { paymentId: payment.id, provider: payment.provider, providerReference },
+      description: `Salary account funding via ${payment.provider} → ${salaryAccount}`,
+      metadata: { paymentId: payment.id, provider: payment.provider, providerReference, salaryAccount },
     });
 
     return repository.updatePayment(payment.id, {
@@ -230,22 +283,31 @@ export const verifyPayment = async (companyId, reference, providerTransactionId)
     // Backward compatibility: verify already-created legacy platform-collected payments
     // with the platform key. New company wallet funding never takes this route.
     providerResponse = await paystack.verify(payment.reference);
-  } else {
+  } else if (payment.provider === PAYMENT_PROVIDER.FLUTTERWAVE) {
     const transactionId = providerTransactionId || payment.providerReference;
     if (!transactionId) throw new AppError("Flutterwave transaction ID is not available. Return from checkout and try verification again.", 409);
     providerResponse = await flutterwave.verify(transactionId);
-    if (providerResponse?.data?.tx_ref !== payment.reference) {
-      throw new AppError("Payment reference mismatch", 400, { code: "PAYMENT_REFERENCE_MISMATCH" });
+    if (providerResponse?.data?.tx_ref !== payment.reference) throw new AppError("Payment reference mismatch", 400, { code: "PAYMENT_REFERENCE_MISMATCH" });
+  } else {
+    const connection = await prisma.companyMonnifyConnection.findUnique({ where: { companyId: payment.companyId } });
+    if (!connection?.isActive) throw new AppError("The company's Monnify connection is unavailable. Restore the same credentials to verify this pending payment.", 409, { code: "MONNIFY_COMPANY_CONNECTION_REQUIRED_FOR_VERIFY" });
+    if (payment.metadata?.__monnifyEnvironment && String(connection.environment).toLowerCase() !== String(payment.metadata.__monnifyEnvironment).toLowerCase()) {
+      throw new AppError(`This pending Monnify checkout was created in ${String(payment.metadata.__monnifyEnvironment).toUpperCase()}. Restore that environment before verifying it.`, 409, { code: "MONNIFY_PAYMENT_ENVIRONMENT_MISMATCH" });
     }
+    providerResponse = await monnifyEndpoints.verifyTransaction(connection, payment.reference);
   }
 
   const successful = payment.provider === PAYMENT_PROVIDER.PAYSTACK
     ? providerResponse?.status === true && providerResponse?.data?.status === "success"
-    : providerResponse?.status === "success" && providerResponse?.data?.status === "successful";
+    : payment.provider === PAYMENT_PROVIDER.FLUTTERWAVE
+      ? providerResponse?.status === "success" && providerResponse?.data?.status === "successful"
+      : String(providerResponse?.paymentStatus || providerResponse?.data?.paymentStatus || "").toUpperCase() === "PAID";
 
   if (!successful) {
-    const providerStatus = providerResponse?.data?.status;
-    const terminalFailure = ["failed", "abandoned", "reversed"].includes(String(providerStatus || "").toLowerCase());
+    const providerStatus = payment.provider === PAYMENT_PROVIDER.MONNIFY
+      ? providerResponse?.paymentStatus
+      : providerResponse?.data?.status;
+    const terminalFailure = ["failed", "abandoned", "reversed", "expired", "cancelled", "refunded"].includes(String(providerStatus || "").toLowerCase());
     const updated = await repository.updatePayment(payment.id, {
       ...(terminalFailure ? { status: PAYMENT_STATUS.FAILED } : {}),
       ...(providerTransactionId && !payment.providerReference ? { providerReference: String(providerTransactionId) } : {}),
@@ -254,7 +316,8 @@ export const verifyPayment = async (companyId, reference, providerTransactionId)
     return mapPayment(updated);
   }
 
-  return mapPayment(await completeSuccessfulPayment(payment.id, providerResponse?.data?.id?.toString() || providerTransactionId, providerResponse));
+  const verifiedData = payment.provider === PAYMENT_PROVIDER.MONNIFY ? providerResponse : providerResponse?.data;
+  return mapPayment(await completeSuccessfulPayment(payment.id, verifiedData?.id?.toString() || verifiedData?.transactionReference || providerTransactionId, providerResponse));
 };
 
 export const listPayments = async (companyId, { page, limit, provider, status, purpose, search, startDate, endDate }) => {
@@ -331,6 +394,66 @@ export const processPaystackWebhook = async (rawBody, signature, payload) => {
   if (verified?.status !== true || verified?.data?.status !== "success") return { received: true, processed: false };
   const updated = await completeSuccessfulPayment(payment.id, verified.data.id?.toString(), verified);
   return { received: true, processed: true, payment: mapPayment(updated) };
+};
+
+export const processMonnifyWebhook = async (rawBody, signature, payload) => {
+  const eventType = String(payload?.eventType || payload?.event || "").toUpperCase();
+  if (eventType !== "SUCCESSFUL_TRANSACTION") return { matched: false, received: true, processed: false };
+
+  const eventData = payload?.eventData || payload?.data || {};
+  const reference = String(eventData.paymentReference || "").trim();
+  if (!reference) return { matched: false, received: true, processed: false };
+
+  const payment = await repository.findPaymentByReferenceFromAnyCompany(reference);
+  if (!payment || payment.provider !== PAYMENT_PROVIDER.MONNIFY) {
+    return { matched: false, received: true, processed: false };
+  }
+  if (payment.purpose !== PAYMENT_PURPOSE.WALLET_FUNDING) {
+    return { matched: true, received: true, processed: false, reason: "PAYMENT_PURPOSE_NOT_WALLET_FUNDING" };
+  }
+  if (payment.status === PAYMENT_STATUS.SUCCESSFUL) {
+    return { matched: true, received: true, processed: false, duplicate: true };
+  }
+
+  const connection = await prisma.companyMonnifyConnection.findUnique({ where: { companyId: payment.companyId } });
+  if (!connection?.isActive) {
+    throw new AppError("The company's Monnify connection is unavailable; cannot authenticate its payment webhook.", 401, { code: "MONNIFY_COMPANY_WEBHOOK_CONNECTION_MISSING" });
+  }
+  if (payment.metadata?.__monnifyEnvironment && String(connection.environment).toLowerCase() !== String(payment.metadata.__monnifyEnvironment).toLowerCase()) {
+    throw new AppError(`This pending Monnify checkout was created in ${String(payment.metadata.__monnifyEnvironment).toUpperCase()}. Restore that environment before processing its webhook.`, 409, { code: "MONNIFY_PAYMENT_ENVIRONMENT_MISMATCH" });
+  }
+
+  // Monnify's production transaction webhooks carry an HMAC-SHA512 signature.
+  // Sandbox notifications may omit it, so sandbox events are still verified with
+  // Monnify's authenticated transaction-query API before any salary balance changes.
+  const receivedSignature = String(signature || "").trim().toLowerCase();
+  if (receivedSignature) {
+    if (!Buffer.isBuffer(rawBody) || !rawBody.length) {
+      throw new AppError("Monnify webhook raw body is unavailable for signature verification.", 400, { code: "MONNIFY_WEBHOOK_RAW_BODY_MISSING" });
+    }
+    const secret = decryptMonnifySecret(connection.apiSecretCiphertext);
+    const expectedSignature = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
+    const receivedBuffer = Buffer.from(receivedSignature, "utf8");
+    const expectedBuffer = Buffer.from(expectedSignature, "utf8");
+    if (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) {
+      throw new AppError("Invalid Monnify webhook signature.", 401, { code: "MONNIFY_WEBHOOK_SIGNATURE_INVALID" });
+    }
+  } else if (String(connection.environment || "sandbox").toLowerCase() !== "sandbox") {
+    throw new AppError("Monnify production webhook signature is missing.", 401, { code: "MONNIFY_WEBHOOK_SIGNATURE_MISSING" });
+  }
+
+  // Never credit from webhook fields alone. Verify the reference with Monnify's API.
+  const verified = await monnifyEndpoints.verifyTransaction(connection, reference);
+  const verifiedData = verified?.data || verified;
+  if (String(verifiedData?.paymentStatus || "").toUpperCase() !== "PAID") {
+    return { matched: true, received: true, processed: false, providerStatus: verifiedData?.paymentStatus || "UNKNOWN" };
+  }
+  const updated = await completeSuccessfulPayment(
+    payment.id,
+    verifiedData?.transactionReference || null,
+    verified,
+  );
+  return { matched: true, received: true, processed: true, payment: mapPayment(updated) };
 };
 
 export const processFlutterwaveWebhook = async (signature, payload) => {

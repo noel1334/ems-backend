@@ -33,6 +33,7 @@ import { resolveBankAccount } from "../employees/bank-directory.service.js";
 const money = (value) => new Decimal(value ?? 0).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 const transactionOptions = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30000 };
 const isProvider = (provider) => ["PAYSTACK", "FLUTTERWAVE"].includes(String(provider || "").toUpperCase());
+const walletAccountForPayoutProvider = (provider) => String(provider || "").toUpperCase() === "PAYSTACK" ? "PAYSTACK" : "GENERAL";
 const asText = (value, max = 500) => String(value ?? "").trim().slice(0, max);
 const mapWithConcurrency = async (items, concurrency, mapper) => {
   const output = new Array(items.length);
@@ -195,7 +196,7 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
   let walletBalance = new Decimal(0);
   try {
     const wallet = await getWallet(companyId);
-    walletBalance = money(wallet.balance);
+    walletBalance = money(wallet[walletAccountForPayoutProvider(provider) === "PAYSTACK" ? "paystackBalance" : "balance"]);
   } catch (error) {
     errors.push({ code: "WALLET_UNAVAILABLE", message: asText(error?.message || "Company wallet balance could not be read.") });
   }
@@ -229,7 +230,7 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
   // In provider test mode, the remote test balance may be absent or not representative.
   // In live mode, an unavailable/insufficient provider balance blocks approval.
   if (mode === "live" && providerBalanceError) errors.push({ code: "PROVIDER_BALANCE_UNAVAILABLE", message: providerBalanceError });
-  if (!walletSufficient) errors.push({ code: "INSUFFICIENT_COMPANY_WALLET", message: `Company wallet has ${walletBalance.toFixed(2)} NGN, but salary plus estimated transfer fees requires ${requiredTotal.toFixed(2)} NGN.` });
+  if (!walletSufficient) errors.push({ code: "INSUFFICIENT_COMPANY_WALLET", message: `Company ${walletAccountForPayoutProvider(provider)} salary balance has ${walletBalance.toFixed(2)} NGN, but salary plus estimated transfer fees requires ${requiredTotal.toFixed(2)} NGN.` });
   if (mode === "live" && providerAvailableBalance !== null && !providerSufficient) errors.push({ code: "INSUFFICIENT_PROVIDER_BALANCE", message: `${provider} available NGN balance is ${providerAvailableBalance.toFixed(2)}, but this batch is estimated to require ${requiredTotal.toFixed(2)} including fees.` });
   if (mode === "live" && providerAvailableBalance === null && !providerBalanceError) errors.push({ code: "PROVIDER_BALANCE_UNAVAILABLE", message: `${provider} available balance could not be confirmed.` });
   if (pending.some((row) => !money(row.amount).isFinite() || !money(row.amount).isPositive())) {
@@ -338,7 +339,8 @@ export const getPayrollPayoutBatch = async (companyId, periodId) => {
     prisma.payrollPayoutBatch.findUnique({ where: { companyId_periodId: { companyId, periodId } } }),
     getWallet(companyId),
   ]);
-  return { batch, walletBalance: money(wallet.balance).toFixed(2) };
+  const walletAccount = batch ? walletAccountForPayoutProvider(batch.provider) : "GENERAL";
+  return { batch, walletBalance: money(wallet[walletAccount === "PAYSTACK" ? "paystackBalance" : "balance"]).toFixed(2) };
 };
 
 export const previewPayrollPayoutBatch = async (companyId, periodId, actorId, providerInput) => {
@@ -442,6 +444,7 @@ const recordDefinitiveFailure = async (companyId, payout, attemptNumber, actorId
     const refundAmount = salaryAmount.plus(feeToRelease).toDecimalPlaces(2);
     if (refundAmount.isPositive()) {
       await creditWalletInTransaction(tx, companyId, {
+        account: walletAccountForPayoutProvider(current.provider),
         amount: refundAmount.toFixed(2),
         reference: `PAYROLL-REFUND-${current.id}-ATT-${attemptNumber}`,
         description: `Release reserved funds for failed salary payout ${current.id}`,
@@ -512,6 +515,7 @@ const recordVerifiedSuccess = async (companyId, payout, attemptNumber, actorId, 
       const feeDifference = reservedFee.minus(money(actualFee));
       if (feeDifference.greaterThan(0)) {
         await creditWalletInTransaction(tx, companyId, {
+          account: walletAccountForPayoutProvider(current.provider),
           amount: feeDifference.toFixed(2), reference: `PAYROLL-FEE-RELEASE-${current.id}-ATT-${attemptNumber}`,
           description: `Release excess estimated payout fee for ${current.id}`,
           metadata: { disbursementId: current.id, attemptNumber, reservedFee: reservedFee.toFixed(2), actualFee },
@@ -520,6 +524,7 @@ const recordVerifiedSuccess = async (companyId, payout, attemptNumber, actorId, 
       } else if (feeDifference.lessThan(0)) {
         try {
           await debitWalletInTransaction(tx, companyId, {
+            account: walletAccountForPayoutProvider(current.provider),
             amount: feeDifference.abs().toFixed(2), reference: `PAYROLL-FEE-ADJUST-${current.id}-ATT-${attemptNumber}`,
             description: `Additional provider fee for salary payout ${current.id}`,
             metadata: { disbursementId: current.id, attemptNumber, reservedFee: reservedFee.toFixed(2), actualFee },
@@ -557,6 +562,7 @@ const recordReversal = async (companyId, payout, attemptNumber, actorId, respons
   const principalAlreadyReleased = current.status === "FAILED";
   if (!principalAlreadyReleased) {
     await creditWalletInTransaction(tx, companyId, {
+      account: walletAccountForPayoutProvider(current.provider),
       amount: money(current.amount).toFixed(2), reference: `PAYROLL-REVERSAL-${current.id}-ATT-${attemptNumber}`,
       description: `Restore salary principal for reversed provider transfer ${current.id}`,
       metadata: { disbursementId: current.id, periodId: current.periodId, provider: current.provider, attemptNumber, externalReference: attempt?.externalReference || current.externalReference },
@@ -656,6 +662,7 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
     const existingReservation = await tx.walletLedgerEntry.findUnique({ where: { reference: reservationReference }, select: { id: true } });
     if (existingReservation) throw new AppError("This batch already has a wallet reservation. Duplicate payout execution is blocked.", 409);
     await debitWalletInTransaction(tx, companyId, {
+      account: walletAccountForPayoutProvider(provider),
       amount: reservationAmount.toFixed(2), reference: reservationReference,
       description: `Reserve salary payout batch — ${evaluation.period.name}`,
       metadata: { payoutBatchId: batch.id, periodId, provider, disbursementIds: pendingIds, salaryAmount: evaluation.salaryTotal.toFixed(2), estimatedFees: evaluation.feeTotal.toFixed(2), totalReserved: reservationAmount.toFixed(2) },
@@ -865,14 +872,15 @@ export const retryFailedPayrollPayout = async (companyId, disbursementId, actorI
   if (mode === "live" && providerBalanceError) throw new AppError(`${provider} available balance could not be verified: ${providerBalanceError}`, 503);
   if (mode === "live" && providerBalance && providerBalance.lessThan(required)) throw new AppError(`${provider} available balance is insufficient for this retry including estimated fee.`, 409, { details: { providerAvailableBalance: providerBalance.toFixed(2), requiredAmount: required.toFixed(2) } });
   const wallet = await getWallet(companyId);
-  if (money(wallet.balance).lessThan(required)) throw new AppError("Company wallet balance is insufficient for this retry including fee.", 409, { details: { walletBalance: money(wallet.balance).toFixed(2), requiredAmount: required.toFixed(2) } });
+  const retryWalletBalance = money(wallet[walletAccountForPayoutProvider(provider) === "PAYSTACK" ? "paystackBalance" : "balance"]);
+  if (retryWalletBalance.lessThan(required)) throw new AppError("Company salary balance is insufficient for this retry including fee.", 409, { details: { walletBalance: retryWalletBalance.toFixed(2), salaryAccount: walletAccountForPayoutProvider(provider), requiredAmount: required.toFixed(2) } });
 
   const attemptNumber = Number(latestAttempt.attemptNumber || 1) + 1;
   const reference = makePayrollPayoutReference(payout.id, attemptNumber);
   await prisma.$transaction(async (tx) => {
     const current = await tx.payrollDisbursement.findFirst({ where: { id: payout.id, companyId, status: "FAILED" } });
     if (!current) throw new AppError("Transfer status changed before retry reservation. Refresh and verify again.", 409);
-    await debitWalletInTransaction(tx, companyId, { amount: required.toFixed(2), reference: `PAYROLL-RETRY-RESERVE-${payout.id}-ATT-${attemptNumber}`, description: `Reserve confirmed failed salary retry ${payout.id}`, metadata: { disbursementId: payout.id, attemptNumber, provider, salaryAmount: money(payout.amount).toFixed(2), estimatedFee: fee.toFixed(2) } });
+    await debitWalletInTransaction(tx, companyId, { account: walletAccountForPayoutProvider(provider), amount: required.toFixed(2), reference: `PAYROLL-RETRY-RESERVE-${payout.id}-ATT-${attemptNumber}`, description: `Reserve confirmed failed salary retry ${payout.id}`, metadata: { disbursementId: payout.id, attemptNumber, provider, salaryAmount: money(payout.amount).toFixed(2), estimatedFee: fee.toFixed(2) } });
     await tx.payrollPayoutAttempt.create({ data: { companyId, disbursementId: payout.id, attemptNumber, provider, externalReference: reference, status: "SUBMITTED", amount: money(payout.amount).toFixed(2), estimatedFeeAmount: fee.toFixed(2), createdBy: actorId, submittedAt: new Date() } });
     await tx.payrollDisbursement.update({ where: { id: payout.id }, data: { status: "PROCESSING", provider, method: provider, externalReference: reference, providerTransferId: null, providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null, failureReason: null, updatedBy: actorId } });
     if (payout.batchId) await refreshBatchStatus(tx, companyId, payout.batchId, payout.periodId);
@@ -978,6 +986,7 @@ export const reconcilePayrollPayoutFee = async (companyId, disbursementId, actor
     const difference = reservedFee.minus(requestedFee).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
     if (difference.greaterThan(0)) {
       await creditWalletInTransaction(tx, companyId, {
+        account: walletAccountForPayoutProvider(current.provider),
         amount: difference.toFixed(2),
         reference: `PAYROLL-FEE-RECONCILE-RELEASE-${current.id}-ATT-${attemptNumber}`,
         description: `Release excess estimated salary-transfer fee for ${current.id}`,
@@ -985,6 +994,7 @@ export const reconcilePayrollPayoutFee = async (companyId, disbursementId, actor
       });
     } else if (difference.lessThan(0)) {
       await debitWalletInTransaction(tx, companyId, {
+        account: walletAccountForPayoutProvider(current.provider),
         amount: difference.abs().toFixed(2),
         reference: `PAYROLL-FEE-RECONCILE-ADJUST-${current.id}-ATT-${attemptNumber}`,
         description: `Apply additional confirmed salary-transfer fee for ${current.id}`,

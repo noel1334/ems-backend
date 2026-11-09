@@ -36,6 +36,14 @@ export const paystackWebhook = async (req, res) => {
   return res.json(await service.processPaystackWebhook(rawBody, signature, payload));
 };
 
+export const monnifyWebhook = async (req, res) => {
+  const rawBody = Buffer.isBuffer(req.rawBody)
+    ? req.rawBody
+    : Buffer.from(JSON.stringify(req.body || {}));
+  const result = await service.processMonnifyWebhook(rawBody, req.headers["monnify-signature"], req.body);
+  return res.json({ success: true, data: result });
+};
+
 export const flutterwaveWebhook = async (req, res) =>
   res.json(await service.processFlutterwaveWebhook(req.headers["verif-hash"], req.body));
 

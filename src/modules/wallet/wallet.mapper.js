@@ -6,7 +6,12 @@ const date = (value) => (value ? new Date(value).toISOString() : null);
 export const mapWallet = (wallet) => wallet ? ({
   id: wallet.id,
   companyId: wallet.companyId,
+  // `balance` is the legacy/general account. Provider salary funds are isolated.
   balance: decimalToString(wallet.balance),
+  generalBalance: decimalToString(wallet.balance),
+  paystackBalance: decimalToString(wallet.paystackBalance),
+  monnifyBalance: decimalToString(wallet.monnifyBalance),
+  totalBalance: new Decimal(wallet.balance ?? 0).plus(wallet.paystackBalance ?? 0).plus(wallet.monnifyBalance ?? 0).toFixed(2),
   currency: wallet.currency,
   isActive: wallet.isActive,
   transactionCount: wallet._count?.ledgerEntries,
@@ -16,6 +21,7 @@ export const mapWallet = (wallet) => wallet ? ({
     paystackFunded: decimalToString(wallet.totals.paystackFunded),
     flutterwaveFunded: decimalToString(wallet.totals.flutterwaveFunded),
     providerFundedTotal: decimalToString(wallet.totals.providerFundedTotal),
+    monnifyFunded: decimalToString(wallet.totals.monnifyFunded),
   } : undefined,
   createdAt: date(wallet.createdAt),
   updatedAt: date(wallet.updatedAt),
@@ -26,6 +32,7 @@ export const mapWalletTransaction = (transaction) => transaction ? ({
   companyId: transaction.companyId || transaction.wallet?.companyId,
   walletId: transaction.walletId,
   type: transaction.type,
+  account: transaction.account || "GENERAL",
   status: transaction.status,
   amount: decimalToString(transaction.amount),
   balanceBefore: decimalToString(transaction.balanceBefore),

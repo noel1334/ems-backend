@@ -25,6 +25,33 @@ describe("company wallet funding validation", () => {
     expect(initializePaymentSchema.safeParse({ amount: 1000.001, email: "finance@example.com", provider: "PAYSTACK" }).success).toBe(false);
   });
 
+  it("accepts all three gateways independently of either salary-account destination", () => {
+    const gateways = ["PAYSTACK", "FLUTTERWAVE", "MONNIFY"];
+    const salaryAccounts = ["PAYSTACK", "MONNIFY"];
+    for (const provider of gateways) {
+      for (const salaryAccount of salaryAccounts) {
+        const result = initializeFundingSchema.safeParse({
+          amount: 1000,
+          email: "finance@example.com",
+          provider,
+          salaryAccount,
+        });
+        expect(result.success, `${provider} → ${salaryAccount}`).toBe(true);
+        if (!result.success) throw new Error(result.error.message);
+        expect(result.data.salaryAccount).toBe(salaryAccount);
+      }
+    }
+  });
+
+  it("defaults the internal salary destination to Paystack for older funding clients", () => {
+    const result = initializePaymentSchema.parse({
+      amount: 1000,
+      email: "finance@example.com",
+      provider: "MONNIFY",
+    });
+    expect(result.salaryAccount).toBe("PAYSTACK");
+  });
+
   it("allows Flutterwave's returned transaction ID to pass through verification", () => {
     expect(verifyPaymentSchema.parse({ reference: "PAY-12345", transactionId: 123456 }).transactionId).toBe("123456");
     expect(verifyFundingSchema.parse({ reference: "PAY-12345", transactionId: "123456" }).transactionId).toBe("123456");

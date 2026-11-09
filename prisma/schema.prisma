@@ -127,6 +127,13 @@ enum WalletEntryStatus {
 enum PaymentProvider {
   PAYSTACK
   FLUTTERWAVE
+  MONNIFY
+}
+
+enum WalletAccount {
+  GENERAL
+  PAYSTACK
+  MONNIFY
 }
 
 enum PaymentPurpose {
@@ -1585,6 +1592,8 @@ model Wallet {
   id            String              @id @default(uuid())
   companyId     String
   balance       Decimal             @default(0) @db.Decimal(18, 2)
+  paystackBalance Decimal            @default(0) @db.Decimal(18, 2)
+  monnifyBalance Decimal             @default(0) @db.Decimal(18, 2)
   currency      String              @default("NGN")
   isActive      Boolean             @default(true)
   createdAt     DateTime            @default(now())
@@ -1600,6 +1609,7 @@ model WalletLedgerEntry {
   id            String            @id @default(uuid())
   walletId      String
   type          WalletEntryType
+  account       WalletAccount      @default(GENERAL)
   status        WalletEntryStatus @default(PENDING)
   amount        Decimal           @db.Decimal(18, 2)
   balanceBefore Decimal           @db.Decimal(18, 2)

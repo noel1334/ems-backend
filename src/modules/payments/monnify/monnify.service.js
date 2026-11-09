@@ -4,6 +4,7 @@ import AppError from "../../../common/errors/AppError.js";
 import { encryptMonnifySecret, decryptMonnifySecret } from "./monnify.crypto.js";
 import { monnifyEndpoints } from "./monnify.client.js";
 import { canonicalMonnifyBankName, normalizeMonnifyBanks } from "./monnify.utils.js";
+import { getWallet, debitWalletInTransaction, creditWalletInTransaction } from "../../wallet/wallet.service.js";
 
 const OPEN_BATCH_STATUSES = [
   "SUBMITTING",
@@ -94,6 +95,22 @@ export async function saveConnection(companyId, input) {
 
   const existing = await prisma.companyMonnifyConnection.findUnique({ where: { companyId } });
   const openBatch = await findOpenBatch(companyId);
+  const pendingCheckout = existing
+    ? await prisma.payment.findFirst({
+        where: { companyId, provider: "MONNIFY", purpose: "WALLET_FUNDING", status: "PENDING" },
+        select: { reference: true },
+      })
+    : null;
+  const connectionChanged = pendingCheckout && existing && (
+    decryptMonnifySecret(existing.apiKeyCiphertext) !== apiKey.trim()
+    || decryptMonnifySecret(existing.apiSecretCiphertext) !== apiSecret.trim()
+    || decryptMonnifySecret(existing.contractCodeCiphertext) !== contractCode.trim()
+    || String(existing.sourceAccountNumber) !== String(sourceAccountNumber)
+    || String(existing.environment).toLowerCase() !== environment
+  );
+  if (pendingCheckout && connectionChanged) {
+    throw new AppError(`Cannot replace or switch this Monnify connection while wallet checkout ${pendingCheckout.reference} is pending. Verify or cancel that payment first so EMS can authenticate the original transaction.`, 409, { code: "MONNIFY_PENDING_WALLET_CHECKOUT" });
+  }
   if (existing && openBatch && String(existing.environment).toLowerCase() !== environment) {
     throw new AppError(
       `Cannot switch Monnify from ${String(existing.environment).toUpperCase()} to ${environment.toUpperCase()} while batch ${openBatch.batchReference} is ${openBatch.providerStatus}. Complete or reconcile that batch first.`,
@@ -116,6 +133,13 @@ export async function saveConnection(companyId, input) {
 
 export async function removeConnection(companyId) {
   const openBatch = await findOpenBatch(companyId);
+  const pendingCheckout = await prisma.payment.findFirst({
+    where: { companyId, provider: "MONNIFY", purpose: "WALLET_FUNDING", status: "PENDING" },
+    select: { reference: true },
+  });
+  if (pendingCheckout) {
+    throw new AppError(`Cannot disconnect Monnify while wallet checkout ${pendingCheckout.reference} is pending. Verify or cancel that payment first.`, 409, { code: "MONNIFY_PENDING_WALLET_CHECKOUT" });
+  }
   if (openBatch) {
     throw new AppError(`Cannot disconnect Monnify while batch ${openBatch.batchReference} is ${openBatch.providerStatus}. Refresh and reconcile it first.`, 409, { code: "MONNIFY_OPEN_BATCH_EXISTS" });
   }
@@ -436,6 +460,8 @@ async function buildPayrollPreview(companyId, periodId) {
   if (!banks.length) throw new AppError("Monnify's supported-bank directory is currently unavailable. No salary payments were submitted.", 503, { code: "MONNIFY_BANK_DIRECTORY_UNAVAILABLE" });
   const availableBalanceValue = walletBalancePayload?.availableBalance ?? walletBalancePayload?.availableBalanceAmount ?? walletBalancePayload?.balance;
   const availableBalance = Number(availableBalanceValue);
+  const emsWallet = await getWallet(companyId);
+  const emsSalaryBalance = Number(emsWallet?.monnifyBalance || 0);
 
   const snapshotRows = disbursements.map((row) => ({ ...row, bankAccount: row.employee?.bankAccounts?.[0] || null }));
   const sourceFingerprint = payrollSnapshotFingerprint(snapshotRows);
@@ -548,6 +574,8 @@ async function buildPayrollPreview(companyId, periodId) {
     validatedSalaryTotal: Number(validatedSalaryTotal.toFixed(2)),
     disbursementBalance: Number.isFinite(availableBalance) ? availableBalance : null,
     balanceCheckAvailable: Number.isFinite(availableBalance),
+    emsSalaryBalance,
+    emsSalaryBalanceSufficient: emsSalaryBalance >= Number(validatedSalaryTotal.toFixed(2)),
     employees,
     previewFingerprint,
     // This is an internal-only value used by submitPayroll; it is not returned to clients.
@@ -586,6 +614,7 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   }
   const transactions = preview._validTransactions;
   if (!preview.balanceCheckAvailable) throw new AppError("EMS could not read the company's Monnify disbursement balance. Test the connection and refresh the preview before submitting any salaries.", 502, { code: "MONNIFY_BALANCE_UNAVAILABLE" });
+  if (preview.emsSalaryBalance < preview.validatedSalaryTotal) throw new AppError(`The EMS Monnify salary account has ${Number(preview.emsSalaryBalance).toLocaleString("en-NG", { style: "currency", currency: "NGN" })}, but this batch requires ${Number(preview.validatedSalaryTotal).toLocaleString("en-NG", { style: "currency", currency: "NGN" })}. Fund the Monnify salary account before submitting payroll.`, 409, { code: "EMS_MONNIFY_SALARY_BALANCE_INSUFFICIENT", details: { availableBalance: preview.emsSalaryBalance, requiredAmount: preview.validatedSalaryTotal } });
   if (preview.disbursementBalance < preview.validatedSalaryTotal) throw new AppError(`The Monnify disbursement wallet balance (${preview.disbursementBalance.toLocaleString("en-NG", { style: "currency", currency: "NGN" })}) is below the validated salary total (${preview.validatedSalaryTotal.toLocaleString("en-NG", { style: "currency", currency: "NGN" })}). Fund the company's Monnify wallet and preview again.`, 409, { code: "MONNIFY_INSUFFICIENT_BALANCE", details: { availableBalance: preview.disbursementBalance, requiredAmount: preview.validatedSalaryTotal } });
   if (transactions.length > 5000) throw new AppError("Monnify bulk payroll batches support a maximum of 5,000 employees. Split this payroll into separate approved batches.", 400, { code: "MONNIFY_BATCH_LIMIT_EXCEEDED" });
   if (!transactions.length) throw new AppError("No employees passed Monnify validation. Nothing was submitted.", 422, { code: "MONNIFY_NO_VALID_BENEFICIARIES", details: { employees: preview.employees } });
@@ -602,6 +631,13 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
       select: { batchReference: true, providerStatus: true },
     });
     if (openBatch) throw new AppError(`This company's Monnify wallet already has an open batch (${openBatch.batchReference}, ${openBatch.providerStatus}). Reconcile it before submitting another payroll batch.`, 409, { code: "MONNIFY_DUPLICATE_PAYROLL_BATCH" });
+    await debitWalletInTransaction(tx, companyId, {
+      account: "MONNIFY",
+      amount: Number(totalAmount.toFixed(2)).toFixed(2),
+      reference: `MONNIFY-PAYROLL-RESERVE-${batchReference}`,
+      description: `Reserve Monnify payroll salary batch ${periodId}`,
+      metadata: { provider: "MONNIFY", periodId, batchReference, disbursementIds: transactions.map((item) => item.disbursementId), totalAmount: Number(totalAmount.toFixed(2)) },
+    });
     return tx.companyMonnifyBatch.create({
       data: {
         companyId,
@@ -741,7 +777,17 @@ export async function refreshPayrollBatch(companyId, batchId) {
 
   await prisma.$transaction(async (tx) => {
     for (const update of updates) {
+      const payout = await tx.payrollDisbursement.findFirst({ where: { id: update.disbursementId, companyId, provider: "MONNIFY" }, select: { id: true, amount: true, status: true } });
       await tx.payrollDisbursement.updateMany({ where: { id: update.disbursementId, companyId, provider: "MONNIFY" }, data: update.data });
+      if (payout && update.data.status === "FAILED") {
+        await creditWalletInTransaction(tx, companyId, {
+          account: "MONNIFY",
+          amount: String(payout.amount),
+          reference: `MONNIFY-PAYROLL-REFUND-${batch.id}-${payout.id}`,
+          description: `Release funds for failed Monnify salary transfer ${payout.id}`,
+          metadata: { provider: "MONNIFY", batchId: batch.id, batchReference: batch.batchReference, disbursementId: payout.id, reason: update.data.failureReason || "Provider confirmed final failure" },
+        });
+      }
     }
     await tx.companyMonnifyBatch.update({
       where: { id: batch.id },
@@ -812,10 +858,20 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
     await prisma.employeeBankAccount.updateMany({ where: { id: account.id }, data: { monnifyBankCode: bank.code, monnifyVerifiedAt: new Date(), accountName: verifiedName } });
   }
   const reference = `EMS-SINGLE-${crypto.randomUUID()}`;
-  const claim = await prisma.payrollDisbursement.updateMany({
-    where: { id: row.id, companyId, status: "FAILED", provider: "MONNIFY", providerStatus: { in: [...finalFailedStatuses] } },
-    data: { status: "PROCESSING", providerStatus: "SUBMITTING_SINGLE", externalReference: reference, providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING" }, failureReason: null, updatedBy: userId },
-  });
+  const claim = await prisma.$transaction(async (tx) => {
+    const updated = await tx.payrollDisbursement.updateMany({
+      where: { id: row.id, companyId, status: "FAILED", provider: "MONNIFY", providerStatus: { in: [...finalFailedStatuses] } },
+      data: { status: "PROCESSING", providerStatus: "SUBMITTING_SINGLE", externalReference: reference, providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING" }, failureReason: null, updatedBy: userId },
+    });
+    if (updated.count !== 1) return updated;
+    await debitWalletInTransaction(tx, companyId, {
+      account: "MONNIFY", amount: String(row.amount),
+      reference: `MONNIFY-SINGLE-RETRY-RESERVE-${row.id}-${reference}`,
+      description: `Reserve Monnify salary retry ${row.id}`,
+      metadata: { provider: "MONNIFY", disbursementId: row.id, periodId, externalReference: reference },
+    });
+    return updated;
+  }, { isolationLevel: "Serializable" });
   if (claim.count !== 1) throw new AppError("This failed payment is already being retried or its status changed. Refresh the payment before trying again.", 409, { code: "MONNIFY_SINGLE_RETRY_ALREADY_CLAIMED" });
   let response;
   try {
@@ -833,11 +889,19 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
     throw new AppError("Monnify's response was not conclusive. Do not retry this salary until you check the saved reference in Monnify.", 502, { code: "MONNIFY_SINGLE_SUBMISSION_UNKNOWN", details: { reference } });
   }
   const result = normalizeSingleTransferResult(response);
-  await prisma.payrollDisbursement.update({ where: { id: row.id }, data: {
-    ...result, provider: "MONNIFY", providerResponse: { ...response, _emsSingleTransfer: true },
-    externalReference: reference, updatedBy: userId,
-    failureReason: result.failureReason,
-  } });
+  await prisma.$transaction(async (tx) => {
+    await tx.payrollDisbursement.update({ where: { id: row.id }, data: {
+      ...result, provider: "MONNIFY", providerResponse: { ...response, _emsSingleTransfer: true },
+      externalReference: reference, updatedBy: userId,
+      failureReason: result.failureReason,
+    } });
+    if (result.status === "FAILED") await creditWalletInTransaction(tx, companyId, {
+      account: "MONNIFY", amount: String(row.amount),
+      reference: `MONNIFY-SINGLE-RETRY-REFUND-${row.id}-${reference}`,
+      description: `Release failed Monnify salary retry ${row.id}`,
+      metadata: { provider: "MONNIFY", disbursementId: row.id, externalReference: reference, reason: result.failureReason },
+    });
+  }, { isolationLevel: "Serializable" });
   if (result.status === "PAID") {
     const remaining = await prisma.payrollDisbursement.count({ where: { companyId, periodId, status: { not: "PAID" } } });
     if (remaining === 0) {
@@ -856,7 +920,15 @@ export async function authorizeSinglePayrollTransfer(companyId, disbursementId, 
   const connection = await requiredConnection(companyId);
   const response = await monnifyEndpoints.authorizeSingle(connection, row.externalReference, String(otp || "").trim());
   const result = normalizeSingleTransferResult(response);
-  await prisma.payrollDisbursement.update({ where: { id: row.id }, data: { ...result, providerResponse: { ...response, _emsSingleTransfer: true } } });
+  await prisma.$transaction(async (tx) => {
+    await tx.payrollDisbursement.update({ where: { id: row.id }, data: { ...result, providerResponse: { ...response, _emsSingleTransfer: true } } });
+    if (result.status === "FAILED") await creditWalletInTransaction(tx, companyId, {
+      account: "MONNIFY", amount: String(row.amount),
+      reference: `MONNIFY-SINGLE-RETRY-REFUND-${row.id}-${row.externalReference}`,
+      description: `Release failed Monnify salary retry ${row.id}`,
+      metadata: { provider: "MONNIFY", disbursementId: row.id, externalReference: row.externalReference, reason: result.failureReason },
+    });
+  }, { isolationLevel: "Serializable" });
   if (result.status === "PAID") {
     const remaining = await prisma.payrollDisbursement.count({ where: { companyId, periodId: row.periodId, status: { not: "PAID" } } });
     if (remaining === 0) {
@@ -873,7 +945,15 @@ export async function refreshSinglePayrollTransfer(companyId, disbursementId) {
   const connection = await requiredConnection(companyId);
   const response = await monnifyEndpoints.singleStatus(connection, row.externalReference);
   const result = normalizeSingleTransferResult(response);
-  await prisma.payrollDisbursement.update({ where: { id: row.id }, data: { ...result, providerResponse: { ...response, _emsSingleTransfer: true } } });
+  await prisma.$transaction(async (tx) => {
+    await tx.payrollDisbursement.update({ where: { id: row.id }, data: { ...result, providerResponse: { ...response, _emsSingleTransfer: true } } });
+    if (result.status === "FAILED" && row.providerResponse?._emsSingleTransfer) await creditWalletInTransaction(tx, companyId, {
+      account: "MONNIFY", amount: String(row.amount),
+      reference: `MONNIFY-SINGLE-RETRY-REFUND-${row.id}-${row.externalReference}`,
+      description: `Release failed Monnify salary retry ${row.id}`,
+      metadata: { provider: "MONNIFY", disbursementId: row.id, externalReference: row.externalReference, reason: result.failureReason },
+    });
+  }, { isolationLevel: "Serializable" });
   if (result.status === "PAID") {
     const remaining = await prisma.payrollDisbursement.count({ where: { companyId: row.companyId, periodId: row.periodId, status: { not: "PAID" } } });
     if (remaining === 0) {

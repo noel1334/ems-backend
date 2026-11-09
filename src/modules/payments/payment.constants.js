@@ -1,6 +1,7 @@
 export const PAYMENT_PROVIDER = Object.freeze({
   PAYSTACK: "PAYSTACK",
   FLUTTERWAVE: "FLUTTERWAVE",
+  MONNIFY: "MONNIFY",
 });
 
 export const PAYMENT_STATUS = Object.freeze({

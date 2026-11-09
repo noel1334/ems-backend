@@ -41,6 +41,14 @@ app.use(
   })
 );
 app.use("/api/v1/payments/webhooks/flutterwave", express.json());
+app.use(
+  "/api/v1/payments/webhooks/monnify",
+  express.json({
+    verify: (req, res, buffer) => {
+      req.rawBody = Buffer.from(buffer);
+    },
+  })
+);
 
 app.use(
   express.json({

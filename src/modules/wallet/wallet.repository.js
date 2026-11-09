@@ -44,8 +44,10 @@ export const findLedgerByReference = async (reference, db = prisma) =>
 export const createLedgerEntry = async (data, db = prisma) =>
   db.walletLedgerEntry.create({ data });
 
-export const updateWalletBalance = async (walletId, balance, db) =>
-  db.wallet.update({ where: { id: walletId }, data: { balance } });
+export const updateWalletAccountBalance = async (walletId, account, balance, db) => {
+  const field = account === "PAYSTACK" ? "paystackBalance" : account === "MONNIFY" ? "monnifyBalance" : "balance";
+  return db.wallet.update({ where: { id: walletId }, data: { [field]: balance } });
+};
 
 export const updateCompanyWalletBalance = async (companyId, balance, db) =>
   db.company.update({ where: { id: companyId }, data: { walletBalance: balance } });

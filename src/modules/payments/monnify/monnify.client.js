@@ -28,6 +28,8 @@ export async function monnifyRequest(connection, method, path, { data, params } 
   }
 }
 export const monnifyEndpoints = {
+  initializeTransaction: (connection, payload) => monnifyRequest(connection, "POST", "/api/v1/merchant/transactions/init-transaction", { data: payload }),
+  verifyTransaction: (connection, paymentReference) => monnifyRequest(connection, "GET", "/api/v2/merchant/transactions/query", { params: { paymentReference } }),
   // Monnify's authenticated Get Banks endpoint is exactly GET /api/v1/banks.
   // Do not append a provider-specific query parameter; consume its responseBody codes.
   banks: (connection) => monnifyRequest(connection, "GET", "/api/v1/banks"),
