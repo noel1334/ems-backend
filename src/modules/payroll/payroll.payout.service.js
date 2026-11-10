@@ -64,6 +64,15 @@ const accountNamesCompatible = (savedName, resolvedName) => {
   return shorter.every((token) => longer.includes(token));
 };
 
+const assertNoCompanySpecificProviderBatch = async (companyId, periodId) => {
+  const [paystackBatch, monnifyBatch] = await Promise.all([
+    prisma.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true, providerStatus: true } }),
+    prisma.companyMonnifyBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true, providerStatus: true } }),
+  ]);
+  const existing = paystackBatch ? { provider: "Company Paystack", ...paystackBatch } : monnifyBatch ? { provider: "Company Monnify", ...monnifyBatch } : null;
+  if (existing) throw new AppError(`This payroll period already has a ${existing.provider} batch (${existing.batchReference}, ${existing.providerStatus}). Reconcile it before using the legacy shared-provider payout route. Only one payout route may pay a payroll period.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT", details: existing });
+};
+
 export const getPayrollPayoutConfiguration = async () => ({
   enabled: String(process.env.PAYROLL_PAYOUTS_ENABLED || "false").trim().toLowerCase() === "true",
   mode: getPayrollPayoutMode(),
@@ -344,6 +353,7 @@ export const getPayrollPayoutBatch = async (companyId, periodId) => {
 };
 
 export const previewPayrollPayoutBatch = async (companyId, periodId, actorId, providerInput) => {
+  await assertNoCompanySpecificProviderBatch(companyId, periodId);
   const provider = String(providerInput || "").toUpperCase();
   const evaluation = await calculatePayoutPreview(companyId, periodId, provider);
   const persisted = await persistPreview(companyId, periodId, actorId, evaluation);
@@ -629,6 +639,7 @@ const getOrCreatePaystackRecipient = async ({ companyId, payout, bankAccount }) 
 };
 
 export const executePayrollPayouts = async (companyId, periodId, actorId, providerInput) => {
+  await assertNoCompanySpecificProviderBatch(companyId, periodId);
   const provider = String(providerInput || "").toUpperCase();
   assertPayrollPayoutProviderConfiguration(provider);
   const batch = await prisma.payrollPayoutBatch.findUnique({ where: { companyId_periodId: { companyId, periodId } } });
@@ -653,6 +664,11 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
   const prepared = evaluation.prepared;
   const pendingIds = evaluation.pending.map((row) => row.id);
   await prisma.$transaction(async (tx) => {
+    const [companyPaystackBatch, companyMonnifyBatch] = await Promise.all([
+      tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
+      tx.companyMonnifyBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
+    ]);
+    if (companyPaystackBatch || companyMonnifyBatch) throw new AppError("A company-specific Paystack or Monnify batch already exists for this payroll period. Reconcile it before using the legacy shared-provider payout route.", 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT" });
     const currentBatch = await tx.payrollPayoutBatch.findFirst({ where: { id: batch.id, companyId, status: "APPROVED", preparationFingerprint: batch.preparationFingerprint } });
     if (!currentBatch) throw new AppError("The approved payout batch changed before reservation. Refresh and review it again.", 409);
     const currentPeriod = await tx.payrollPeriod.findFirst({ where: { id: periodId, companyId, deletedAt: null } });

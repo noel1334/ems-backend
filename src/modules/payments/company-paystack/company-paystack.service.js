@@ -275,6 +275,11 @@ async function markPayrollPaidIfComplete(companyId, periodId) {
 
 export async function submitPayroll(companyId, periodId, userId, previewFingerprint) {
   const connection = await requiredConnection(companyId);
+  const otherProviderBatch = await prisma.companyMonnifyBatch.findFirst({
+    where: { companyId, payrollPeriodId: periodId },
+    select: { batchReference: true, providerStatus: true },
+  });
+  if (otherProviderBatch) throw new AppError(`This payroll period already has a Monnify batch (${otherProviderBatch.batchReference}, ${otherProviderBatch.providerStatus}). Reconcile that batch before switching providers. Only one provider route may pay a payroll period.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT", details: { provider: "MONNIFY", batchReference: otherProviderBatch.batchReference, status: otherProviderBatch.providerStatus } });
   const preview = await preparePreview(companyId, periodId);
   if (!previewFingerprint || previewFingerprint !== preview.fingerprint) throw new AppError("Payroll or bank details changed after preview. Generate a new preview before submitting.", 409, { code: "PAYSTACK_PREVIEW_STALE" });
 
@@ -369,6 +374,8 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   // Re-check under a serializable transaction after recipient preparation so concurrent
   // admins cannot create two payroll batches for the same period.
   const batch = await prisma.$transaction(async (tx) => {
+    const monnifyBatch = await tx.companyMonnifyBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true, providerStatus: true } });
+    if (monnifyBatch) throw new AppError(`This payroll period already has a Monnify batch (${monnifyBatch.batchReference}, ${monnifyBatch.providerStatus}). Reconcile it before switching providers.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT" });
     const openBatch = await tx.companyPaystackBatch.findFirst({
       where: { companyId, payrollPeriodId: periodId, providerStatus: { in: ["SUBMITTING", "SUBMISSION_UNKNOWN", "PENDING_AUTHORIZATION", "AWAITING_VERIFICATION", "PROCESSING", "PENDING"] } },
       select: { batchReference: true, providerStatus: true },
