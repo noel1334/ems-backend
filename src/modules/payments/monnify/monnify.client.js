@@ -44,6 +44,8 @@ export const monnifyEndpoints = {
     }
   },
   balance: (connection, accountNumber) => monnifyRequest(connection, "GET", "/api/v2/disbursements/wallet-balance", { params: { accountNumber } }),
+  settlementDetail: (connection, reference) => monnifyRequest(connection, "GET", "/api/v1/settlement-detail", { params: { reference } }),
+  transactionsBySettlement: (connection, reference, page = 0, size = 50) => monnifyRequest(connection, "GET", "/api/v1/transactions/find-by-settlement-reference", { params: { reference, page, size } }),
   submitBatch: (connection, payload) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch", { data: payload }),
   submitSingle: (connection, payload) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single", { data: payload }),
   authorizeSingle: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single/validate-otp", { data: { reference, authorizationCode } }),

@@ -12,6 +12,8 @@ router.get("/connection", read, asyncHandler(controller.connection));
 router.put("/connection", manage, asyncHandler(controller.save));
 router.delete("/connection", manage, asyncHandler(controller.remove));
 router.post("/connection/test", manage, asyncHandler(controller.test));
+router.get("/funding-status", read, asyncHandler(controller.fundingStatus));
+router.get("/settlement-status", read, asyncHandler(controller.settlementStatus));
 router.get("/banks", read, asyncHandler(controller.banks));
 router.get("/batches", read, asyncHandler(controller.batches));
 router.post("/payroll/preview", manage, asyncHandler(controller.preview));

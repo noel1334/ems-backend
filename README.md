@@ -20,3 +20,8 @@ Run:
 - `node --check tests/unit/employee-profile-bank-update.test.js`
 - `npm test -- tests/unit/employee-profile-bank-update.test.js`
 - `npm test`
+
+
+## Company provider funding monitor
+
+See [company provider funding and settlement monitoring](docs/COMPANY_PROVIDER_FUNDING_AND_SETTLEMENT_MONITOR.md) for endpoints, migration, scheduling configuration, and safety boundaries.

@@ -19,3 +19,7 @@ export const payrollRefresh = async (req,res) => ok(res, await service.refreshPa
 export const singlePayrollSubmit = async (req,res) => ok(res, await service.submitSinglePayrollTransfer(req.user.companyId, req.params.periodId, req.params.disbursementId, req.user.userId), 202);
 export const singlePayrollAuthorize = async (req,res) => ok(res, await service.authorizeSinglePayrollTransfer(req.user.companyId, req.params.disbursementId, req.body?.otp));
 export const singlePayrollRefresh = async (req,res) => ok(res, await service.refreshSinglePayrollTransfer(req.user.companyId, req.params.disbursementId));
+
+export const settlementStatus = async (req,res) => ok(res, await service.getSettlementStatus(req.user.companyId, req.query?.reference || null));
+
+export const fundingStatus = async (req, res) => ok(res, await service.getFundingStatus(req.user.companyId, req.query?.reference || null));

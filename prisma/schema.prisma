@@ -1858,6 +1858,9 @@ model CompanyMonnifyConnection {
   environment            String    @default("sandbox")
   isActive               Boolean   @default(true)
   lastTestedAt           DateTime?
+  lastKnownBalance       Decimal?  @db.Decimal(18, 2)
+  lastFundingCheckAt     DateTime?
+  lastSettlementLookupAt DateTime?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
   company                Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -1895,10 +1898,13 @@ model CompanyPaystackConnection {
   environment         String    @default("test")
   isActive            Boolean   @default(true)
   lastTestedAt        DateTime?
-  lastKnownBalance    Decimal?  @db.Decimal(18, 2)
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
-  company             Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lastKnownBalance       Decimal?  @db.Decimal(18, 2)
+  lastFundingCheckAt     DateTime?
+  lastSettlementCheckAt  DateTime?
+  lastSettlementSnapshot Json?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  company                Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@map("company_paystack_connections")
 }

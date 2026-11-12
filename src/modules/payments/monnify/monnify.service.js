@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import Decimal from "decimal.js";
 import prisma from "../../../config/database.js";
 import AppError from "../../../common/errors/AppError.js";
 import { encryptMonnifySecret, decryptMonnifySecret } from "./monnify.crypto.js";
@@ -158,6 +159,69 @@ export async function testConnection(companyId) {
     balance,
     note: "This is the Monnify disbursement wallet balance. It is separate from the EMS internal company wallet.",
   };
+}
+
+export async function getSettlementStatus(companyId, reference = null) {
+  const connection = await requiredConnection(companyId);
+  const normalizedReference = reference ? String(reference).trim() : null;
+  const [walletPayload, settlementResult] = await Promise.all([
+    monnifyEndpoints.balance(connection, connection.sourceAccountNumber),
+    normalizedReference
+      ? monnifyEndpoints.settlementDetail(connection, normalizedReference)
+          .then((payload) => ({ payload, error: null }))
+          .catch((error) => ({ payload: null, error }))
+      : Promise.resolve({ payload: null, error: null }),
+  ]);
+
+  const available = Number(walletPayload?.availableBalance ?? walletPayload?.availableBalanceAmount ?? walletPayload?.balance);
+  const ledger = Number(walletPayload?.ledgerBalance ?? walletPayload?.ledgerBalanceAmount ?? available);
+  if (!Number.isFinite(available) || available < 0) {
+    throw new AppError("Monnify did not return a valid available disbursement wallet balance.", 502, { code: "MONNIFY_BALANCE_INVALID" });
+  }
+
+  const checkedAt = new Date();
+  await prisma.companyMonnifyConnection.update({
+    where: { companyId },
+    data: {
+      lastTestedAt: checkedAt,
+      lastKnownBalance: new Decimal(available).toDecimalPlaces(2),
+      lastFundingCheckAt: checkedAt,
+      ...(normalizedReference ? { lastSettlementLookupAt: checkedAt } : {}),
+    },
+  });
+
+  return {
+    provider: "MONNIFY",
+    connected: true,
+    environment: connection.environment,
+    currency: String(walletPayload?.currency || "NGN").toUpperCase(),
+    sourceAccountNumber: connection.sourceAccountNumber,
+    disbursementBalance: available,
+    availableDisbursementBalance: available,
+    ledgerBalance: Number.isFinite(ledger) ? ledger : null,
+    balanceSource: "LIVE_PROVIDER_BALANCE",
+    balanceCheckedAt: checkedAt.toISOString(),
+    settlementMonitoring: {
+      supported: true,
+      source: "MONNIFY_SETTLEMENT_DETAIL_API",
+      lookupByReferenceOnly: true,
+      settlementReference: normalizedReference,
+      settlement: settlementResult.payload ? (settlementResult.payload?.responseBody ?? settlementResult.payload) : null,
+      checkedAt: normalizedReference ? checkedAt.toISOString() : null,
+      warning: settlementResult.error?.message || null,
+      note: "Settlement detail requires a Monnify settlement reference. The live disbursement-wallet available balance remains authoritative for payroll readiness.",
+    },
+    manualTopUp: {
+      required: available <= 0,
+      instructions: "Use the Monnify Dashboard's Get Settled Now option where eligible, or fund the connected disbursement wallet through Monnify-supported methods. EMS cannot force a settlement or fabricate provider funds.",
+    },
+    note: "Monnify collection settlements and the disbursement wallet are distinct. The live available wallet balance—not the EMS internal wallet or Monnify ledger balance—is authoritative for payroll readiness.",
+  };
+}
+
+// Shared method name for the automatic read-only funding monitor and API controller.
+export async function getFundingStatus(companyId, reference = null) {
+  return getSettlementStatus(companyId, reference);
 }
 
 export async function listBanks(companyId) {

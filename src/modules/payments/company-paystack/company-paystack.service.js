@@ -105,6 +105,80 @@ export async function testConnection(companyId) {
   return { connected: true, environment: connection.environment, balance: balance.balance, currency: "NGN", balanceKobo: balance.balanceKobo, source: "COMPANY_PAYSTACK_BALANCE" };
 }
 
+export async function getSettlementStatus(companyId, options = {}) {
+  const connection = await requiredConnection(companyId);
+  const page = Math.max(1, Math.min(1000, Number.parseInt(options.page, 10) || 1));
+  const from = options.from ? new Date(options.from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const to = options.to ? new Date(options.to) : new Date();
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+    throw new AppError("Settlement date range is invalid.", 400, { code: "PAYSTACK_SETTLEMENT_DATE_RANGE_INVALID" });
+  }
+
+  const [balancePayload, settlementResult] = await Promise.all([
+    companyPaystackEndpoints.balance(connection),
+    companyPaystackEndpoints
+      .settlements(connection, { page, perPage: 50, from: from.toISOString(), to: to.toISOString() })
+      .then((payload) => ({ payload, error: null }))
+      .catch((error) => ({ payload: null, error })),
+  ]);
+
+  const balance = balanceDetails(balancePayload);
+  const checkedAt = new Date();
+  const settlements = (Array.isArray(settlementResult.payload?.data) ? settlementResult.payload.data : []).map((item) => ({
+    id: String(item.id),
+    status: String(item.status || "unknown").toUpperCase(),
+    currency: item.currency || "NGN",
+    totalAmount: Number(item.total_amount || 0) / 100,
+    effectiveAmount: Number(item.effective_amount || 0) / 100,
+    totalFees: Number(item.total_fees || 0) / 100,
+    totalProcessed: Number(item.total_processed || 0) / 100,
+    settlementDate: item.settlement_date || null,
+    createdAt: item.createdAt || null,
+    updatedAt: item.updatedAt || null,
+  }));
+
+  await prisma.companyPaystackConnection.update({
+    where: { companyId },
+    data: {
+      lastTestedAt: checkedAt,
+      lastKnownBalance: new Decimal(balance.balance).toDecimalPlaces(2),
+      lastFundingCheckAt: checkedAt,
+      lastSettlementCheckAt: checkedAt,
+      ...(settlementResult.error ? {} : { lastSettlementSnapshot: settlements }),
+    },
+  });
+
+  return {
+    provider: "PAYSTACK",
+    connected: true,
+    environment: connection.environment,
+    currency: "NGN",
+    disbursementBalance: balance.balance,
+    availableDisbursementBalance: balance.balance,
+    balanceSource: "LIVE_PROVIDER_BALANCE",
+    balanceCheckedAt: checkedAt.toISOString(),
+    settlementMonitoring: {
+      supported: true,
+      source: "PAYSTACK_SETTLEMENTS_API",
+      settlements,
+      pagination: settlementResult.payload?.meta || null,
+      checkedAt: checkedAt.toISOString(),
+      warning: settlementResult.error?.message || null,
+      settlementWindow: { from: from.toISOString(), to: to.toISOString() },
+    },
+    manualTopUp: {
+      required: balance.balance <= 0,
+      instructions: "Fund the company's Paystack account through the Paystack Dashboard or the funding method enabled on that account. Refresh this endpoint after the funds become available.",
+    },
+    note: "Paystack settlement history reports settlement activity. The live NGN /balance response is authoritative for transfer readiness; a settlement record does not itself prove funds are currently available for payroll.",
+  };
+}
+
+// Shared method name for the automatic read-only funding monitor and API controller.
+export async function getFundingStatus(companyId, options = {}) {
+  return getSettlementStatus(companyId, options);
+}
+
 export async function listBanks(companyId) {
   const connection = await requiredConnection(companyId);
   const response = await companyPaystackEndpoints.banks(connection);
