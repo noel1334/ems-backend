@@ -1,3 +1,6 @@
+export const walletBalanceFieldForPayoutProvider = (provider) =>
+  String(provider || "").toUpperCase() === "PAYSTACK" ? "paystackBalance" : "balance";
+
 export const makePayrollPayoutReference = (disbursementId, attemptNumber = 1) => {
   const id = String(disbursementId).replace(/-/g, "").toLowerCase();
   const suffix = Number(attemptNumber) > 1 ? `-${Number(attemptNumber)}` : "";

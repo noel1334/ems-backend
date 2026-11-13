@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import Decimal from "decimal.js";
 import prisma from "../../../config/database.js";
 import AppError from "../../../common/errors/AppError.js";
+import { claimPayrollFundingRoute } from "../../payroll/payroll.funding-route.service.js";
 import { encryptCompanyPaystackSecret, decryptCompanyPaystackSecret } from "./company-paystack.crypto.js";
 import { companyPaystackEndpoints } from "./company-paystack.client.js";
 import { canSubmitPaystackPreview, explainPaystackAccountError, isPaystackSandboxResolveLimitError, isSkippablePaystackAccountError, partitionPaystackEmployees, preparePaystackRecipients, recipientFailureSummary, shouldResolvePaystackAccounts } from "./company-paystack.utils.js";
@@ -448,6 +449,7 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   // Re-check under a serializable transaction after recipient preparation so concurrent
   // admins cannot create two payroll batches for the same period.
   const batch = await prisma.$transaction(async (tx) => {
+    await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "PAYSTACK" });
     const monnifyBatch = await tx.companyMonnifyBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true, providerStatus: true } });
     if (monnifyBatch) throw new AppError(`This payroll period already has a Monnify batch (${monnifyBatch.batchReference}, ${monnifyBatch.providerStatus}). Reconcile it before switching providers.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT" });
     const openBatch = await tx.companyPaystackBatch.findFirst({
@@ -475,7 +477,7 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
     if (mode === "SINGLE") {
       const item = prepared[0];
       const referenceMap = [{ reference: item.reference, disbursementId: item.disbursementId }];
-      await prisma.payrollDisbursement.update({ where: { id: item.disbursementId }, data: { provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", externalReference: item.reference, status: "PROCESSING", providerStatus: "SUBMITTING", providerResponse: { phase: "SUBMITTING" }, failureReason: null } });
+      await prisma.payrollDisbursement.update({ where: { id: item.disbursementId }, data: { fundingRoute: "DIRECT_PROVIDER", provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", externalReference: item.reference, status: "PROCESSING", providerStatus: "SUBMITTING", providerResponse: { phase: "SUBMITTING" }, failureReason: null } });
       await prisma.companyPaystackBatch.update({ where: { id: batch.id }, data: { providerResponse: { ...skippedMetadata, transfersInitiated: true, _emsTransactionMap: referenceMap, reference: item.reference } } });
       const result = await companyPaystackEndpoints.initiateSingle(connection, { source: "balance", amount: item.amountKobo, recipient: item.recipientCode, reference: item.reference, reason: `EMS salary ${periodId}`.slice(0, 100), currency: "NGN" });
       const data = result.data || {};
@@ -505,7 +507,7 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
       const chunkReferences = chunk.map((item) => ({ reference: item.reference, disbursementId: item.disbursementId }));
       await prisma.payrollDisbursement.updateMany({
         where: { id: { in: chunk.map((item) => item.disbursementId) }, companyId, status: "PENDING", provider: null },
-        data: { provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", status: "PROCESSING", providerStatus: "SUBMITTING", failureReason: null },
+        data: { fundingRoute: "DIRECT_PROVIDER", provider: "PAYSTACK_COMPANY", method: "PAYSTACK_COMPANY_DIRECT", status: "PROCESSING", providerStatus: "SUBMITTING", failureReason: null },
       });
       transactionMap.push(...chunkReferences);
       const chunkMeta = { index: chunkIndex + 1, status: "SUBMITTING", count: chunk.length, references: chunkReferences.map((item) => item.reference) };
@@ -716,17 +718,27 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
   const audit = singleTransferAudit(row);
   const singleMetadata = { _emsSingleTransfer: true, ...audit, status: "SUBMITTING" };
 
-  const claim = await prisma.payrollDisbursement.updateMany({
-    where: {
-      id: row.id, companyId, periodId, provider: "PAYSTACK_COMPANY", status: "FAILED",
-      providerStatus: { in: [...finalPaystackFailureStatuses] }, verifiedAt: { not: null },
-    },
-    data: {
-      status: "PROCESSING", providerStatus: "SUBMITTING_SINGLE", externalReference: reference,
-      providerTransferId: null, providerResponse: singleMetadata, failureReason: null,
-      paidAt: null, verifiedAt: null, updatedBy: userId,
-    },
-  });
+  const claim = await prisma.$transaction(async (tx) => {
+    await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "PAYSTACK" });
+    return tx.payrollDisbursement.updateMany({
+      where: {
+        id: row.id, companyId, periodId, provider: "PAYSTACK_COMPANY", status: "FAILED",
+        providerStatus: { in: [...finalPaystackFailureStatuses] }, verifiedAt: { not: null },
+      },
+      data: {
+        fundingRoute: "DIRECT_PROVIDER",
+        status: "PROCESSING",
+        providerStatus: "SUBMITTING_SINGLE",
+        externalReference: reference,
+        providerTransferId: null,
+        providerResponse: singleMetadata,
+        failureReason: null,
+        paidAt: null,
+        verifiedAt: null,
+        updatedBy: userId,
+      },
+    });
+  }, { isolationLevel: "Serializable" });
   if (claim.count !== 1) throw new AppError("This failed salary is already being retried or its status changed. Refresh the payroll register before trying again.", 409, { code: "PAYSTACK_SINGLE_RETRY_ALREADY_CLAIMED" });
 
   let response;

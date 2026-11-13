@@ -21,6 +21,7 @@ import {
   normalizePayrollPayoutStatus,
   isDefinitiveTransferFailure,
   makePayoutWebhookEventKey,
+  walletBalanceFieldForPayoutProvider,
 } from "./payroll.payout.utils.js";
 import {
   assertPayrollPayoutProviderConfiguration,
@@ -29,11 +30,14 @@ import {
 } from "./payroll.payout.config.js";
 import { estimatePayrollPayoutFee, providerReportedPayoutFee } from "./payroll.payout.fees.js";
 import { resolveBankAccount } from "../employees/bank-directory.service.js";
+import { claimPayrollFundingRoute } from "./payroll.funding-route.service.js";
 
 const money = (value) => new Decimal(value ?? 0).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 const transactionOptions = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30000 };
 const isProvider = (provider) => ["PAYSTACK", "FLUTTERWAVE"].includes(String(provider || "").toUpperCase());
 const walletAccountForPayoutProvider = (provider) => String(provider || "").toUpperCase() === "PAYSTACK" ? "PAYSTACK" : "GENERAL";
+const walletBalanceForPayoutProvider = (wallet, provider) =>
+  money(wallet?.[walletBalanceFieldForPayoutProvider(provider)] ?? 0);
 const asText = (value, max = 500) => String(value ?? "").trim().slice(0, max);
 const mapWithConcurrency = async (items, concurrency, mapper) => {
   const output = new Array(items.length);
@@ -205,7 +209,7 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
   let walletBalance = new Decimal(0);
   try {
     const wallet = await getWallet(companyId);
-    walletBalance = money(wallet[walletAccountForPayoutProvider(provider) === "PAYSTACK" ? "paystackBalance" : "monnifyBalance"]);
+    walletBalance = walletBalanceForPayoutProvider(wallet, provider);
   } catch (error) {
     errors.push({ code: "WALLET_UNAVAILABLE", message: asText(error?.message || "Company wallet balance could not be read.") });
   }
@@ -314,13 +318,13 @@ const persistPreview = async (companyId, periodId, actorId, evaluation) => {
     const batch = await tx.payrollPayoutBatch.upsert({
       where: { companyId_periodId: { companyId, periodId } },
       create: {
-        companyId, periodId, provider: preview.provider, status: "PREPARED", employeeCount: preview.employeeCount,
+        companyId, periodId, provider: preview.provider, fundingRoute: "EMS_WALLET", status: "PREPARED", employeeCount: preview.employeeCount,
         salaryAmount: salaryTotal.toFixed(2), estimatedFeeAmount: feeTotal.toFixed(2), reservedAmount: "0.00",
         providerAvailableBalance: providerAvailableBalance === null ? null : providerAvailableBalance.toFixed(2),
         walletBalanceAtPreview: walletBalance.toFixed(2), validationResults: preview, preparationFingerprint: preview.preparationFingerprint, previewedAt: new Date(), createdBy: actorId,
       },
       update: {
-        provider: preview.provider, status: "PREPARED", employeeCount: preview.employeeCount,
+        provider: preview.provider, fundingRoute: "EMS_WALLET", status: "PREPARED", employeeCount: preview.employeeCount,
         salaryAmount: salaryTotal.toFixed(2), estimatedFeeAmount: feeTotal.toFixed(2), reservedAmount: "0.00",
         providerAvailableBalance: providerAvailableBalance === null ? null : providerAvailableBalance.toFixed(2),
         walletBalanceAtPreview: walletBalance.toFixed(2), validationResults: preview, preparationFingerprint: preview.preparationFingerprint, previewedAt: new Date(),
@@ -348,8 +352,7 @@ export const getPayrollPayoutBatch = async (companyId, periodId) => {
     prisma.payrollPayoutBatch.findUnique({ where: { companyId_periodId: { companyId, periodId } } }),
     getWallet(companyId),
   ]);
-  const walletAccount = batch ? walletAccountForPayoutProvider(batch.provider) : "GENERAL";
-  return { batch, walletBalance: money(wallet[walletAccount === "PAYSTACK" ? "paystackBalance" : "monnifyBalance"]).toFixed(2) };
+  return { batch, walletBalance: walletBalanceForPayoutProvider(wallet, batch?.provider || "FLUTTERWAVE").toFixed(2) };
 };
 
 export const previewPayrollPayoutBatch = async (companyId, periodId, actorId, providerInput) => {
@@ -664,6 +667,7 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
   const prepared = evaluation.prepared;
   const pendingIds = evaluation.pending.map((row) => row.id);
   await prisma.$transaction(async (tx) => {
+    await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "EMS_WALLET", provider });
     const [companyPaystackBatch, companyMonnifyBatch] = await Promise.all([
       tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
       tx.companyMonnifyBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
@@ -687,7 +691,7 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
       const fee = row.fee;
       const reference = makePayrollPayoutReference(row.row.id, 1);
       await tx.payrollDisbursement.update({ where: { id: row.row.id }, data: {
-        batchId: batch.id, status: "PROCESSING", method: provider, provider, externalReference: reference,
+        batchId: batch.id, fundingRoute: "EMS_WALLET", status: "PROCESSING", method: provider, provider, externalReference: reference,
         estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null,
         providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, failureReason: null, updatedBy: actorId,
       } });
@@ -888,17 +892,18 @@ export const retryFailedPayrollPayout = async (companyId, disbursementId, actorI
   if (mode === "live" && providerBalanceError) throw new AppError(`${provider} available balance could not be verified: ${providerBalanceError}`, 503);
   if (mode === "live" && providerBalance && providerBalance.lessThan(required)) throw new AppError(`${provider} available balance is insufficient for this retry including estimated fee.`, 409, { details: { providerAvailableBalance: providerBalance.toFixed(2), requiredAmount: required.toFixed(2) } });
   const wallet = await getWallet(companyId);
-  const retryWalletBalance = money(wallet[walletAccountForPayoutProvider(provider) === "PAYSTACK" ? "paystackBalance" : "monnifyBalance"]);
+  const retryWalletBalance = walletBalanceForPayoutProvider(wallet, provider);
   if (retryWalletBalance.lessThan(required)) throw new AppError("Company salary balance is insufficient for this retry including fee.", 409, { details: { walletBalance: retryWalletBalance.toFixed(2), salaryAccount: walletAccountForPayoutProvider(provider), requiredAmount: required.toFixed(2) } });
 
   const attemptNumber = Number(latestAttempt.attemptNumber || 1) + 1;
   const reference = makePayrollPayoutReference(payout.id, attemptNumber);
   await prisma.$transaction(async (tx) => {
+    await claimPayrollFundingRoute(tx, { companyId, periodId: payout.periodId, fundingRoute: "EMS_WALLET", provider });
     const current = await tx.payrollDisbursement.findFirst({ where: { id: payout.id, companyId, status: "FAILED" } });
     if (!current) throw new AppError("Transfer status changed before retry reservation. Refresh and verify again.", 409);
     await debitWalletInTransaction(tx, companyId, { account: walletAccountForPayoutProvider(provider), amount: required.toFixed(2), reference: `PAYROLL-RETRY-RESERVE-${payout.id}-ATT-${attemptNumber}`, description: `Reserve confirmed failed salary retry ${payout.id}`, metadata: { disbursementId: payout.id, attemptNumber, provider, salaryAmount: money(payout.amount).toFixed(2), estimatedFee: fee.toFixed(2) } });
     await tx.payrollPayoutAttempt.create({ data: { companyId, disbursementId: payout.id, attemptNumber, provider, externalReference: reference, status: "SUBMITTED", amount: money(payout.amount).toFixed(2), estimatedFeeAmount: fee.toFixed(2), createdBy: actorId, submittedAt: new Date() } });
-    await tx.payrollDisbursement.update({ where: { id: payout.id }, data: { status: "PROCESSING", provider, method: provider, externalReference: reference, providerTransferId: null, providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null, failureReason: null, updatedBy: actorId } });
+    await tx.payrollDisbursement.update({ where: { id: payout.id }, data: { fundingRoute: "EMS_WALLET", status: "PROCESSING", provider, method: provider, externalReference: reference, providerTransferId: null, providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null, failureReason: null, updatedBy: actorId } });
     if (payout.batchId) await refreshBatchStatus(tx, companyId, payout.batchId, payout.periodId);
     await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_disbursement", resourceId: payout.id, metadata: { event: "FAILED_PAYOUT_RETRY_RESERVED", attemptNumber, provider, requiredAmount: required.toFixed(2), reference } });
   }, transactionOptions);

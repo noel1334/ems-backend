@@ -1399,6 +1399,10 @@ model PayrollPeriod {
   isActive      Boolean               @default(true)
   // Soft deletion keeps payroll and payment history available for audit/reporting.
   deletedAt     DateTime?
+  // A submitted payroll period is permanently bound to one funding route/provider.
+  payoutFundingRoute String?
+  payoutProvider String?
+  payoutRouteLockedAt DateTime?
   createdAt     DateTime              @default(now())
   updatedAt     DateTime              @updatedAt
   company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -1462,6 +1466,8 @@ model PayrollDisbursement {
   currency                   String                 @default("NGN")
   status                     String                 @default("PENDING")
   method                     String                 @default("MANUAL_BANK_TRANSFER")
+  // Explicit source-of-funds classification; null only for historical/manual records.
+  fundingRoute               String?
   // Provider payout state is kept separate from the locally reserved wallet amount.
   provider                   String?
   providerTransferId         String?
@@ -1495,6 +1501,7 @@ model PayrollPayoutBatch {
   companyId                String
   periodId                 String
   provider                 String
+  fundingRoute             String                @default("EMS_WALLET")
   status                   String                @default("PREPARED")
   employeeCount            Int                   @default(0)
   salaryAmount             Decimal               @default(0) @db.Decimal(18, 2)

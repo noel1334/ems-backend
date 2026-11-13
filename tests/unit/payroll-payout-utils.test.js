@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { isDefinitiveTransferFailure, makePayrollPayoutReference, makePayoutWebhookEventKey, normalizePayrollPayoutStatus } from "../../src/modules/payroll/payroll.payout.utils.js";
+import { isDefinitiveTransferFailure, makePayrollPayoutReference, makePayoutWebhookEventKey, normalizePayrollPayoutStatus, walletBalanceFieldForPayoutProvider } from "../../src/modules/payroll/payroll.payout.utils.js";
 
 describe("automated payroll payout safety helpers", () => {
+  it("reads the EMS internal wallet account actually debited by each legacy payout provider", () => {
+    expect(walletBalanceFieldForPayoutProvider("PAYSTACK")).toBe("paystackBalance");
+    expect(walletBalanceFieldForPayoutProvider("FLUTTERWAVE")).toBe("balance");
+    expect(walletBalanceFieldForPayoutProvider("flutterwave")).toBe("balance");
+  });
+
   it("creates a stable, provider-compatible unique reference per attempt", () => {
     const id = "123e4567-e89b-12d3-a456-426614174000";
     const first = makePayrollPayoutReference(id);

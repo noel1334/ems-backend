@@ -6,6 +6,7 @@ import { encryptMonnifySecret, decryptMonnifySecret } from "./monnify.crypto.js"
 import { monnifyEndpoints } from "./monnify.client.js";
 import { canonicalMonnifyBankName, normalizeMonnifyBanks } from "./monnify.utils.js";
 import { creditWalletInTransaction } from "../../wallet/wallet.service.js";
+import { claimPayrollFundingRoute } from "../../payroll/payroll.funding-route.service.js";
 
 const OPEN_BATCH_STATUSES = [
   "SUBMITTING",
@@ -405,18 +406,21 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
   const batchReference = `EMS-${crypto.randomUUID()}`;
 
   // Persist the submission lock only after every beneficiary passes server-side validation.
-  const saved = await prisma.companyMonnifyBatch.create({
-    data: {
-      companyId,
-      payrollPeriodId,
-      batchReference,
-      totalAmount,
-      totalTransactions: transactionList.length,
-      submittedBy: userId,
-      providerStatus: "SUBMITTING",
-      environment: connection.environment,
-    },
-  });
+  const saved = await prisma.$transaction(async (tx) => {
+    await claimPayrollFundingRoute(tx, { companyId, periodId: payrollPeriodId, fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" });
+    return tx.companyMonnifyBatch.create({
+      data: {
+        companyId,
+        payrollPeriodId,
+        batchReference,
+        totalAmount,
+        totalTransactions: transactionList.length,
+        submittedBy: userId,
+        providerStatus: "SUBMITTING",
+        environment: connection.environment,
+      },
+    });
+  }, { isolationLevel: "Serializable" });
 
   try {
     const response = await monnifyEndpoints.submitBatch(connection, {
@@ -690,6 +694,7 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   // Serialize company-specific provider batches. The connected Monnify disbursement
   // account is the source of funds; do not reserve/debit the separate EMS wallet.
   const savedBatch = await prisma.$transaction(async (tx) => {
+    await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" });
     const paystackBatch = await tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId }, select: { batchReference: true, providerStatus: true } });
     if (paystackBatch) throw new AppError(`This payroll period already has a Paystack batch (${paystackBatch.batchReference}, ${paystackBatch.providerStatus}). Reconcile it before switching providers.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT" });
     const openBatch = await tx.companyMonnifyBatch.findFirst({
@@ -742,6 +747,7 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
         where: { id: transaction.disbursementId, companyId, periodId, status: "PENDING", provider: null },
         data: {
           status: "PROCESSING",
+          fundingRoute: "DIRECT_PROVIDER",
           method: "MONNIFY_BULK_TRANSFER",
           provider: "MONNIFY",
           providerTransferId: batchReference,
@@ -922,9 +928,10 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
   }
   const reference = `EMS-SINGLE-${crypto.randomUUID()}`;
   const claim = await prisma.$transaction(async (tx) => {
+    await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" });
     const updated = await tx.payrollDisbursement.updateMany({
       where: { id: row.id, companyId, status: "FAILED", provider: "MONNIFY", providerStatus: { in: [...finalFailedStatuses] } },
-      data: { status: "PROCESSING", providerStatus: "SUBMITTING_SINGLE", externalReference: reference, providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING" }, failureReason: null, updatedBy: userId },
+      data: { fundingRoute: "DIRECT_PROVIDER", status: "PROCESSING", providerStatus: "SUBMITTING_SINGLE", externalReference: reference, providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING" }, failureReason: null, updatedBy: userId },
     });
     if (updated.count !== 1) return updated;
     return updated;

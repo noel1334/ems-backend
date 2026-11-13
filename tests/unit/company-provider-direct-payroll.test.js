@@ -32,4 +32,23 @@ describe("company-direct provider payroll funding", () => {
     expect(legacy).toMatch(/tx\.companyMonnifyBatch\.findFirst/);
     expect(legacy).toMatch(/PAYROLL_PROVIDER_ROUTE_CONFLICT/);
   });
+  it("claims the shared period lock for company Paystack and Monnify, without internal wallet debits", () => {
+    const paystack = read("src/modules/payments/company-paystack/company-paystack.service.js");
+    const monnify = read("src/modules/payments/monnify/monnify.service.js");
+    expect(paystack).toMatch(/claimPayrollFundingRoute\(tx, \{ companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "PAYSTACK" \}\)/);
+    expect(monnify).toMatch(/claimPayrollFundingRoute\(tx, \{ companyId, periodId: payrollPeriodId, fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" \}\)/);
+    expect(paystack).toMatch(/fundingRoute: "DIRECT_PROVIDER"/);
+    expect(monnify).toMatch(/fundingRoute: "DIRECT_PROVIDER"/);
+    expect(paystack).not.toMatch(/debitWalletInTransaction\s*\(/);
+    expect(monnify).not.toMatch(/debitWalletInTransaction\s*\(/);
+  });
+
+  it("classifies the legacy Paystack/Flutterwave transfer workflow as EMS Wallet Payroll", () => {
+    const legacy = read("src/modules/payroll/payroll.payout.service.js");
+    expect(legacy).toMatch(/claimPayrollFundingRoute\(tx, \{ companyId, periodId, fundingRoute: "EMS_WALLET", provider \}\)/);
+    expect(legacy).toMatch(/fundingRoute: "EMS_WALLET"/);
+    expect(legacy).toMatch(/walletAccountForPayoutProvider = \(provider\) => String\(provider \|\| ""\)\.toUpperCase\(\) === "PAYSTACK" \? "PAYSTACK" : "GENERAL"/);
+    expect(legacy).toMatch(/walletBalanceFieldForPayoutProvider\(provider\)/);
+  });
+
 });
