@@ -8,6 +8,7 @@ export const initializeFundingSchema = z.object({
   email: z.string().email(),
   provider: z.enum(["PAYSTACK", "FLUTTERWAVE", "MONNIFY"]),
   salaryAccount: z.enum(["PAYSTACK", "MONNIFY"]).default("PAYSTACK"),
+  fundingDestination: z.enum(["EMS_INTERNAL_WALLET", "EXTERNAL_PROVIDER_PAYOUT"]).default("EMS_INTERNAL_WALLET"),
   callbackUrl: z.string().url().optional(),
   idempotencyKey: z.string().trim().min(8).max(128).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),

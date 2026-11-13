@@ -13,11 +13,14 @@ import { companyPaystackEndpoints } from "./company-paystack/company-paystack.cl
 import { decryptCompanyPaystackSecret } from "./company-paystack/company-paystack.crypto.js";
 import { monnifyEndpoints } from "./monnify/monnify.client.js";
 import { decryptMonnifySecret } from "./monnify/monnify.crypto.js";
+import { createFlutterwaveSubaccount } from "./flutterwave/flutterwave.client.js";
+import { validateProviderBankCode } from "./bank-directory.service.js";
 
 const money = (value) => new Decimal(value).toDecimalPlaces(2);
 const generateReference = () => `PAY-${Date.now()}-${crypto.randomBytes(8).toString("hex").toUpperCase()}`;
 const paymentFingerprint = (input, gatewayOwner) => JSON.stringify({
   provider: input.provider,
+  fundingDestination: input.fundingDestination || "EMS_INTERNAL_WALLET",
   gatewayOwner,
   email: String(input.email || "").trim().toLowerCase(),
   amount: money(input.amount).toFixed(2),
@@ -41,6 +44,63 @@ const assertProviderConfiguration = (provider) => {
   }
 };
 
+export const getFlutterwaveSubaccountConfig = async (companyId) => {
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { flutterwaveSubaccountId: true } });
+  if (!company) throw new AppError("Company not found", 404);
+  const value = String(company.flutterwaveSubaccountId || "");
+  return { configured: Boolean(value), maskedId: value ? `••••${value.slice(-4)}` : null };
+};
+
+export const createCompanyFlutterwaveSubaccount = async (companyId, input) => {
+  if (!process.env.FLUTTERWAVE_SECRET_KEY) throw new AppError("Flutterwave is not configured on the EMS merchant account.", 503, { code: "FLUTTERWAVE_NOT_CONFIGURED" });
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { id: true, name: true, legalName: true, email: true, flutterwaveSubaccountId: true },
+  });
+  if (!company) throw new AppError("Company not found", 404);
+  if (company.flutterwaveSubaccountId) throw new AppError("This company already has a Flutterwave subaccount linked.", 409, { code: "FLUTTERWAVE_SUBACCOUNT_ALREADY_CONFIGURED" });
+
+  const bank = await validateProviderBankCode("FLUTTERWAVE", input.accountBank);
+  const accountNumber = String(input.accountNumber || "").trim();
+  const businessMobile = String(input.businessMobile || "").trim();
+  const businessName = String(company.legalName || company.name || "").trim();
+  if (!businessName) throw new AppError("Add the company's legal/business name before creating a Flutterwave subaccount.", 409, { code: "COMPANY_BUSINESS_NAME_REQUIRED" });
+
+  const response = await createFlutterwaveSubaccount({
+    account_bank: bank.bankCode,
+    account_number: accountNumber,
+    business_name: businessName.slice(0, 100),
+    country: "NG",
+    split_type: "percentage",
+    split_value: 1,
+    business_mobile: businessMobile,
+    ...(company.email ? { business_email: company.email } : {}),
+    business_contact: businessName.slice(0, 100),
+    business_contact_mobile: businessMobile,
+    meta: [{ meta_name: "emsCompanyId", meta_value: companyId }],
+  });
+  const subaccountId = String(response?.data?.subaccount_id || "").trim();
+  if (String(response?.status || "").toLowerCase() !== "success" || !/^RS_[A-Za-z0-9]+$/.test(subaccountId)) {
+    throw new AppError("Flutterwave did not return a valid company subaccount ID. No EMS subaccount link was saved.", 502, { code: "FLUTTERWAVE_SUBACCOUNT_CREATE_INVALID_RESPONSE" });
+  }
+
+  const saved = await prisma.company.updateMany({
+    where: { id: companyId, flutterwaveSubaccountId: null },
+    data: { flutterwaveSubaccountId: subaccountId },
+  });
+  if (saved.count !== 1) {
+    throw new AppError("A Flutterwave subaccount was created, but another request linked a subaccount first. Contact EMS support before retrying to avoid creating duplicates.", 409, { code: "FLUTTERWAVE_SUBACCOUNT_LINK_RACE", details: { createdSubaccountId: `••••${subaccountId.slice(-4)}` } });
+  }
+  return { configured: true, maskedId: `••••${subaccountId.slice(-4)}`, bankName: bank.bankName };
+};
+
+export const setFlutterwaveSubaccount = async (companyId, subaccountId) => {
+  const value = String(subaccountId || "").trim();
+  if (!/^[A-Za-z0-9_-]{8,120}$/.test(value)) throw new AppError("Enter a valid Flutterwave subaccount ID copied from the company's Flutterwave account.", 400, { code: "FLUTTERWAVE_SUBACCOUNT_ID_INVALID" });
+  const updated = await prisma.company.update({ where: { id: companyId }, data: { flutterwaveSubaccountId: value }, select: { flutterwaveSubaccountId: true } });
+  return { configured: true, maskedId: `••••${String(updated.flutterwaveSubaccountId).slice(-4)}` };
+};
+
 export const initializePayment = async (companyId, input) => {
   if (!companyId) throw new AppError("A company context is required to fund a company wallet.", 403, { code: "WALLET_COMPANY_CONTEXT_REQUIRED" });
   const company = await repository.findCompanyPaymentConfig(companyId);
@@ -48,7 +108,17 @@ export const initializePayment = async (companyId, input) => {
 
   const amount = money(input.amount);
   if (!amount.isFinite() || !amount.isPositive()) throw new AppError("Payment amount must be greater than zero", 400);
-  const salaryAccount = String(input.salaryAccount || "PAYSTACK").trim().toUpperCase();
+  const fundingDestination = String(input.fundingDestination || "EMS_INTERNAL_WALLET").trim().toUpperCase();
+  if (!["EMS_INTERNAL_WALLET", "EXTERNAL_PROVIDER_PAYOUT"].includes(fundingDestination)) {
+    throw new AppError("Choose EMS internal wallet or an external provider payout account.", 400, { code: "INVALID_WALLET_FUNDING_DESTINATION" });
+  }
+  let salaryAccount = String(input.salaryAccount || "PAYSTACK").trim().toUpperCase();
+  if (fundingDestination === "EXTERNAL_PROVIDER_PAYOUT") {
+    if (![PAYMENT_PROVIDER.PAYSTACK, PAYMENT_PROVIDER.MONNIFY].includes(input.provider)) {
+      throw new AppError("External payout-account funding is available only through the same company's Paystack or Monnify connection. Flutterwave checkout cannot be assumed to fund either disbursement wallet.", 400, { code: "EXTERNAL_PROVIDER_FUNDING_PROVIDER_UNSUPPORTED" });
+    }
+    salaryAccount = input.provider;
+  }
   if (!["PAYSTACK", "MONNIFY"].includes(salaryAccount)) {
     throw new AppError("Choose either the Paystack or Monnify salary account as the funding destination.", 400, { code: "INVALID_SALARY_ACCOUNT_DESTINATION" });
   }
@@ -79,7 +149,7 @@ export const initializePayment = async (companyId, input) => {
     throw new AppError("Unsupported payment provider", 400, { code: "UNSUPPORTED_PAYMENT_PROVIDER" });
   }
 
-  const fingerprint = paymentFingerprint({ ...input, metadata: { ...(input.metadata || {}), salaryAccount: salaryAccount } }, gatewayOwner);
+  const fingerprint = paymentFingerprint({ ...input, fundingDestination, salaryAccount, metadata: { ...(input.metadata || {}), salaryAccount, fundingDestination } }, gatewayOwner);
   if (input.idempotencyKey) {
     const existing = await repository.findPaymentByIdempotencyKey(companyId, input.idempotencyKey);
     if (existing) {
@@ -100,6 +170,7 @@ export const initializePayment = async (companyId, input) => {
     __gatewayOwner: gatewayOwner,
     __companyId: companyId,
     __salaryAccount: salaryAccount,
+    __fundingDestination: fundingDestination,
     ...(input.provider === PAYMENT_PROVIDER.MONNIFY
       ? { __monnifyEnvironment: companyMonnifyConnection.environment }
       : {}),
@@ -251,19 +322,31 @@ const completeSuccessfulPayment = async (paymentId, providerReference, providerR
 
     const salaryAccount = String(payment.metadata?.__salaryAccount || "PAYSTACK").toUpperCase();
     if (!["PAYSTACK", "MONNIFY"].includes(salaryAccount)) throw new AppError("Payment has an invalid salary account destination", 409, { code: "PAYMENT_SALARY_ACCOUNT_INVALID" });
-    await creditWalletInTransaction(tx, payment.companyId, {
-      amount: payment.amount,
-      account: salaryAccount,
-      reference: `PAYMENT-${payment.reference}`,
-      description: `Salary account funding via ${payment.provider} → ${salaryAccount}`,
-      metadata: { paymentId: payment.id, provider: payment.provider, providerReference, salaryAccount },
-    });
+    const fundingDestination = String(payment.metadata?.__fundingDestination || "EMS_INTERNAL_WALLET").toUpperCase();
+    if (!["EMS_INTERNAL_WALLET", "EXTERNAL_PROVIDER_PAYOUT"].includes(fundingDestination)) throw new AppError("Payment has an invalid funding destination", 409, { code: "PAYMENT_FUNDING_DESTINATION_INVALID" });
+    if (fundingDestination === "EXTERNAL_PROVIDER_PAYOUT") {
+      if (payment.provider !== salaryAccount) throw new AppError("External provider funding must use the same company provider account as the checkout gateway.", 409, { code: "EXTERNAL_PROVIDER_FUNDING_MISMATCH" });
+      // Do not create an EMS ledger credit. A verified collection is not the same as
+      // a provider's available disbursement balance; settlement remains provider-controlled.
+    } else {
+      await creditWalletInTransaction(tx, payment.companyId, {
+        amount: payment.amount,
+        account: salaryAccount,
+        reference: `PAYMENT-${payment.reference}`,
+        description: `Salary account funding via ${payment.provider} → ${salaryAccount}`,
+        metadata: { paymentId: payment.id, provider: payment.provider, providerReference, salaryAccount },
+      });
+    }
 
     return repository.updatePayment(payment.id, {
       status: PAYMENT_STATUS.SUCCESSFUL,
       providerReference: providerReference || payment.providerReference,
       paidAt: new Date(),
-      metadata: { ...(payment.metadata || {}), providerResponse },
+      metadata: {
+        ...(payment.metadata || {}),
+        providerResponse,
+        ...(fundingDestination === "EXTERNAL_PROVIDER_PAYOUT" ? { __settlementStatus: "AWAITING_PROVIDER_SETTLEMENT", __internalWalletCredited: false } : { __internalWalletCredited: true }),
+      },
     }, tx);
   }, { isolationLevel: "Serializable" });
 };

@@ -27,8 +27,21 @@ export const initializeFlutterwaveTransaction = async ({ email, amount, referenc
       redirect_url: callbackUrl,
       customer: { email },
       meta: metadata,
+      // The company subaccount is configured with a 100% settlement split.
+      // A zero `flat` platform commission leaves the post-provider-fee remainder
+      // with that subaccount; a transaction_charge equal to amount would retain
+      // the entire amount for the platform instead.
       ...(subaccountId ? { subaccounts: [{ id: subaccountId, transaction_charge_type: "flat", transaction_charge: 0 }] } : {}),
     });
+    return response.data;
+  } catch (error) {
+    throw providerError(error);
+  }
+};
+
+export const createFlutterwaveSubaccount = async (details) => {
+  try {
+    const response = await client.post("/subaccounts", details);
     return response.data;
   } catch (error) {
     throw providerError(error);

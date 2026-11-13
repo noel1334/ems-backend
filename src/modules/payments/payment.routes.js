@@ -12,6 +12,9 @@ router.post("/webhooks/monnify", controller.monnifyWebhook);
 
 router.use(authenticate);
 router.get("/banks", controller.listBanks);
+router.get("/flutterwave/subaccount", requirePermission("payments", "payments", "READ"), controller.flutterwaveSubaccountConfig);
+router.post("/flutterwave/subaccount/create", requirePermission("payments", "payments", "MANAGE"), controller.createFlutterwaveSubaccount);
+router.put("/flutterwave/subaccount", requirePermission("payments", "payments", "MANAGE"), controller.setFlutterwaveSubaccount);
 router.get("/", requirePermission("payments", "payments", "READ"), controller.list);
 router.get("/:id", requirePermission("payments", "payments", "READ"), controller.getOne);
 router.post("/initialize", paymentRateLimit, requirePermission("payments", "payments", "CREATE"), controller.initialize);

@@ -29,7 +29,8 @@
     "check:stage19": "node scripts/stage19-check.mjs",
     "check:stage21": "node scripts/stage21-check.mjs",
     "check:stage24": "node scripts/stage24-check.mjs",
-    "check:stage28": "node scripts/stage28-check.mjs"
+    "check:stage28": "node scripts/stage28-check.mjs",
+    "prestart": "npm run prisma:deploy"
   },
   "keywords": [
     "ems",

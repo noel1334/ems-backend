@@ -11,6 +11,7 @@ export const initializePaymentSchema = z.object({
   purpose: z.literal("WALLET_FUNDING").default("WALLET_FUNDING"),
   provider: z.enum(["PAYSTACK", "FLUTTERWAVE", "MONNIFY"]),
   salaryAccount: z.enum(["PAYSTACK", "MONNIFY"]).default("PAYSTACK"),
+  fundingDestination: z.enum(["EMS_INTERNAL_WALLET", "EXTERNAL_PROVIDER_PAYOUT"]).default("EMS_INTERNAL_WALLET"),
   callbackUrl: z.string().url().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   idempotencyKey: z.string().trim().min(8).max(128).optional(),
@@ -34,3 +35,13 @@ export const paymentQuerySchema = z.object({
 
 export const validateBody = (schema, body) => schema.parse(body);
 export const validateQuery = (schema, query) => schema.parse(query);
+
+export const createFlutterwaveSubaccountSchema = z.object({
+  accountBank: z.string().trim().min(1).max(32),
+  accountNumber: z.string().trim().regex(/^\d{8,20}$/, "Enter a valid bank account number."),
+  businessMobile: z.string().trim().regex(/^\+?[0-9]{8,15}$/, "Enter a valid business phone number with country code where needed."),
+});
+
+export const setFlutterwaveSubaccountSchema = z.object({
+  subaccountId: z.string().trim().min(8).max(120).regex(/^[A-Za-z0-9_-]+$/, "Enter a valid Flutterwave subaccount ID."),
+});

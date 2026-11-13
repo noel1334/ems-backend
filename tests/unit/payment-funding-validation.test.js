@@ -43,6 +43,18 @@ describe("company wallet funding validation", () => {
     }
   });
 
+  it("accepts an explicit external provider payout-account collection destination", () => {
+    const input = {
+      amount: 50000,
+      email: "finance@example.com",
+      provider: "MONNIFY",
+      fundingDestination: "EXTERNAL_PROVIDER_PAYOUT",
+    };
+    expect(initializePaymentSchema.parse(input).fundingDestination).toBe("EXTERNAL_PROVIDER_PAYOUT");
+    expect(initializeFundingSchema.parse(input).fundingDestination).toBe("EXTERNAL_PROVIDER_PAYOUT");
+    expect(initializeFundingSchema.safeParse({ ...input, fundingDestination: "PLATFORM_ACCOUNT" }).success).toBe(false);
+  });
+
   it("defaults the internal salary destination to Paystack for older funding clients", () => {
     const result = initializePaymentSchema.parse({
       amount: 1000,

@@ -1,7 +1,7 @@
 import { getBankDirectory } from "./bank-directory.service.js";
 import * as service from "./payment.service.js";
 import { processCompanyPaystackWebhook } from "./company-paystack/company-paystack.service.js";
-import { initializePaymentSchema, verifyPaymentSchema, paymentQuerySchema, validateBody, validateQuery } from "./payment.validation.js";
+import { initializePaymentSchema, verifyPaymentSchema, paymentQuerySchema, createFlutterwaveSubaccountSchema, setFlutterwaveSubaccountSchema, validateBody, validateQuery } from "./payment.validation.js";
 
 const companyId = (req) => req.tenant?.companyId || req.user?.companyId;
 
@@ -48,3 +48,14 @@ export const flutterwaveWebhook = async (req, res) =>
   res.json(await service.processFlutterwaveWebhook(req.headers["verif-hash"], req.body));
 
 export const listBanks = async (req, res) => res.json({ success: true, data: await getBankDirectory() });
+
+export const flutterwaveSubaccountConfig = async (req, res) => res.json({ success: true, data: await service.getFlutterwaveSubaccountConfig(companyId(req)) });
+export const createFlutterwaveSubaccount = async (req, res) => {
+  const input = validateBody(createFlutterwaveSubaccountSchema, req.body);
+  return res.status(201).json({ success: true, message: "Company Flutterwave subaccount created and linked", data: await service.createCompanyFlutterwaveSubaccount(companyId(req), input) });
+};
+
+export const setFlutterwaveSubaccount = async (req, res) => {
+  const { subaccountId } = validateBody(setFlutterwaveSubaccountSchema, req.body);
+  return res.json({ success: true, message: "Company Flutterwave subaccount saved", data: await service.setFlutterwaveSubaccount(companyId(req), subaccountId) });
+};
