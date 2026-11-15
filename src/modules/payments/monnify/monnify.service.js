@@ -210,7 +210,10 @@ export async function getSettlementStatus(companyId, reference = null) {
       settlement: settlementResult.payload ? (settlementResult.payload?.responseBody ?? settlementResult.payload) : null,
       checkedAt: normalizedReference ? checkedAt.toISOString() : null,
       warning: settlementResult.error?.message || null,
-      note: "Settlement detail requires a Monnify settlement reference. The live disbursement-wallet available balance remains authoritative for payroll readiness.",
+      lastWebhookSettlement: connection.lastSettlementSnapshot || null,
+      lastWebhookSettlementAt: connection.lastSettlementAt?.toISOString?.() || null,
+      lastWebhookSettlementDestination: connection.lastSettlementDestination || null,
+      note: "Settlement webhook events record whether a collection went to the configured payout wallet or an external bank. The live disbursement-wallet available balance remains authoritative for payroll readiness.",
     },
     manualTopUp: {
       required: available <= 0,
@@ -340,25 +343,26 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
     const accountNumber = String(transaction.accountNumber || "").trim();
     const accountName = String(transaction.accountName || "").trim();
     const amount = Number(transaction.amount);
-    if (!/^\d{10}$/.test(accountNumber) || accountName.length < 2 || !Number.isFinite(amount) || amount <= 0) {
-      throw new AppError(`${employeeName}: account number, saved account name and positive salary amount are required.`, 400, { code: "MONNIFY_BENEFICIARY_INPUT_INVALID" });
-    }
-    const bank = resolveBatchBank(transaction, banks, index);
-    return {
-      employeeName,
-      bankName: bank.name,
-      bankCode: bank.code,
-      accountNumber,
-      savedAccountName: accountName,
-      amount: Number(amount.toFixed(2)),
-      reference,
+    const base = {
+      employeeName, accountNumber, savedAccountName: accountName, reference,
       narration: String(transaction.narration || `Salary payment - ${employeeName}`).slice(0, 80),
+      amount: Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0,
     };
+    if (!/^\d{10}$/.test(accountNumber)) return { ...base, validationError: "The bank account number must contain exactly 10 digits.", validationCode: "MONNIFY_ACCOUNT_NUMBER_INVALID" };
+    if (accountName.length < 2) return { ...base, validationError: "The saved bank account name is missing or invalid.", validationCode: "MONNIFY_ACCOUNT_NAME_MISSING" };
+    if (!Number.isFinite(amount) || amount <= 0) return { ...base, validationError: "The salary amount must be a positive number.", validationCode: "MONNIFY_SALARY_AMOUNT_INVALID" };
+    try {
+      const bank = resolveBatchBank(transaction, banks, index);
+      return { ...base, bankName: bank.name, bankCode: bank.code };
+    } catch (error) {
+      return { ...base, validationError: String(error?.message || "The employee bank could not be mapped to Monnify."), validationCode: error?.code || "MONNIFY_BANK_NOT_MAPPED" };
+    }
   });
 
-  // Re-run Name Enquiry on the server immediately before creating a batch. Client-side
-  // validation results are never treated as authorization to disburse funds.
+  // A blocked employee does not cancel other employees. Re-run Name Enquiry for every
+  // eligible beneficiary immediately before submission; never trust browser validation.
   const validationResults = await mapWithConcurrency(prepared, 5, async (transaction) => {
+    if (transaction.validationError) return transaction;
     try {
       const response = await monnifyEndpoints.validateAccount(connection, transaction.accountNumber, transaction.bankCode);
       const verifiedName = String(response?.accountName ?? response?.account_name ?? response?.name ?? "").trim();
@@ -368,7 +372,7 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
         throw new AppError("Monnify did not return a complete matching beneficiary record.", 422, { code: "MONNIFY_BENEFICIARY_RESPONSE_MISMATCH" });
       }
       if (!accountNamesCompatible(transaction.savedAccountName, verifiedName)) {
-        throw new AppError(`The saved account name does not sufficiently match Monnify's verified name (${verifiedName}). Correct and re-verify the employee's bank details before submitting.`, 422, { code: "MONNIFY_ACCOUNT_NAME_MISMATCH" });
+        throw new AppError(`The saved account name does not sufficiently match Monnify's verified name (${verifiedName}).`, 422, { code: "MONNIFY_ACCOUNT_NAME_MISMATCH" });
       }
       return { ...transaction, verifiedAccountName: verifiedName };
     } catch (error) {
@@ -377,22 +381,22 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
   });
 
   const blocked = validationResults.filter((result) => result.validationError);
-  if (blocked.length) {
-    const details = blocked.map((result) => ({
-      employee: result.employeeName,
-      bank: result.bankName,
-      accountEnding: result.accountNumber.slice(-4),
-      code: result.validationCode,
-      message: result.validationError,
-    }));
-    throw new AppError(
-      `${blocked.length} beneficiary account(s) failed Monnify re-validation. No payroll batch was submitted. Correct or re-verify only the affected employee records, then retry.`,
-      422,
-      { code: "MONNIFY_BENEFICIARY_VALIDATION_FAILED", details },
-    );
+  const validTransactions = validationResults.filter((result) => !result.validationError);
+  const skippedEmployees = blocked.map((result) => ({
+    employee: result.employeeName,
+    bank: result.bankName || null,
+    accountEnding: result.accountNumber ? result.accountNumber.slice(-4) : null,
+    code: result.validationCode,
+    message: result.validationError,
+  }));
+  if (!validTransactions.length) {
+    throw new AppError("No salary transfer can be submitted because every employee account failed validation. Correct the blocked records and preview again.", 422, {
+      code: "MONNIFY_NO_VALID_BENEFICIARIES",
+      details: { skippedCount: skippedEmployees.length, skippedEmployees },
+    });
   }
 
-  const transactionList = validationResults.map((transaction) => ({
+  const transactionList = validTransactions.map((transaction) => ({
     amount: transaction.amount,
     reference: transaction.reference,
     narration: transaction.narration,
@@ -428,14 +432,19 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
       batchReference,
       narration: String(input.narration || "EMS salary disbursement").slice(0, 80),
       sourceAccountNumber: connection.sourceAccountNumber,
-      // Monnify also revalidates the destination details; BREAK prevents a partial batch
-      // from proceeding if any account has changed or becomes unavailable after Name Enquiry.
-      onValidationFailure: "BREAK",
+      // Continue lets Monnify process eligible beneficiaries even if a destination
+      // becomes invalid between EMS Name Enquiry and provider-side batch validation.
+      onValidationFailure: "CONTINUE",
       notificationInterval: 25,
       transactionList,
     });
     const status = String(response.batchStatus || "PENDING_AUTHORIZATION");
-    await prisma.companyMonnifyBatch.update({ where: { id: saved.id }, data: { providerStatus: status, providerResponse: response } });
+    await prisma.companyMonnifyBatch.update({ where: { id: saved.id }, data: { providerStatus: status, providerResponse: {
+      ...response,
+      _emsSkippedEmployees: skippedEmployees,
+      _emsSkippedCount: skippedEmployees.length,
+      _emsOnValidationFailure: "CONTINUE",
+    } } });
     return {
       id: saved.id,
       batchReference,
@@ -443,6 +452,8 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
       environment: connection.environment,
       totalAmount,
       totalTransactions: transactionList.length,
+      skippedCount: skippedEmployees.length,
+      skippedEmployees,
       requiresOtp: status === "PENDING_AUTHORIZATION",
     };
   } catch (error) {
@@ -584,8 +595,9 @@ async function buildPayrollPreview(companyId, periodId) {
       const response = await monnifyEndpoints.validateAccount(connection, accountNumber, bank.code);
       const verifiedName = String(response?.accountName ?? response?.account_name ?? response?.name ?? "").trim();
       const verifiedNumber = String(response?.accountNumber ?? response?.account_number ?? accountNumber).trim();
-      if (verifiedName.length < 2 || verifiedNumber !== accountNumber) {
-        return { ...result, message: "Monnify did not return a complete matching beneficiary record. Retry validation or contact Monnify support.", validationCode: "MONNIFY_BENEFICIARY_RESPONSE_MISMATCH" };
+      const verifiedBankCode = String(response?.bankCode ?? response?.bank_code ?? bank.code).trim();
+      if (verifiedName.length < 2 || verifiedNumber !== accountNumber || verifiedBankCode !== bank.code) {
+        return { ...result, message: "Monnify did not return a complete matching beneficiary record for the selected account number and bank. Retry validation or contact Monnify support.", validationCode: "MONNIFY_BENEFICIARY_RESPONSE_MISMATCH" };
       }
       if (!accountNamesCompatible(bankAccount.accountName, verifiedName)) {
         return { ...result, message: `The saved account name does not sufficiently match Monnify's verified name (${verifiedName}). Confirm the employee's bank details.`, validationCode: "MONNIFY_ACCOUNT_NAME_MISMATCH" };
@@ -638,6 +650,8 @@ async function buildPayrollPreview(companyId, periodId) {
     blockedCount,
     retryRequiredCount: employees.filter((employee) => employee.status === "RETRY_REQUIRED").length,
     validatedSalaryTotal: Number(validatedSalaryTotal.toFixed(2)),
+    requiredProviderBalance: Number(validatedSalaryTotal.toFixed(2)),
+    estimatedFeeTotal: null,
     disbursementBalance: Number.isFinite(availableBalance) ? availableBalance : null,
     balanceCheckAvailable: Number.isFinite(availableBalance),
     employees,

@@ -45,3 +45,7 @@ export const createFlutterwaveSubaccountSchema = z.object({
 export const setFlutterwaveSubaccountSchema = z.object({
   subaccountId: z.string().trim().min(8).max(120).regex(/^[A-Za-z0-9_-]+$/, "Enter a valid Flutterwave subaccount ID."),
 });
+
+export const createFlutterwavePayoutWalletSchema = z.object({
+  email: z.string().trim().email(),
+});

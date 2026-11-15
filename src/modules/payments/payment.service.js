@@ -14,6 +14,11 @@ import { decryptCompanyPaystackSecret } from "./company-paystack/company-paystac
 import { monnifyEndpoints } from "./monnify/monnify.client.js";
 import { decryptMonnifySecret } from "./monnify/monnify.crypto.js";
 import { createFlutterwaveSubaccount } from "./flutterwave/flutterwave.client.js";
+import {
+  createFlutterwavePayoutSubaccount,
+  issueFlutterwavePayoutStaticAccount,
+  getFlutterwavePayoutSubaccountBalance,
+} from "./flutterwave/flutterwave.transfer.client.js";
 import { validateProviderBankCode } from "./bank-directory.service.js";
 
 const money = (value) => new Decimal(value).toDecimalPlaces(2);
@@ -92,6 +97,155 @@ export const createCompanyFlutterwaveSubaccount = async (companyId, input) => {
     throw new AppError("A Flutterwave subaccount was created, but another request linked a subaccount first. Contact EMS support before retrying to avoid creating duplicates.", 409, { code: "FLUTTERWAVE_SUBACCOUNT_LINK_RACE", details: { createdSubaccountId: `••••${subaccountId.slice(-4)}` } });
   }
   return { configured: true, maskedId: `••••${subaccountId.slice(-4)}`, bankName: bank.bankName };
+};
+
+export const getFlutterwavePayoutWalletConfig = async (companyId) => {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: {
+      flutterwavePayoutAccountReference: true,
+      flutterwavePayoutBarterId: true,
+      flutterwavePayoutNuban: true,
+      flutterwavePayoutBankName: true,
+      flutterwavePayoutBankCode: true,
+    },
+  });
+  if (!company) throw new AppError("Company not found", 404);
+  const reference = String(company.flutterwavePayoutAccountReference || "");
+  if (!reference) return { configured: false, staticAccountAvailable: false, balanceCheckAvailable: false };
+
+  let balance = null;
+  let balanceError = null;
+  if (process.env.FLUTTERWAVE_SECRET_KEY) {
+    try {
+      balance = await getFlutterwavePayoutSubaccountBalance(reference);
+    } catch (error) {
+      balanceError = String(error?.message || "Flutterwave payout-wallet balance could not be queried.");
+    }
+  } else {
+    balanceError = "Flutterwave is not configured on this EMS server.";
+  }
+  return {
+    configured: true,
+    accountReference: `••••${reference.slice(-6)}`,
+    barterId: company.flutterwavePayoutBarterId || null,
+    accountNumber: company.flutterwavePayoutNuban || null,
+    bankName: company.flutterwavePayoutBankName || null,
+    bankCode: company.flutterwavePayoutBankCode || null,
+    staticAccountAvailable: Boolean(company.flutterwavePayoutNuban),
+    balanceCheckAvailable: Boolean(balance),
+    availableBalance: balance?.availableBalance ?? null,
+    currency: balance?.currency || "NGN",
+    balanceError,
+    fundingInstructions: "Fund this dedicated company payout wallet by transferring NGN to its Flutterwave-issued static account. The collection subaccount (RS_) is separate and is not a salary-transfer wallet.",
+  };
+};
+
+export const createCompanyFlutterwavePayoutWallet = async (companyId, input) => {
+  if (!process.env.FLUTTERWAVE_SECRET_KEY) {
+    throw new AppError("Flutterwave is not configured on the EMS merchant account.", 503, { code: "FLUTTERWAVE_NOT_CONFIGURED" });
+  }
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: {
+      id: true,
+      name: true,
+      legalName: true,
+      flutterwavePayoutAccountReference: true,
+    },
+  });
+  if (!company) throw new AppError("Company not found", 404);
+  if (company.flutterwavePayoutAccountReference) {
+    throw new AppError("This company already has a Flutterwave payout wallet linked.", 409, { code: "FLUTTERWAVE_PAYOUT_WALLET_ALREADY_CONFIGURED" });
+  }
+
+  const accountName = String(company.legalName || company.name || "").trim();
+  const email = String(input.email || "").trim().toLowerCase();
+  if (!accountName) throw new AppError("Add the company's legal/business name before creating a payout wallet.", 409, { code: "COMPANY_BUSINESS_NAME_REQUIRED" });
+
+  const created = await createFlutterwavePayoutSubaccount({ accountName: accountName.slice(0, 100), email });
+  const data = created?.data || {};
+  const accountReference = String(data.account_reference || "").trim();
+  if (!/^PSA[A-Za-z0-9_-]{6,120}$/i.test(accountReference)) {
+    throw new AppError("Flutterwave did not return a valid payout-wallet reference. No company payout-wallet link was saved.", 502, { code: "FLUTTERWAVE_PAYOUT_WALLET_CREATE_INVALID_RESPONSE" });
+  }
+
+  let staticResponse = null;
+  let staticAccountError = null;
+  try {
+    staticResponse = await issueFlutterwavePayoutStaticAccount(accountReference);
+  } catch (error) {
+    // A PSA wallet has already been created upstream. Persist its identity so that
+    // the tenant does not create duplicate wallets while the static-account issue is retried.
+    staticAccountError = String(error?.message || "Flutterwave static-account issuance is pending.");
+  }
+  const staticData = staticResponse?.data || {};
+  const nestedStatic = staticData.static_account && typeof staticData.static_account === "object"
+    ? staticData.static_account
+    : staticData.staticAccount && typeof staticData.staticAccount === "object" ? staticData.staticAccount : {};
+  const staticAccountNumber = typeof staticData.static_account === "string"
+    ? staticData.static_account
+    : typeof staticData.staticAccount === "string" ? staticData.staticAccount : "";
+  const nuban = String(
+    staticAccountNumber || nestedStatic.account_number || nestedStatic.accountNumber ||
+    staticData.account_number || staticData.accountNumber || "",
+  ).trim();
+  const bankName = String(nestedStatic.bank_name || nestedStatic.bankName || staticData.bank_name || staticData.bankName || data.bank_name || "").trim();
+  const bankCode = String(nestedStatic.bank_code || nestedStatic.bankCode || staticData.bank_code || staticData.bankCode || data.bank_code || "").trim();
+  const barterId = String(data.barter_id || staticData.barter_id || "").trim();
+
+  const saved = await prisma.company.updateMany({
+    where: { id: companyId, flutterwavePayoutAccountReference: null },
+    data: {
+      flutterwavePayoutAccountReference: accountReference,
+      flutterwavePayoutBarterId: barterId || null,
+      flutterwavePayoutNuban: /^\d{8,20}$/.test(nuban) ? nuban : null,
+      flutterwavePayoutBankName: bankName || null,
+      flutterwavePayoutBankCode: bankCode || null,
+    },
+  });
+  if (saved.count !== 1) {
+    throw new AppError("Flutterwave created the payout wallet, but it could not be linked because the company record changed. Contact EMS support before creating another wallet.", 409, { code: "FLUTTERWAVE_PAYOUT_WALLET_LINK_RACE", details: { accountReference: `••••${accountReference.slice(-6)}` } });
+  }
+
+  return {
+    configured: true,
+    accountReference: `••••${accountReference.slice(-6)}`,
+    barterId: barterId || null,
+    accountNumber: /^\d{8,20}$/.test(nuban) ? nuban : null,
+    bankName: bankName || null,
+    staticAccountAvailable: /^\d{8,20}$/.test(nuban),
+    staticAccountError,
+    message: staticAccountError
+      ? "The payout wallet was created and linked, but Flutterwave has not issued its static funding account yet. Contact support or retry after provider-side activation."
+      : "The company's Flutterwave payout wallet is created. Fund its static account before using it for salary transfers.",
+  };
+};
+
+export const issueCompanyFlutterwavePayoutStaticAccount = async (companyId) => {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { flutterwavePayoutAccountReference: true },
+  });
+  if (!company?.flutterwavePayoutAccountReference) {
+    throw new AppError("Create the company's Flutterwave payout wallet before issuing its static account.", 409, { code: "FLUTTERWAVE_PAYOUT_WALLET_REQUIRED" });
+  }
+  const response = await issueFlutterwavePayoutStaticAccount(company.flutterwavePayoutAccountReference);
+  const data = response?.data || {};
+  const staticAccount = typeof data.static_account === "string" ? data.static_account : typeof data.staticAccount === "string" ? data.staticAccount : "";
+  const accountNumber = String(staticAccount || data.account_number || data.accountNumber || "").trim();
+  if (!/^\d{8,20}$/.test(accountNumber)) {
+    throw new AppError("Flutterwave did not return a valid static NGN funding account.", 502, { code: "FLUTTERWAVE_PAYOUT_STATIC_ACCOUNT_INVALID" });
+  }
+  await prisma.company.update({
+    where: { id: companyId },
+    data: {
+      flutterwavePayoutNuban: accountNumber,
+      flutterwavePayoutBankName: String(data.bank_name || data.bankName || "").trim() || null,
+      flutterwavePayoutBankCode: String(data.bank_code || data.bankCode || "").trim() || null,
+    },
+  });
+  return getFlutterwavePayoutWalletConfig(companyId);
 };
 
 export const setFlutterwaveSubaccount = async (companyId, subaccountId) => {
@@ -481,49 +635,133 @@ export const processPaystackWebhook = async (rawBody, signature, payload) => {
 
 export const processMonnifyWebhook = async (rawBody, signature, payload) => {
   const eventType = String(payload?.eventType || payload?.event || "").toUpperCase();
-  if (eventType !== "SUCCESSFUL_TRANSACTION") return { matched: false, received: true, processed: false };
-
   const eventData = payload?.eventData || payload?.data || {};
+
+  const authenticateEvent = (connection) => {
+    if (!connection?.isActive) {
+      throw new AppError("The company's Monnify connection is unavailable; cannot authenticate its webhook.", 401, { code: "MONNIFY_COMPANY_WEBHOOK_CONNECTION_MISSING" });
+    }
+    const receivedSignature = String(signature || "").trim().toLowerCase();
+    if (receivedSignature) {
+      if (!Buffer.isBuffer(rawBody) || !rawBody.length) {
+        throw new AppError("Monnify webhook raw body is unavailable for signature verification.", 400, { code: "MONNIFY_WEBHOOK_RAW_BODY_MISSING" });
+      }
+      const secret = decryptMonnifySecret(connection.apiSecretCiphertext);
+      const expectedSignature = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
+      const receivedBuffer = Buffer.from(receivedSignature, "utf8");
+      const expectedBuffer = Buffer.from(expectedSignature, "utf8");
+      if (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) {
+        throw new AppError("Invalid Monnify webhook signature.", 401, { code: "MONNIFY_WEBHOOK_SIGNATURE_INVALID" });
+      }
+    } else if (String(connection.environment || "sandbox").toLowerCase() !== "sandbox") {
+      throw new AppError("Monnify production webhook signature is missing.", 401, { code: "MONNIFY_WEBHOOK_SIGNATURE_MISSING" });
+    }
+  };
+
+  if (eventType === "SETTLEMENT") {
+    const transactions = Array.isArray(eventData.transactions) ? eventData.transactions : [];
+    const references = [...new Set(transactions.map((item) => String(item?.paymentReference || item?.payment_reference || "").trim()).filter(Boolean))];
+    const matchedPayments = [];
+    for (const reference of references.slice(0, 1000)) {
+      const payment = await repository.findPaymentByReferenceFromAnyCompany(reference);
+      if (payment?.provider === PAYMENT_PROVIDER.MONNIFY && payment.purpose === PAYMENT_PURPOSE.WALLET_FUNDING) matchedPayments.push(payment);
+    }
+
+    const companyIds = [...new Set(matchedPayments.map((payment) => payment.companyId))];
+    const destinationAccountNumber = String(eventData.destinationAccountNumber || eventData.destination_account_number || "").trim();
+    let connection = companyIds.length === 1
+      ? await prisma.companyMonnifyConnection.findUnique({ where: { companyId: companyIds[0] } })
+      : null;
+    if (!connection && destinationAccountNumber) {
+      connection = await prisma.companyMonnifyConnection.findFirst({ where: { sourceAccountNumber: destinationAccountNumber, isActive: true } });
+    }
+    if (!connection || companyIds.length > 1) {
+      return { matched: false, received: true, processed: false, reason: companyIds.length > 1 ? "SETTLEMENT_REFERENCES_SPAN_COMPANIES" : "SETTLEMENT_COMPANY_NOT_IDENTIFIED" };
+    }
+    authenticateEvent(connection);
+
+    const destination = destinationAccountNumber && destinationAccountNumber === String(connection.sourceAccountNumber || "").trim()
+      ? "PAYOUT_WALLET"
+      : destinationAccountNumber ? "EXTERNAL_BANK" : "UNKNOWN";
+    const settlementReference = String(eventData.settlementReference || eventData.settlement_reference || "").trim() || null;
+    const settlementTimeRaw = eventData.settlementTime || eventData.settlement_time || null;
+    const settlementDate = settlementTimeRaw ? new Date(settlementTimeRaw) : null;
+    const settlementAt = settlementDate && Number.isFinite(settlementDate.getTime()) ? settlementDate : null;
+    const snapshot = {
+      amount: eventData.amount ?? null,
+      settlementReference,
+      settlementTime: settlementAt?.toISOString() || null,
+      destination,
+      destinationAccountNumber: destinationAccountNumber || null,
+      destinationBankName: eventData.destinationBankName || eventData.destination_bank_name || null,
+      destinationAccountName: eventData.destinationAccountName || eventData.destination_account_name || null,
+      paymentReferences: references,
+      transactionsCount: Number(eventData.transactionsCount ?? eventData.transactions_count ?? transactions.length),
+    };
+
+    await prisma.companyMonnifyConnection.update({
+      where: { companyId: connection.companyId },
+      data: {
+        lastSettlementReference: settlementReference,
+        lastSettlementAt: settlementAt,
+        lastSettlementDestination: destination,
+        lastSettlementSnapshot: snapshot,
+        lastSettlementLookupAt: new Date(),
+      },
+    });
+
+    let updatedPayments = 0;
+    for (const payment of matchedPayments) {
+      const metadata = payment.metadata && typeof payment.metadata === "object" && !Array.isArray(payment.metadata) ? payment.metadata : {};
+      const externalPayout = String(metadata.__fundingDestination || "").toUpperCase() === "EXTERNAL_PROVIDER_PAYOUT"
+        && String(metadata.__salaryAccount || payment.provider).toUpperCase() === "MONNIFY";
+      if (!externalPayout || payment.status !== PAYMENT_STATUS.SUCCESSFUL) continue;
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: { metadata: {
+          ...metadata,
+          __settlementStatus: destination === "PAYOUT_WALLET" ? "SETTLED_TO_DISBURSEMENT_WALLET" : destination === "EXTERNAL_BANK" ? "SETTLED_TO_EXTERNAL_BANK" : "SETTLED_DESTINATION_UNKNOWN",
+          __settlementReference: settlementReference,
+          __settlementAt: settlementAt?.toISOString() || null,
+          __settlementDestination: destination,
+          __settlementDestinationAccountLast4: destinationAccountNumber ? destinationAccountNumber.slice(-4) : null,
+          __settlementDestinationBankName: eventData.destinationBankName || eventData.destination_bank_name || null,
+        } },
+      });
+      updatedPayments += 1;
+    }
+
+    return {
+      matched: true,
+      received: true,
+      processed: true,
+      event: "SETTLEMENT",
+      settlementReference,
+      settlementDestination: destination,
+      linkedFundingPayments: updatedPayments,
+      note: destination === "PAYOUT_WALLET"
+        ? "Monnify reports this settlement to the configured disbursement wallet. Refresh the live wallet balance before payroll."
+        : destination === "EXTERNAL_BANK"
+          ? "Monnify reports settlement to an external bank account; this collection will not increase the Monnify disbursement wallet."
+          : "Monnify settlement was recorded, but the destination could not be classified. Verify the destination in the Monnify dashboard.",
+    };
+  }
+
+  if (eventType !== "SUCCESSFUL_TRANSACTION") return { matched: false, received: true, processed: false };
   const reference = String(eventData.paymentReference || "").trim();
   if (!reference) return { matched: false, received: true, processed: false };
-
   const payment = await repository.findPaymentByReferenceFromAnyCompany(reference);
-  if (!payment || payment.provider !== PAYMENT_PROVIDER.MONNIFY) {
-    return { matched: false, received: true, processed: false };
-  }
+  if (!payment || payment.provider !== PAYMENT_PROVIDER.MONNIFY) return { matched: false, received: true, processed: false };
   if (payment.purpose !== PAYMENT_PURPOSE.WALLET_FUNDING) {
     return { matched: true, received: true, processed: false, reason: "PAYMENT_PURPOSE_NOT_WALLET_FUNDING" };
   }
-  if (payment.status === PAYMENT_STATUS.SUCCESSFUL) {
-    return { matched: true, received: true, processed: false, duplicate: true };
-  }
+  if (payment.status === PAYMENT_STATUS.SUCCESSFUL) return { matched: true, received: true, processed: false, duplicate: true };
 
   const connection = await prisma.companyMonnifyConnection.findUnique({ where: { companyId: payment.companyId } });
-  if (!connection?.isActive) {
-    throw new AppError("The company's Monnify connection is unavailable; cannot authenticate its payment webhook.", 401, { code: "MONNIFY_COMPANY_WEBHOOK_CONNECTION_MISSING" });
-  }
-  if (payment.metadata?.__monnifyEnvironment && String(connection.environment).toLowerCase() !== String(payment.metadata.__monnifyEnvironment).toLowerCase()) {
+  if (payment.metadata?.__monnifyEnvironment && String(connection?.environment).toLowerCase() !== String(payment.metadata.__monnifyEnvironment).toLowerCase()) {
     throw new AppError(`This pending Monnify checkout was created in ${String(payment.metadata.__monnifyEnvironment).toUpperCase()}. Restore that environment before processing its webhook.`, 409, { code: "MONNIFY_PAYMENT_ENVIRONMENT_MISMATCH" });
   }
-
-  // Monnify's production transaction webhooks carry an HMAC-SHA512 signature.
-  // Sandbox notifications may omit it, so sandbox events are still verified with
-  // Monnify's authenticated transaction-query API before any salary balance changes.
-  const receivedSignature = String(signature || "").trim().toLowerCase();
-  if (receivedSignature) {
-    if (!Buffer.isBuffer(rawBody) || !rawBody.length) {
-      throw new AppError("Monnify webhook raw body is unavailable for signature verification.", 400, { code: "MONNIFY_WEBHOOK_RAW_BODY_MISSING" });
-    }
-    const secret = decryptMonnifySecret(connection.apiSecretCiphertext);
-    const expectedSignature = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
-    const receivedBuffer = Buffer.from(receivedSignature, "utf8");
-    const expectedBuffer = Buffer.from(expectedSignature, "utf8");
-    if (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) {
-      throw new AppError("Invalid Monnify webhook signature.", 401, { code: "MONNIFY_WEBHOOK_SIGNATURE_INVALID" });
-    }
-  } else if (String(connection.environment || "sandbox").toLowerCase() !== "sandbox") {
-    throw new AppError("Monnify production webhook signature is missing.", 401, { code: "MONNIFY_WEBHOOK_SIGNATURE_MISSING" });
-  }
+  authenticateEvent(connection);
 
   // Never credit from webhook fields alone. Verify the reference with Monnify's API.
   const verified = await monnifyEndpoints.verifyTransaction(connection, reference);
@@ -531,11 +769,7 @@ export const processMonnifyWebhook = async (rawBody, signature, payload) => {
   if (String(verifiedData?.paymentStatus || "").toUpperCase() !== "PAID") {
     return { matched: true, received: true, processed: false, providerStatus: verifiedData?.paymentStatus || "UNKNOWN" };
   }
-  const updated = await completeSuccessfulPayment(
-    payment.id,
-    verifiedData?.transactionReference || null,
-    verified,
-  );
+  const updated = await completeSuccessfulPayment(payment.id, verifiedData?.transactionReference || null, verified);
   return { matched: true, received: true, processed: true, payment: mapPayment(updated) };
 };
 

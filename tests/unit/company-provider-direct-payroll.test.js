@@ -43,9 +43,28 @@ describe("company-direct provider payroll funding", () => {
     expect(monnify).not.toMatch(/debitWalletInTransaction\s*\(/);
   });
 
-  it("classifies the legacy Paystack/Flutterwave transfer workflow as EMS Wallet Payroll", () => {
+
+  it("routes Flutterwave salary transfers through the company's PSA wallet without EMS wallet reservation", () => {
     const legacy = read("src/modules/payroll/payroll.payout.service.js");
-    expect(legacy).toMatch(/claimPayrollFundingRoute\(tx, \{ companyId, periodId, fundingRoute: "EMS_WALLET", provider \}\)/);
+    const client = read("src/modules/payments/flutterwave/flutterwave.transfer.client.js");
+    expect(legacy).toMatch(/getFlutterwaveFundingRoute\(companyId\)/);
+    expect(legacy).toMatch(/getFlutterwavePayoutSubaccountBalance\(debitSubaccount\)/);
+    expect(legacy).toMatch(/reservationAmount = fundingRoute === "EMS_WALLET" \? evaluation\.requiredTotal : new Decimal\(0\)/);
+    expect(legacy).toMatch(/if \(fundingRoute === "EMS_WALLET"\) \{\s*await debitWalletInTransaction/);
+    expect(legacy).toMatch(/debitSubaccount: flutterwaveDebitSubaccount/);
+    expect(client).toMatch(/debit_subaccount: String\(debitSubaccount\)/);
+    expect(legacy).toMatch(/DIRECT_PROVIDER.*FLUTTERWAVE/s);
+    expect(legacy).toMatch(/Flutterwave PSA payout subaccounts are a production\/live product/);
+  });
+
+  it("classifies legacy provider transfers by the evaluated funding route and preserves EMS-wallet accounting", () => {
+    const legacy = read("src/modules/payroll/payroll.payout.service.js");
+    // Flutterwave may use a company PSA payout wallet (DIRECT_PROVIDER); otherwise
+    // the legacy Paystack/Flutterwave workflow remains EMS_WALLET. The route is
+    // evaluated during preview and claimed unchanged during execution.
+    expect(legacy).toMatch(/const fundingRoute = evaluation\.preview\.fundingRoute/);
+    expect(legacy).toMatch(/claimPayrollFundingRoute\(tx, \{ companyId, periodId, fundingRoute, provider \}\)/);
+    expect(legacy).toMatch(/String\(batch\.fundingRoute \|\| "EMS_WALLET"\)\.toUpperCase\(\) !== fundingRoute/);
     expect(legacy).toMatch(/fundingRoute: "EMS_WALLET"/);
     expect(legacy).toMatch(/walletAccountForPayoutProvider = \(provider\) => String\(provider \|\| ""\)\.toUpperCase\(\) === "PAYSTACK" \? "PAYSTACK" : "GENERAL"/);
     expect(legacy).toMatch(/walletBalanceFieldForPayoutProvider\(provider\)/);

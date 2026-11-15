@@ -363,6 +363,12 @@ model Company {
   isSubscriptionActive    Boolean                   @default(false)
   paystackSubaccountId    String?
   flutterwaveSubaccountId String?
+  // Flutterwave RS_ collection subaccounts and PSA payout wallets are different products.
+  flutterwavePayoutAccountReference String?
+  flutterwavePayoutBarterId          String?
+  flutterwavePayoutNuban             String?
+  flutterwavePayoutBankName          String?
+  flutterwavePayoutBankCode          String?
   monnifyConnection       CompanyMonnifyConnection?
   monnifyBatches          CompanyMonnifyBatch[]
   walletBalance           Decimal                   @default(0) @db.Decimal(18, 2)
@@ -1868,6 +1874,10 @@ model CompanyMonnifyConnection {
   lastKnownBalance       Decimal?  @db.Decimal(18, 2)
   lastFundingCheckAt     DateTime?
   lastSettlementLookupAt DateTime?
+  lastSettlementReference    String?
+  lastSettlementAt           DateTime?
+  lastSettlementDestination  String?
+  lastSettlementSnapshot     Json?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
   company                Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)

@@ -1,7 +1,7 @@
 import { getBankDirectory } from "./bank-directory.service.js";
 import * as service from "./payment.service.js";
 import { processCompanyPaystackWebhook } from "./company-paystack/company-paystack.service.js";
-import { initializePaymentSchema, verifyPaymentSchema, paymentQuerySchema, createFlutterwaveSubaccountSchema, setFlutterwaveSubaccountSchema, validateBody, validateQuery } from "./payment.validation.js";
+import { initializePaymentSchema, verifyPaymentSchema, paymentQuerySchema, createFlutterwaveSubaccountSchema, setFlutterwaveSubaccountSchema, createFlutterwavePayoutWalletSchema, validateBody, validateQuery } from "./payment.validation.js";
 
 const companyId = (req) => req.tenant?.companyId || req.user?.companyId;
 
@@ -59,3 +59,11 @@ export const setFlutterwaveSubaccount = async (req, res) => {
   const { subaccountId } = validateBody(setFlutterwaveSubaccountSchema, req.body);
   return res.json({ success: true, message: "Company Flutterwave subaccount saved", data: await service.setFlutterwaveSubaccount(companyId(req), subaccountId) });
 };
+
+export const flutterwavePayoutWalletConfig = async (req, res) => res.json({ success: true, data: await service.getFlutterwavePayoutWalletConfig(companyId(req)) });
+export const createFlutterwavePayoutWallet = async (req, res) => {
+  const input = validateBody(createFlutterwavePayoutWalletSchema, req.body);
+  return res.status(201).json({ success: true, message: "Company Flutterwave payout wallet created and linked", data: await service.createCompanyFlutterwavePayoutWallet(companyId(req), input) });
+};
+
+export const issueFlutterwavePayoutStaticAccount = async (req, res) => res.json({ success: true, message: "Flutterwave payout-wallet static account issued", data: await service.issueCompanyFlutterwavePayoutStaticAccount(companyId(req)) });

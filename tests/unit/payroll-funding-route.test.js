@@ -68,7 +68,7 @@ describe("payroll funding route lock", () => {
     }).provider).toBe("FLUTTERWAVE");
   });
 
-  it("allows Direct Provider Payroll only with company Paystack or Monnify", () => {
+  it("allows Direct Provider Payroll with company Paystack, Monnify or Flutterwave PSA", () => {
     expect(assertPayrollFundingRouteCompatible({
       requestedRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER,
       requestedProvider: "PAYSTACK",
@@ -77,6 +77,10 @@ describe("payroll funding route lock", () => {
       requestedRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER,
       requestedProvider: "MONNIFY",
     }).provider).toBe("MONNIFY");
+    expect(assertPayrollFundingRouteCompatible({
+      requestedRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER,
+      requestedProvider: "FLUTTERWAVE",
+    }).provider).toBe("FLUTTERWAVE");
   });
 
   it("rejects unsupported route/provider combinations before database work", () => {
@@ -86,7 +90,7 @@ describe("payroll funding route lock", () => {
     }), 400, "PAYROLL_FUNDING_PROVIDER_ROUTE_INVALID");
     expectAppError(() => assertPayrollFundingRouteCompatible({
       requestedRoute: "DIRECT_PROVIDER",
-      requestedProvider: "FLUTTERWAVE",
+      requestedProvider: "UNKNOWN_PROVIDER",
     }), 400, "PAYROLL_FUNDING_PROVIDER_ROUTE_INVALID");
   });
 

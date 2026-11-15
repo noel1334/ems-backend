@@ -44,7 +44,54 @@ export async function getFlutterwaveTransferFee(amount) {
   return { fee: Math.max(...fees), currency: "NGN", raw: body };
 }
 
-export async function initiateFlutterwaveTransfer({ amount, accountNumber, bankCode, accountName, reference, narration }) {
+export async function createFlutterwavePayoutSubaccount({ accountName, email }) {
+  const response = await client.post("/payout-subaccounts", {
+    account_name: String(accountName || "").trim(),
+    email: String(email || "").trim().toLowerCase(),
+    country: "NG",
+  });
+  const body = response.data;
+  if (body?.status !== "success" || !body?.data?.account_reference) {
+    const error = new Error(body?.message || "Flutterwave did not create the company payout wallet.");
+    error.providerResponse = body;
+    throw error;
+  }
+  return body;
+}
+
+export async function issueFlutterwavePayoutStaticAccount(accountReference) {
+  const response = await client.get(`/payout-subaccounts/${encodeURIComponent(String(accountReference))}/static-account`, {
+    params: { currency: "NGN" },
+  });
+  const body = response.data;
+  if (body?.status !== "success") {
+    const error = new Error(body?.message || "Flutterwave could not issue the payout wallet's NGN funding account.");
+    error.providerResponse = body;
+    throw error;
+  }
+  return body;
+}
+
+export async function getFlutterwavePayoutSubaccountBalance(accountReference) {
+  const response = await client.get(`/payout-subaccounts/${encodeURIComponent(String(accountReference))}/balances`, {
+    params: { currency: "NGN" },
+  });
+  const body = response.data;
+  if (body?.status !== "success" || body?.data == null) {
+    const error = new Error(body?.message || "Flutterwave could not return the company payout-wallet balance.");
+    error.providerResponse = body;
+    throw error;
+  }
+  const dataRows = Array.isArray(body.data) ? body.data : [body.data];
+  const ngn = dataRows.find((item) => String(item?.currency || "NGN").toUpperCase() === "NGN") || dataRows[0];
+  const availableBalance = Number(ngn?.available_balance ?? ngn?.availableBalance ?? ngn?.balance ?? ngn?.wallet_balance);
+  if (!Number.isFinite(availableBalance) || availableBalance < 0) {
+    throw new Error("Flutterwave did not return a valid available NGN payout-subaccount balance.");
+  }
+  return { availableBalance, currency: "NGN", raw: body };
+}
+
+export async function initiateFlutterwaveTransfer({ amount, accountNumber, bankCode, accountName, reference, narration, debitSubaccount }) {
   const value = Number(Number(amount).toFixed(2));
   if (!Number.isFinite(value) || value <= 0) throw new Error("Salary amount must be greater than zero.");
   const response = await client.post("/transfers", {
@@ -56,6 +103,7 @@ export async function initiateFlutterwaveTransfer({ amount, accountNumber, bankC
     reference,
     narration,
     beneficiary_name: accountName,
+    ...(debitSubaccount ? { debit_subaccount: String(debitSubaccount) } : {}),
   });
   return response.data;
 }

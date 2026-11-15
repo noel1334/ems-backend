@@ -22,7 +22,7 @@ export const assertPayrollFundingRouteCompatible = ({
   if (!provider) throw new AppError("A payout provider is required for this payroll route.", 400, { code: "PAYROLL_FUNDING_PROVIDER_REQUIRED" });
   const allowedProviders = route === PAYROLL_FUNDING_ROUTE.EMS_WALLET
     ? ["PAYSTACK", "FLUTTERWAVE"]
-    : ["PAYSTACK", "MONNIFY"];
+    : ["PAYSTACK", "MONNIFY", "FLUTTERWAVE"];
   if (!allowedProviders.includes(provider)) {
     throw new AppError(
       `${provider} is not available for ${route === PAYROLL_FUNDING_ROUTE.EMS_WALLET ? "EMS Wallet Payroll" : "Direct Provider Payroll"}.`,
@@ -48,14 +48,18 @@ const inferExistingRoute = async (tx, companyId, periodId) => {
     tx.payrollPayoutBatch.findUnique({ where: { companyId_periodId: { companyId, periodId } }, select: { id: true, provider: true, fundingRoute: true, status: true } }),
     tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
     tx.companyMonnifyBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
-    tx.payrollDisbursement.findFirst({ where: { companyId, periodId, provider: { in: ["PAYSTACK_COMPANY", "MONNIFY"] }, status: { not: "PENDING" } }, select: { provider: true } }),
-    tx.payrollDisbursement.findFirst({ where: { companyId, periodId, provider: { in: ["PAYSTACK", "FLUTTERWAVE"] }, status: { not: "PENDING" } }, select: { provider: true } }),
+    tx.payrollDisbursement.findFirst({ where: { companyId, periodId, fundingRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER, provider: { in: ["PAYSTACK_COMPANY", "MONNIFY", "FLUTTERWAVE"] }, status: { not: "PENDING" } }, select: { provider: true } }),
+    tx.payrollDisbursement.findFirst({ where: { companyId, periodId, OR: [{ fundingRoute: PAYROLL_FUNDING_ROUTE.EMS_WALLET }, { fundingRoute: null }], provider: { in: ["PAYSTACK", "FLUTTERWAVE"] }, status: { not: "PENDING" } }, select: { provider: true } }),
   ]);
 
   const evidence = [];
   if (paystackBatch) evidence.push({ fundingRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER, provider: "PAYSTACK", source: "company_paystack_batch" });
   if (monnifyBatch) evidence.push({ fundingRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER, provider: "MONNIFY", source: "company_monnify_batch" });
-  if (directDisbursement) evidence.push({ fundingRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER, provider: directDisbursement.provider === "PAYSTACK_COMPANY" ? "PAYSTACK" : "MONNIFY", source: "direct_provider_disbursement" });
+  if (directDisbursement) evidence.push({
+    fundingRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER,
+    provider: directDisbursement.provider === "PAYSTACK_COMPANY" ? "PAYSTACK" : normalizeProvider(directDisbursement.provider),
+    source: "direct_provider_disbursement",
+  });
   if (walletBatch) {
     // A persisted legacy EMS-wallet batch is already a route selection, even before
     // reservation. Being conservative prevents a prepared batch and a direct-provider

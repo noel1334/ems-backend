@@ -13,11 +13,11 @@ Monnify payroll is deliberately separate from the Paystack/Flutterwave payout ad
 7. The batch is stored before the upstream request to prevent duplicate submission. An uncertain network result is recorded as `SUBMISSION_UNKNOWN`; do not resubmit until the batch reference has been reconciled.
 8. Monnify may return `PENDING_AUTHORIZATION`. Enter the OTP sent to the company's registered Monnify email. If Monnify reports `OTP_EMAIL_DISPATCH_FAILED`, request a resend from the batch controls. EMS then polls the batch and batch-specific transaction endpoint and maps each result to its original `PayrollDisbursement` row. Only Monnify `SUCCESS` / `COMPLETED` transactions become `PAID` in EMS. While the payroll page is open, EMS automatically reconciles submitted/processing batches every 30 seconds; users can also trigger **Refresh & reconcile** manually.
 
-Blocked employees remain pending and can be reviewed and revalidated after their saved bank details are corrected. Failed or reversed transactions are recorded as failed and must be investigated before another attempt.
+Blocked employees remain pending and can be reviewed and revalidated after their saved bank details are corrected. The legacy `POST /batches` endpoint follows the same per-beneficiary rule: it performs server-side checks independently, includes only beneficiaries that pass, reports skipped employees in the response/batch snapshot, and uses `onValidationFailure: CONTINUE` for provider-side race conditions. If every beneficiary is blocked, EMS creates no provider batch. Failed or reversed transactions are recorded as failed and must be investigated before another attempt.
 
 ## Current Monnify API sequence
 
-- `GET /api/v1/banks?countryCode=NG`
+- `GET /api/v1/banks`
 - `GET /api/v2/disbursements/account/validate?accountNumber=...&bankCode=...`
 - `POST /api/v2/disbursements/batch`
 - `POST /api/v2/disbursements/batch/validate-otp` when MFA is enabled

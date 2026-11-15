@@ -13,6 +13,7 @@ import {
 } from "../payments/paystack/paystack.transfer.client.js";
 import {
   getFlutterwaveAvailableBalance,
+  getFlutterwavePayoutSubaccountBalance,
   initiateFlutterwaveTransfer,
   verifyFlutterwaveTransfer,
 } from "../payments/flutterwave/flutterwave.transfer.client.js";
@@ -118,8 +119,31 @@ const selectedBankAccount = (employee, provider) => {
 
 const displayEmployeeName = (employee) => [employee?.firstName, employee?.middleName, employee?.lastName].filter(Boolean).join(" ") || employee?.employeeNumber || employee?.id || "Employee";
 
-const getProviderBalance = async (provider) => {
-  const result = provider === "PAYSTACK" ? await getPaystackAvailableBalance() : await getFlutterwaveAvailableBalance();
+const getFlutterwaveDebitSubaccount = async (companyId) => {
+  if (!companyId) return null;
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { flutterwavePayoutAccountReference: true } });
+  return company?.flutterwavePayoutAccountReference || null;
+};
+
+const getFlutterwaveFundingRoute = async (companyId) => {
+  const accountReference = await getFlutterwaveDebitSubaccount(companyId);
+  return accountReference
+    ? { fundingRoute: "DIRECT_PROVIDER", accountReference }
+    : { fundingRoute: "EMS_WALLET", accountReference: null };
+};
+
+const getProviderBalance = async (provider, companyId = null, fundingRoute = "EMS_WALLET") => {
+  if (provider === "PAYSTACK") {
+    const result = await getPaystackAvailableBalance();
+    return money(result.availableBalance);
+  }
+  if (String(fundingRoute).toUpperCase() === "DIRECT_PROVIDER") {
+    const debitSubaccount = await getFlutterwaveDebitSubaccount(companyId);
+    if (!debitSubaccount) throw new AppError("The company's Flutterwave payout wallet is not configured.", 409, { code: "FLUTTERWAVE_PAYOUT_WALLET_REQUIRED" });
+    const result = await getFlutterwavePayoutSubaccountBalance(debitSubaccount);
+    return money(result.availableBalance);
+  }
+  const result = await getFlutterwaveAvailableBalance();
   return money(result.availableBalance);
 };
 
@@ -145,6 +169,10 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
   const prepared = pending.map((row) => ({ row, bank: selectedBankAccount(row.employee, provider) }));
   const employeeResults = [];
   const mode = getPayrollPayoutMode();
+  const flutterwaveFunding = provider === "FLUTTERWAVE"
+    ? await getFlutterwaveFundingRoute(companyId)
+    : { fundingRoute: "EMS_WALLET", accountReference: null };
+  const fundingRoute = flutterwaveFunding.fundingRoute;
 
   if (!pending.length) errors.push({ code: "NO_PENDING_PAYOUTS", message: "No pending salary payments remain in this register. Verify existing processing transfers instead of submitting the batch again." });
   for (const item of prepared) {
@@ -162,9 +190,12 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
   let providerConfigurationError = null;
   try {
     assertPayrollPayoutProviderCredentials(provider);
+    if (fundingRoute === "DIRECT_PROVIDER" && mode !== "live") {
+      throw new AppError("Flutterwave PSA payout subaccounts are a production/live product. Set PAYROLL_PAYOUTS_MODE=live with a Flutterwave live secret and explicit live confirmation before preparing company-wallet payouts.", 503, { code: "FLUTTERWAVE_PAYOUT_WALLET_LIVE_ONLY" });
+    }
   } catch (error) {
     providerConfigurationError = asText(error?.message || "Provider configuration is invalid.");
-    errors.push({ code: "PROVIDER_CONFIGURATION_INVALID", message: providerConfigurationError });
+    errors.push({ code: error?.code || "PROVIDER_CONFIGURATION_INVALID", message: providerConfigurationError });
   }
 
   const fees = await mapWithConcurrency(prepared, 4, async ({ row, bank, amountError }) => {
@@ -198,7 +229,7 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
   let providerBalanceError = null;
   if (!providerConfigurationError) {
     try {
-      providerAvailableBalance = await getProviderBalance(provider);
+      providerAvailableBalance = await getProviderBalance(provider, companyId, fundingRoute);
     } catch (error) {
       providerBalanceError = asText(error?.message || "The provider's available NGN balance could not be verified.");
     }
@@ -206,12 +237,15 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
     providerBalanceError = providerConfigurationError;
   }
 
-  let walletBalance = new Decimal(0);
-  try {
-    const wallet = await getWallet(companyId);
-    walletBalance = walletBalanceForPayoutProvider(wallet, provider);
-  } catch (error) {
-    errors.push({ code: "WALLET_UNAVAILABLE", message: asText(error?.message || "Company wallet balance could not be read.") });
+  let walletBalance = null;
+  if (fundingRoute === "EMS_WALLET") {
+    walletBalance = new Decimal(0);
+    try {
+      const wallet = await getWallet(companyId);
+      walletBalance = walletBalanceForPayoutProvider(wallet, provider);
+    } catch (error) {
+      errors.push({ code: "WALLET_UNAVAILABLE", message: asText(error?.message || "Company wallet balance could not be read.") });
+    }
   }
 
   const salaryTotal = pending.reduce((sum, row) => sum.plus(money(row.amount)), new Decimal(0));
@@ -238,12 +272,12 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
     });
   }
 
-  const walletSufficient = walletBalance.greaterThanOrEqualTo(requiredTotal);
+  const walletSufficient = fundingRoute === "DIRECT_PROVIDER" || walletBalance.greaterThanOrEqualTo(requiredTotal);
   const providerSufficient = providerAvailableBalance !== null && providerAvailableBalance.greaterThanOrEqualTo(requiredTotal);
   // In provider test mode, the remote test balance may be absent or not representative.
   // In live mode, an unavailable/insufficient provider balance blocks approval.
   if (mode === "live" && providerBalanceError) errors.push({ code: "PROVIDER_BALANCE_UNAVAILABLE", message: providerBalanceError });
-  if (!walletSufficient) errors.push({ code: "INSUFFICIENT_COMPANY_WALLET", message: `Company ${walletAccountForPayoutProvider(provider)} salary balance has ${walletBalance.toFixed(2)} NGN, but salary plus estimated transfer fees requires ${requiredTotal.toFixed(2)} NGN.` });
+  if (fundingRoute === "EMS_WALLET" && !walletSufficient) errors.push({ code: "INSUFFICIENT_COMPANY_WALLET", message: `Company ${walletAccountForPayoutProvider(provider)} salary balance has ${walletBalance.toFixed(2)} NGN, but salary plus estimated transfer fees requires ${requiredTotal.toFixed(2)} NGN.` });
   if (mode === "live" && providerAvailableBalance !== null && !providerSufficient) errors.push({ code: "INSUFFICIENT_PROVIDER_BALANCE", message: `${provider} available NGN balance is ${providerAvailableBalance.toFixed(2)}, but this batch is estimated to require ${requiredTotal.toFixed(2)} including fees.` });
   if (mode === "live" && providerAvailableBalance === null && !providerBalanceError) errors.push({ code: "PROVIDER_BALANCE_UNAVAILABLE", message: `${provider} available balance could not be confirmed.` });
   if (pending.some((row) => !money(row.amount).isFinite() || !money(row.amount).isPositive())) {
@@ -253,7 +287,8 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
   const fingerprintSecret = String(process.env.PAYROLL_PAYOUT_RECIPIENT_FINGERPRINT_SECRET || process.env.JWT_ACCESS_SECRET || "").trim();
   if (!fingerprintSecret) throw new AppError("JWT_ACCESS_SECRET or PAYROLL_PAYOUT_RECIPIENT_FINGERPRINT_SECRET is required to protect the payroll preparation fingerprint.", 503);
   const preparationFingerprint = crypto.createHmac("sha256", fingerprintSecret).update(JSON.stringify({
-    companyId, periodId, provider, mode,
+    companyId, periodId, provider, mode, fundingRoute,
+    providerFundingAccountReference: flutterwaveFunding.accountReference,
     // Bind approval to payroll/bank/fee inputs, not volatile balance snapshots. Both the
     // company-wallet balance and provider balance are independently rechecked at approval
     // and execution; a balance change alone must not invalidate the reviewed employee register.
@@ -281,6 +316,8 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
     ready: errors.length === 0,
     provider,
     mode,
+    fundingRoute,
+    providerFundingSource: fundingRoute === "DIRECT_PROVIDER" ? "FLUTTERWAVE_PAYOUT_SUBACCOUNT" : "EMS_INTERNAL_WALLET",
     providerBalanceRequired: mode === "live",
     preparationFingerprint,
     periodId,
@@ -289,16 +326,18 @@ const calculatePayoutPreview = async (companyId, periodId, provider) => {
     salaryAmount: salaryTotal.toFixed(2),
     estimatedFeeAmount: feeTotal.toFixed(2),
     requiredAmount: requiredTotal.toFixed(2),
-    walletBalance: walletBalance.toFixed(2),
+    walletBalance: walletBalance?.toFixed(2) ?? null,
     providerAvailableBalance: providerAvailableBalance?.toFixed(2) ?? null,
     walletSufficient,
     providerSufficient,
     providerBalanceError,
     errors,
     employees: employeeResults,
-    warning: mode === "sandbox"
-      ? "Sandbox provider balance and bank resolution are informational/test-environment checks. This preview is not proof of live funds availability. Provider balance is a shared integration balance, not an isolated company account; EMS's internal tenant wallet is a separate ledger."
-      : "Provider balance is for the payment-provider integration, not an isolated company account. EMS's internal tenant wallet is a separate ledger. If multiple companies share one provider credential, that external balance is shared and must be managed centrally; it can also change outside EMS after preflight.",
+    warning: fundingRoute === "DIRECT_PROVIDER"
+      ? "This company-specific Flutterwave payout wallet (PSA) is the sole source of transfer funds. EMS does not reserve or debit the EMS internal wallet for this route."
+      : mode === "sandbox"
+        ? "Sandbox provider balance and bank resolution are informational/test-environment checks. This preview is not proof of live funds availability. EMS's internal tenant wallet and provider balance are separate ledgers."
+        : "This route reserves the EMS internal tenant wallet and sends transfers through the configured provider integration. The provider balance must also be sufficient in live mode.",
   };
   return { preview, period, pending, prepared: fees, salaryTotal, feeTotal, requiredTotal, walletBalance, providerAvailableBalance };
 };
@@ -309,7 +348,7 @@ const persistPreview = async (companyId, periodId, actorId, evaluation) => {
   if (current && !["PREPARED", "APPROVED"].includes(current.status)) {
     throw new AppError("This payroll payment batch has already started. Do not rebuild it; verify existing transfers or retry only a confirmed failed transfer.", 409, { details: { batchStatus: current.status } });
   }
-  if (current?.status === "APPROVED") {
+  if (current?.status === "APPROVED" && current.fundingRoute !== "DIRECT_PROVIDER") {
     const hasReservation = await prisma.walletLedgerEntry.findUnique({ where: { reference: `PAYROLL-BATCH-${current.id}` }, select: { id: true } });
     if (hasReservation) throw new AppError("Funds have already been reserved for this approved batch. It cannot be re-previewed.", 409);
   }
@@ -318,16 +357,16 @@ const persistPreview = async (companyId, periodId, actorId, evaluation) => {
     const batch = await tx.payrollPayoutBatch.upsert({
       where: { companyId_periodId: { companyId, periodId } },
       create: {
-        companyId, periodId, provider: preview.provider, fundingRoute: "EMS_WALLET", status: "PREPARED", employeeCount: preview.employeeCount,
+        companyId, periodId, provider: preview.provider, fundingRoute: preview.fundingRoute, status: "PREPARED", employeeCount: preview.employeeCount,
         salaryAmount: salaryTotal.toFixed(2), estimatedFeeAmount: feeTotal.toFixed(2), reservedAmount: "0.00",
         providerAvailableBalance: providerAvailableBalance === null ? null : providerAvailableBalance.toFixed(2),
-        walletBalanceAtPreview: walletBalance.toFixed(2), validationResults: preview, preparationFingerprint: preview.preparationFingerprint, previewedAt: new Date(), createdBy: actorId,
+        walletBalanceAtPreview: walletBalance?.toFixed(2) ?? null, validationResults: preview, preparationFingerprint: preview.preparationFingerprint, previewedAt: new Date(), createdBy: actorId,
       },
       update: {
-        provider: preview.provider, fundingRoute: "EMS_WALLET", status: "PREPARED", employeeCount: preview.employeeCount,
+        provider: preview.provider, fundingRoute: preview.fundingRoute, status: "PREPARED", employeeCount: preview.employeeCount,
         salaryAmount: salaryTotal.toFixed(2), estimatedFeeAmount: feeTotal.toFixed(2), reservedAmount: "0.00",
         providerAvailableBalance: providerAvailableBalance === null ? null : providerAvailableBalance.toFixed(2),
-        walletBalanceAtPreview: walletBalance.toFixed(2), validationResults: preview, preparationFingerprint: preview.preparationFingerprint, previewedAt: new Date(),
+        walletBalanceAtPreview: walletBalance?.toFixed(2) ?? null, validationResults: preview, preparationFingerprint: preview.preparationFingerprint, previewedAt: new Date(),
         approvedBy: null, approvedAt: null, executedAt: null,
       },
     });
@@ -348,11 +387,15 @@ const persistPreview = async (companyId, periodId, actorId, evaluation) => {
 export const getPayrollPayoutBatch = async (companyId, periodId) => {
   const period = await prisma.payrollPeriod.findFirst({ where: { id: periodId, companyId, deletedAt: null }, select: { id: true } });
   if (!period) throw new AppError("Payroll period not found.", 404);
-  const [batch, wallet] = await Promise.all([
-    prisma.payrollPayoutBatch.findUnique({ where: { companyId_periodId: { companyId, periodId } } }),
-    getWallet(companyId),
-  ]);
-  return { batch, walletBalance: walletBalanceForPayoutProvider(wallet, batch?.provider || "FLUTTERWAVE").toFixed(2) };
+  const batch = await prisma.payrollPayoutBatch.findUnique({ where: { companyId_periodId: { companyId, periodId } } });
+  // A direct Flutterwave PSA payout does not depend on the EMS internal wallet.
+  // Avoid even loading that ledger for this route so its availability cannot block reads.
+  if (batch?.fundingRoute === "DIRECT_PROVIDER") return { batch, walletBalance: null };
+  const wallet = await getWallet(companyId);
+  return {
+    batch,
+    walletBalance: walletBalanceForPayoutProvider(wallet, batch?.provider || "FLUTTERWAVE").toFixed(2),
+  };
 };
 
 export const previewPayrollPayoutBatch = async (companyId, periodId, actorId, providerInput) => {
@@ -455,7 +498,8 @@ const recordDefinitiveFailure = async (companyId, payout, attemptNumber, actorId
       ? (requestWasNotSent ? reservedFee : new Decimal(0))
       : Decimal.max(new Decimal(0), reservedFee.minus(money(actualFee)));
     const refundAmount = salaryAmount.plus(feeToRelease).toDecimalPlaces(2);
-    if (refundAmount.isPositive()) {
+    const walletRefundAmount = current.fundingRoute === "DIRECT_PROVIDER" ? new Decimal(0) : refundAmount;
+    if (walletRefundAmount.isPositive()) {
       await creditWalletInTransaction(tx, companyId, {
         account: walletAccountForPayoutProvider(current.provider),
         amount: refundAmount.toFixed(2),
@@ -484,7 +528,7 @@ const recordDefinitiveFailure = async (companyId, payout, attemptNumber, actorId
     });
     if (attempt) await tx.payrollPayoutAttempt.update({ where: { id: attempt.id }, data: { status: "FAILED", actualFeeAmount: actualFee, providerResponse: providerResponse ? publicProviderResponse(providerResponse, providerResponse.data?.id, current.externalReference) : undefined, failureReason: asText(message || "Provider confirmed failure.", 500), verifiedAt: new Date() } });
     if (current.batchId) await refreshBatchStatus(tx, companyId, current.batchId, current.periodId);
-    await writeAudit(tx, { companyId, actorUserId: actorId || null, action: "UPDATE", module: "payroll", resource: "payroll_disbursement", resourceId: current.id, metadata: { previousStatus: current.status, status: "FAILED", attemptNumber, provider: current.provider, refundedAmount: refundAmount.toFixed(2), reason: asText(message, 400) } });
+    await writeAudit(tx, { companyId, actorUserId: actorId || null, action: "UPDATE", module: "payroll", resource: "payroll_disbursement", resourceId: current.id, metadata: { previousStatus: current.status, status: "FAILED", attemptNumber, provider: current.provider, fundingRoute: current.fundingRoute || "EMS_WALLET", refundedAmount: walletRefundAmount.toFixed(2), reason: asText(message, 400) } });
     return updated;
   }, transactionOptions);
 };
@@ -498,7 +542,7 @@ const recordUncertainInitiation = async (companyId, payout, attemptNumber, actor
       where: { id: current.id },
       data: {
         status: "REQUIRES_REVIEW",
-        failureReason: `Provider outcome is uncertain. Reserved funds remain untouched. Verify the original provider reference before any retry. ${asText(message, 300)}`.slice(0, 500),
+        failureReason: `${current.fundingRoute === "DIRECT_PROVIDER" ? "Provider outcome is uncertain. EMS did not reserve funds in its internal wallet; the provider payout wallet may have a pending debit." : "Provider outcome is uncertain. Reserved EMS wallet funds remain untouched."} Verify the original provider reference before any retry. ${asText(message, 260)}`.slice(0, 500),
         providerStatus: "REQUIRES_REVIEW",
         providerResponse: { outcome: "UNCERTAIN", httpStatus: error?.response?.status ?? null, message: asText(message, 350), reference: current.externalReference },
         updatedBy: actorId || null,
@@ -520,12 +564,15 @@ const recordVerifiedSuccess = async (companyId, payout, attemptNumber, actorId, 
     if (!["PROCESSING", "REQUIRES_REVIEW"].includes(current.status)) throw new AppError("Payout status changed while verification was running. Refresh and verify again.", 409);
     const attempt = await tx.payrollPayoutAttempt.findFirst({ where: { disbursementId: current.id, attemptNumber, companyId } });
     const reservedFee = money(current.reservedFeeAmount);
-    let feeAmountAccountedInWallet = reservedFee;
+    let feeAmountAccountedInWallet = current.fundingRoute === "DIRECT_PROVIDER" && actualFee !== null ? money(actualFee) : reservedFee;
     let accountingNote = null;
     if (actualFee === null) {
       accountingNote = "Salary transfer succeeded, but the provider did not return an actual fee. Fee reconciliation is required against the provider statement.";
     } else {
       const feeDifference = reservedFee.minus(money(actualFee));
+      if (current.fundingRoute === "DIRECT_PROVIDER") {
+        if (feeDifference.lessThan(0)) accountingNote = `Flutterwave's actual transfer fee ${money(actualFee).toFixed(2)} exceeded the estimate ${reservedFee.toFixed(2)}. Reconcile against the company's payout-wallet statement.`;
+      } else {
       if (feeDifference.greaterThan(0)) {
         await creditWalletInTransaction(tx, companyId, {
           account: walletAccountForPayoutProvider(current.provider),
@@ -548,6 +595,7 @@ const recordVerifiedSuccess = async (companyId, payout, attemptNumber, actorId, 
         }
       } else {
         feeAmountAccountedInWallet = money(actualFee);
+      }
       }
     }
     const updated = await tx.payrollDisbursement.update({
@@ -573,7 +621,8 @@ const recordReversal = async (companyId, payout, attemptNumber, actorId, respons
   // A confirmed failure already restored principal. If a late provider reversal arrives for that
   // same attempt, change the state but never credit the salary a second time.
   const principalAlreadyReleased = current.status === "FAILED";
-  if (!principalAlreadyReleased) {
+  const isDirectProvider = current.fundingRoute === "DIRECT_PROVIDER";
+  if (!principalAlreadyReleased && !isDirectProvider) {
     await creditWalletInTransaction(tx, companyId, {
       account: walletAccountForPayoutProvider(current.provider),
       amount: money(current.amount).toFixed(2), reference: `PAYROLL-REVERSAL-${current.id}-ATT-${attemptNumber}`,
@@ -587,26 +636,32 @@ const recordReversal = async (companyId, payout, attemptNumber, actorId, respons
       status: "REVERSED", providerStatus: String(response?.data?.status || "REVERSED"),
       feeReconciliationReference: null, feeReconciliationNote: null, feeReconciledAt: null,
       providerResponse: publicProviderResponse(response, response?.data?.id ?? current.providerTransferId, attempt?.externalReference || current.externalReference),
-      failureReason: `Provider confirmed the transfer was reversed. ${principalAlreadyReleased ? "Salary principal had already been refunded for the confirmed failure, so no duplicate credit was posted." : "Salary principal was restored to the company wallet."} Fee reconciliation is required before retrying.`,
+      failureReason: `Provider confirmed the transfer was reversed. ${isDirectProvider ? "The funds were returned to the company's provider payout wallet; EMS did not credit its internal wallet." : principalAlreadyReleased ? "Salary principal had already been refunded for the confirmed failure, so no duplicate credit was posted." : "Salary principal was restored to the company wallet."} Fee reconciliation is required before retrying.`,
       verifiedAt: new Date(), updatedBy: actorId || null,
     },
   });
   if (attempt) await tx.payrollPayoutAttempt.update({ where: { id: attempt.id }, data: { status: "REVERSED", providerResponse: publicProviderResponse(response, response?.data?.id, attempt.externalReference), failureReason: "Provider confirmed reversal; fee reconciliation is required.", verifiedAt: new Date() } });
   if (current.batchId) await refreshBatchStatus(tx, companyId, current.batchId, current.periodId);
-  await writeAudit(tx, { companyId, actorUserId: actorId || null, action: "UPDATE", module: "payroll", resource: "payroll_disbursement", resourceId: current.id, metadata: { previousStatus: current.status, status: "REVERSED", provider: current.provider, externalReference: attempt?.externalReference || current.externalReference, principalRestored: principalAlreadyReleased ? "0.00" : money(current.amount).toFixed(2), feeReconciliationRequired: true } });
+  await writeAudit(tx, { companyId, actorUserId: actorId || null, action: "UPDATE", module: "payroll", resource: "payroll_disbursement", resourceId: current.id, metadata: { previousStatus: current.status, status: "REVERSED", fundingRoute: current.fundingRoute || "EMS_WALLET", provider: current.provider, externalReference: attempt?.externalReference || current.externalReference, principalRestored: principalAlreadyReleased || isDirectProvider ? "0.00" : money(current.amount).toFixed(2), feeReconciliationRequired: true } });
   return updated;
 }, transactionOptions);
 
 const validateVerifiedTransfer = (payout, response) => {
   const data = response?.data;
-  if (!data) throw new AppError("Provider returned no transfer data. Reserved funds remain untouched.", 502);
+  if (!data) throw new AppError(payout.fundingRoute === "DIRECT_PROVIDER"
+    ? "Provider returned no transfer data. The company payout wallet may have a pending debit; verify the original reference."
+    : "Provider returned no transfer data. Reserved EMS wallet funds remain untouched.", 502);
   const expectedReference = String(payout.externalReference || "");
   const receivedReference = String(payout.provider === "PAYSTACK" ? data.reference || "" : data.reference || "");
-  if (!expectedReference || receivedReference !== expectedReference) throw new AppError("Provider transfer reference mismatch. Funds remain reserved for investigation.", 409);
+  if (!expectedReference || receivedReference !== expectedReference) throw new AppError(payout.fundingRoute === "DIRECT_PROVIDER"
+    ? "Provider transfer reference mismatch. Verify the company payout-wallet statement before taking further action."
+    : "Provider transfer reference mismatch. EMS wallet funds remain reserved for investigation.", 409);
   const expectedAmount = money(payout.amount);
   const actualAmount = payout.provider === "PAYSTACK" ? money(new Decimal(data.amount ?? 0).div(100)) : money(data.amount ?? 0);
   if (!actualAmount.eq(expectedAmount) || String(data.currency || "").toUpperCase() !== "NGN") {
-    throw new AppError("Provider transfer amount or currency mismatch. Funds remain reserved for investigation.", 409, { details: { expectedAmount: expectedAmount.toFixed(2), actualAmount: actualAmount.toFixed(2), currency: data.currency || null } });
+    throw new AppError(payout.fundingRoute === "DIRECT_PROVIDER"
+      ? "Provider transfer amount or currency mismatch. Verify the company payout-wallet statement before taking further action."
+      : "Provider transfer amount or currency mismatch. EMS wallet funds remain reserved for investigation.", 409, { details: { expectedAmount: expectedAmount.toFixed(2), actualAmount: actualAmount.toFixed(2), currency: data.currency || null } });
   }
   return data;
 };
@@ -662,12 +717,16 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
     throw new AppError("The approved payroll or bank details changed, or a latest preflight check failed. Refresh the preview, review it and approve again; no transfers were initiated.", 409, { details: { preview: evaluation.preview } });
   }
 
-  const reservationAmount = evaluation.requiredTotal;
+  const fundingRoute = evaluation.preview.fundingRoute;
+  if (String(batch.fundingRoute || "EMS_WALLET").toUpperCase() !== fundingRoute) {
+    throw new AppError("The approved funding route changed after preview. Refresh and approve the new route before submitting payroll.", 409, { code: "PAYROLL_FUNDING_ROUTE_CHANGED" });
+  }
+  const reservationAmount = fundingRoute === "EMS_WALLET" ? evaluation.requiredTotal : new Decimal(0);
   const reservationReference = `PAYROLL-BATCH-${batch.id}`;
   const prepared = evaluation.prepared;
   const pendingIds = evaluation.pending.map((row) => row.id);
   await prisma.$transaction(async (tx) => {
-    await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "EMS_WALLET", provider });
+    await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute, provider });
     const [companyPaystackBatch, companyMonnifyBatch] = await Promise.all([
       tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
       tx.companyMonnifyBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
@@ -679,19 +738,21 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
     if (!currentPeriod || currentPeriod.status !== "FINALIZED") throw new AppError("Payroll is no longer finalized and unpaid. No transfer has been initiated.", 409);
     const stillPending = await tx.payrollDisbursement.findMany({ where: { companyId, periodId, status: "PENDING" }, select: { id: true } });
     if (stillPending.length !== pendingIds.length || stillPending.some((row) => !pendingIds.includes(row.id))) throw new AppError("The payment register changed after approval. No transfer has been initiated.", 409);
-    const existingReservation = await tx.walletLedgerEntry.findUnique({ where: { reference: reservationReference }, select: { id: true } });
-    if (existingReservation) throw new AppError("This batch already has a wallet reservation. Duplicate payout execution is blocked.", 409);
-    await debitWalletInTransaction(tx, companyId, {
-      account: walletAccountForPayoutProvider(provider),
-      amount: reservationAmount.toFixed(2), reference: reservationReference,
-      description: `Reserve salary payout batch — ${evaluation.period.name}`,
-      metadata: { payoutBatchId: batch.id, periodId, provider, disbursementIds: pendingIds, salaryAmount: evaluation.salaryTotal.toFixed(2), estimatedFees: evaluation.feeTotal.toFixed(2), totalReserved: reservationAmount.toFixed(2) },
-    });
+    if (fundingRoute === "EMS_WALLET") {
+      const existingReservation = await tx.walletLedgerEntry.findUnique({ where: { reference: reservationReference }, select: { id: true } });
+      if (existingReservation) throw new AppError("This batch already has a wallet reservation. Duplicate payout execution is blocked.", 409);
+      await debitWalletInTransaction(tx, companyId, {
+        account: walletAccountForPayoutProvider(provider),
+        amount: reservationAmount.toFixed(2), reference: reservationReference,
+        description: `Reserve salary payout batch — ${evaluation.period.name}`,
+        metadata: { payoutBatchId: batch.id, periodId, provider, disbursementIds: pendingIds, salaryAmount: evaluation.salaryTotal.toFixed(2), estimatedFees: evaluation.feeTotal.toFixed(2), totalReserved: reservationAmount.toFixed(2) },
+      });
+    }
     for (const { row } of prepared) {
       const fee = row.fee;
       const reference = makePayrollPayoutReference(row.row.id, 1);
       await tx.payrollDisbursement.update({ where: { id: row.row.id }, data: {
-        batchId: batch.id, fundingRoute: "EMS_WALLET", status: "PROCESSING", method: provider, provider, externalReference: reference,
+        batchId: batch.id, fundingRoute, status: "PROCESSING", method: provider, provider, externalReference: reference,
         estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null,
         providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, failureReason: null, updatedBy: actorId,
       } });
@@ -702,10 +763,16 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
       } });
     }
     await tx.payrollPayoutBatch.update({ where: { id: batch.id }, data: { status: "PROCESSING", reservedAmount: reservationAmount.toFixed(2), providerAvailableBalance: evaluation.providerAvailableBalance?.toFixed(2) ?? null, executedAt: new Date() } });
-    await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_payout_batch", resourceId: batch.id, metadata: { event: "PAYOUT_BATCH_RESERVED", provider, count: pendingIds.length, salaryAmount: evaluation.salaryTotal.toFixed(2), estimatedFeeAmount: evaluation.feeTotal.toFixed(2), reservedAmount: reservationAmount.toFixed(2), walletReservationReference: reservationReference } });
+    await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_payout_batch", resourceId: batch.id, metadata: { event: fundingRoute === "DIRECT_PROVIDER" ? "DIRECT_PROVIDER_BATCH_SUBMITTED" : "PAYOUT_BATCH_RESERVED", fundingRoute, provider, count: pendingIds.length, salaryAmount: evaluation.salaryTotal.toFixed(2), estimatedFeeAmount: evaluation.feeTotal.toFixed(2), reservedAmount: reservationAmount.toFixed(2), walletReservationReference: fundingRoute === "EMS_WALLET" ? reservationReference : null } });
   }, transactionOptions);
 
   const results = [];
+  const flutterwaveDebitSubaccount = provider === "FLUTTERWAVE" && fundingRoute === "DIRECT_PROVIDER"
+    ? await getFlutterwaveDebitSubaccount(companyId)
+    : null;
+  if (fundingRoute === "DIRECT_PROVIDER" && !flutterwaveDebitSubaccount) {
+    throw new AppError("The company's Flutterwave payout wallet is no longer linked. Refresh the preview before submitting salaries.", 409, { code: "FLUTTERWAVE_PAYOUT_WALLET_REQUIRED" });
+  }
   for (const item of prepared) {
     const row = item.row;
     const fresh = await prisma.payrollDisbursement.findFirst({ where: { id: row.id, companyId }, include: { employee: true } });
@@ -723,6 +790,7 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
         response = await initiateFlutterwaveTransfer({
           amount: fresh.amount, accountNumber: bank.account.accountNumber, bankCode: bank.bankCode, accountName: bank.account.accountName,
           reference: fresh.externalReference, narration: `EMS salary ${evaluation.period.name} — ${fresh.employee?.employeeNumber || fresh.employeeId}`.slice(0, 100),
+          debitSubaccount: flutterwaveDebitSubaccount,
         });
       }
       const initiationStatus = normalizePayrollPayoutStatus(provider, response?.data?.status);
@@ -753,7 +821,9 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
       if (isDefinitiveTransferFailure(response)) {
         const message = response.message || response.data?.complete_message || response.data?.failures?.message || "Provider reported a definitive transfer failure.";
         const failed = await recordDefinitiveFailure(companyId, fresh, 1, actorId, message, response);
-        results.push({ id: row.id, status: failed.status, reference: fresh.externalReference, message: "Provider confirmed failure; eligible reserved funds were released and unknown fees remain held for reconciliation." });
+        results.push({ id: row.id, status: failed.status, reference: fresh.externalReference, message: fundingRoute === "DIRECT_PROVIDER"
+          ? "Provider confirmed failure. EMS did not credit or debit its internal wallet; verify the company payout-wallet fee treatment before retrying."
+          : "Provider confirmed failure; eligible reserved EMS wallet funds were released and unknown fees remain held for reconciliation." });
         continue;
       }
       const data = response?.data || {};
@@ -790,10 +860,14 @@ export const executePayrollPayouts = async (companyId, periodId, actorId, provid
       const message = error?.response?.data?.message || providerErrorResponse?.message || error?.message || "The provider request failed.";
       if (canSafelyRelease) {
         const failed = await recordDefinitiveFailure(companyId, fresh, 1, actorId, message, providerErrorResponse, { requestWasNotSent: !transferRequestStarted || definitiveHttpRejection });
-        results.push({ id: row.id, status: failed.status, reference: fresh.externalReference, message: "No transfer was accepted or the provider definitively rejected it; eligible funds were released and any unknown fee remains held for reconciliation." });
+        results.push({ id: row.id, status: failed.status, reference: fresh.externalReference, message: fundingRoute === "DIRECT_PROVIDER"
+          ? "No transfer was accepted or the provider definitively rejected it. No EMS wallet refund was posted because the company payout wallet is the source."
+          : "No transfer was accepted or the provider definitively rejected it; eligible reserved EMS wallet funds were released and any unknown fee remains held for reconciliation." });
       } else {
         await recordUncertainInitiation(companyId, fresh, 1, actorId, error);
-        results.push({ id: row.id, status: "REQUIRES_REVIEW", reference: fresh.externalReference, message: "Provider outcome is uncertain; funds remain reserved and no automatic retry was attempted." });
+        results.push({ id: row.id, status: "REQUIRES_REVIEW", reference: fresh.externalReference, message: fundingRoute === "DIRECT_PROVIDER"
+          ? "Provider outcome is uncertain. Check the company's payout-wallet statement and original reference; no automatic retry was attempted."
+          : "Provider outcome is uncertain; EMS wallet funds remain reserved and no automatic retry was attempted." });
       }
     }
   }
@@ -875,6 +949,7 @@ export const retryFailedPayrollPayout = async (companyId, disbursementId, actorI
   if (latestAttempt.status !== "FAILED") throw new AppError("The latest attempt has not been confirmed failed. Check the provider and reconcile before retrying.", 409);
   if (provider === "FLUTTERWAVE" && !money(payout.amount).eq(money(payout.amount).toDecimalPlaces(0, Decimal.ROUND_HALF_UP))) throw new AppError("Flutterwave NGN transfers require whole-naira amounts.", 400);
   const mode = getPayrollPayoutMode();
+  const fundingRoute = String(payout.fundingRoute || "EMS_WALLET").toUpperCase();
   const shouldResolveAccount = mode === "live" || String(process.env.PAYROLL_PAYOUT_VALIDATE_BANK_ACCOUNTS_IN_SANDBOX || "false").trim().toLowerCase() === "true";
   if (shouldResolveAccount) {
     const resolved = await resolveBankAccount({ provider, accountNumber: bank.account.accountNumber, bankCode: bank.bankCode });
@@ -886,24 +961,34 @@ export const retryFailedPayrollPayout = async (companyId, disbursementId, actorI
   const required = money(payout.amount).plus(fee);
   let providerBalance = null;
   let providerBalanceError = null;
-  try { providerBalance = await getProviderBalance(provider); }
+  try { providerBalance = await getProviderBalance(provider, companyId, fundingRoute); }
   catch (error) { providerBalanceError = asText(error?.message || "Provider balance unavailable."); }
   // Sandbox provider balance is informational and often synthetic; live balance is mandatory.
   if (mode === "live" && providerBalanceError) throw new AppError(`${provider} available balance could not be verified: ${providerBalanceError}`, 503);
   if (mode === "live" && providerBalance && providerBalance.lessThan(required)) throw new AppError(`${provider} available balance is insufficient for this retry including estimated fee.`, 409, { details: { providerAvailableBalance: providerBalance.toFixed(2), requiredAmount: required.toFixed(2) } });
-  const wallet = await getWallet(companyId);
-  const retryWalletBalance = walletBalanceForPayoutProvider(wallet, provider);
-  if (retryWalletBalance.lessThan(required)) throw new AppError("Company salary balance is insufficient for this retry including fee.", 409, { details: { walletBalance: retryWalletBalance.toFixed(2), salaryAccount: walletAccountForPayoutProvider(provider), requiredAmount: required.toFixed(2) } });
+  const flutterwaveDebitSubaccount = fundingRoute === "DIRECT_PROVIDER" && provider === "FLUTTERWAVE"
+    ? await getFlutterwaveDebitSubaccount(companyId)
+    : null;
+  if (fundingRoute === "DIRECT_PROVIDER" && (provider !== "FLUTTERWAVE" || !flutterwaveDebitSubaccount)) {
+    throw new AppError("This direct payout was linked to a company Flutterwave payout wallet that is unavailable. Restore that wallet configuration before retrying.", 409, { code: "FLUTTERWAVE_PAYOUT_WALLET_REQUIRED" });
+  }
+  if (fundingRoute !== "DIRECT_PROVIDER") {
+    const wallet = await getWallet(companyId);
+    const retryWalletBalance = walletBalanceForPayoutProvider(wallet, provider);
+    if (retryWalletBalance.lessThan(required)) throw new AppError("Company salary balance is insufficient for this retry including fee.", 409, { details: { walletBalance: retryWalletBalance.toFixed(2), salaryAccount: walletAccountForPayoutProvider(provider), requiredAmount: required.toFixed(2) } });
+  }
 
   const attemptNumber = Number(latestAttempt.attemptNumber || 1) + 1;
   const reference = makePayrollPayoutReference(payout.id, attemptNumber);
   await prisma.$transaction(async (tx) => {
-    await claimPayrollFundingRoute(tx, { companyId, periodId: payout.periodId, fundingRoute: "EMS_WALLET", provider });
+    await claimPayrollFundingRoute(tx, { companyId, periodId: payout.periodId, fundingRoute, provider });
     const current = await tx.payrollDisbursement.findFirst({ where: { id: payout.id, companyId, status: "FAILED" } });
     if (!current) throw new AppError("Transfer status changed before retry reservation. Refresh and verify again.", 409);
-    await debitWalletInTransaction(tx, companyId, { account: walletAccountForPayoutProvider(provider), amount: required.toFixed(2), reference: `PAYROLL-RETRY-RESERVE-${payout.id}-ATT-${attemptNumber}`, description: `Reserve confirmed failed salary retry ${payout.id}`, metadata: { disbursementId: payout.id, attemptNumber, provider, salaryAmount: money(payout.amount).toFixed(2), estimatedFee: fee.toFixed(2) } });
+    if (fundingRoute === "EMS_WALLET") {
+      await debitWalletInTransaction(tx, companyId, { account: walletAccountForPayoutProvider(provider), amount: required.toFixed(2), reference: `PAYROLL-RETRY-RESERVE-${payout.id}-ATT-${attemptNumber}`, description: `Reserve confirmed failed salary retry ${payout.id}`, metadata: { disbursementId: payout.id, attemptNumber, provider, salaryAmount: money(payout.amount).toFixed(2), estimatedFee: fee.toFixed(2) } });
+    }
     await tx.payrollPayoutAttempt.create({ data: { companyId, disbursementId: payout.id, attemptNumber, provider, externalReference: reference, status: "SUBMITTED", amount: money(payout.amount).toFixed(2), estimatedFeeAmount: fee.toFixed(2), createdBy: actorId, submittedAt: new Date() } });
-    await tx.payrollDisbursement.update({ where: { id: payout.id }, data: { fundingRoute: "EMS_WALLET", status: "PROCESSING", provider, method: provider, externalReference: reference, providerTransferId: null, providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null, failureReason: null, updatedBy: actorId } });
+    await tx.payrollDisbursement.update({ where: { id: payout.id }, data: { fundingRoute, status: "PROCESSING", provider, method: provider, externalReference: reference, providerTransferId: null, providerStatus: "SUBMITTED", providerResponse: Prisma.DbNull, estimatedFeeAmount: fee.toFixed(2), reservedFeeAmount: fee.toFixed(2), actualFeeAmount: null, failureReason: null, updatedBy: actorId } });
     if (payout.batchId) await refreshBatchStatus(tx, companyId, payout.batchId, payout.periodId);
     await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_disbursement", resourceId: payout.id, metadata: { event: "FAILED_PAYOUT_RETRY_RESERVED", attemptNumber, provider, requiredAmount: required.toFixed(2), reference } });
   }, transactionOptions);
@@ -918,7 +1003,7 @@ export const retryFailedPayrollPayout = async (companyId, disbursementId, actorI
       response = await initiatePaystackTransfer({ amount: current.amount, recipientCode, reference, reason: `EMS salary retry ${payout.periodId} — ${current.employee?.employeeNumber || current.employeeId}` });
     } else {
       transferRequestStarted = true;
-      response = await initiateFlutterwaveTransfer({ amount: current.amount, accountNumber: bank.account.accountNumber, bankCode: bank.bankCode, accountName: bank.account.accountName, reference, narration: `EMS salary retry — ${current.employee?.employeeNumber || current.employeeId}`.slice(0, 100) });
+      response = await initiateFlutterwaveTransfer({ amount: current.amount, accountNumber: bank.account.accountNumber, bankCode: bank.bankCode, accountName: bank.account.accountName, reference, narration: `EMS salary retry — ${current.employee?.employeeNumber || current.employeeId}`.slice(0, 100), debitSubaccount: flutterwaveDebitSubaccount });
     }
     const retryResponseStatus = normalizePayrollPayoutStatus(provider, response?.data?.status);
     if (retryResponseStatus === "REVERSED") return recordReversal(companyId, current, attemptNumber, actorId, response);
@@ -1005,7 +1090,7 @@ export const reconcilePayrollPayoutFee = async (companyId, disbursementId, actor
     const attemptNumber = Number(latestAttempt?.attemptNumber || 1);
     const reservedFee = money(current.reservedFeeAmount);
     const difference = reservedFee.minus(requestedFee).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
-    if (difference.greaterThan(0)) {
+    if (current.fundingRoute !== "DIRECT_PROVIDER" && difference.greaterThan(0)) {
       await creditWalletInTransaction(tx, companyId, {
         account: walletAccountForPayoutProvider(current.provider),
         amount: difference.toFixed(2),
@@ -1013,7 +1098,7 @@ export const reconcilePayrollPayoutFee = async (companyId, disbursementId, actor
         description: `Release excess estimated salary-transfer fee for ${current.id}`,
         metadata: { disbursementId: current.id, attemptNumber, reservedFee: reservedFee.toFixed(2), actualFee: requestedFee.toFixed(2), statementReference },
       });
-    } else if (difference.lessThan(0)) {
+    } else if (current.fundingRoute !== "DIRECT_PROVIDER" && difference.lessThan(0)) {
       await debitWalletInTransaction(tx, companyId, {
         account: walletAccountForPayoutProvider(current.provider),
         amount: difference.abs().toFixed(2),
@@ -1033,7 +1118,8 @@ export const reconcilePayrollPayoutFee = async (companyId, disbursementId, actor
     await writeAudit(tx, { companyId, actorUserId: actorId, action: "UPDATE", module: "payroll", resource: "payroll_disbursement", resourceId: current.id, metadata: {
       event: "PAYOUT_FEE_RECONCILED", provider: current.provider, externalReference: current.externalReference,
       attemptNumber, previousReservedFee: reservedFee.toFixed(2), actualFee: requestedFee.toFixed(2),
-      walletAdjustment: difference.toFixed(2), statementReference, note,
+      fundingRoute: current.fundingRoute || "EMS_WALLET",
+      walletAdjustment: current.fundingRoute === "DIRECT_PROVIDER" ? "0.00" : difference.toFixed(2), statementReference, note,
     } });
     return updated;
   }, transactionOptions);
