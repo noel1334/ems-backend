@@ -2,7 +2,7 @@
 
 This is a root-relative overlay patch for the canonical `ems-backend-main` project.
 
-It adds the shared per-payroll-period funding-route/provider lock, classifies EMS-wallet and company-direct provider payouts, fixes the Flutterwave EMS-wallet balance lookup, adds the Prisma migration and adds unit tests.
+It adds the shared per-payroll-period funding-route/provider lock, classifies EMS-wallet and company-direct provider payouts, fixes the Flutterwave EMS-wallet balance lookup, adds the Prisma migration and adds unit tests. It also allows an unfunded, unexecuted legacy preview/approval to be superseded by the first provider submission, while preserving locks for reservations and started payouts.
 
 This patch intentionally contains no `.env`, `.git`, `node_modules`, uploads, unrelated source snapshots, deletion instructions, or replacement copy of `SOURCE_SELECTION.md`.
 
