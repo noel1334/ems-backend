@@ -56,55 +56,73 @@ WHERE rp."roleId" = r."id"
   AND r."name" IN ('SUPER_ADMIN', 'COMPANY_ADMIN', 'HR_ADMIN', 'FINANCE_ADMIN', 'EMPLOYEE', 'STORE_KEEPER');
 
 -- SUPER_ADMIN receives the full active catalogue, including platform-only permissions.
-INSERT INTO "role_permissions" ("roleId", "permissionId")
-SELECT r."id", p."id"
+WITH role_permission_source AS (
+SELECT r."id" AS role_id, p."id" AS permission_id
 FROM "roles" r CROSS JOIN "permissions" p
 WHERE r."companyId" IS NULL AND r."isSystem" = true AND r."name" = 'SUPER_ADMIN' AND p."isActive" = true
+)
+INSERT INTO "role_permissions" ("roleId", "permissionId")
+SELECT role_id, permission_id FROM role_permission_source
 ON CONFLICT ("roleId", "permissionId") DO NOTHING;
 
 -- Company administrator receives tenant-scoped permissions only, never system permissions
 -- and never the platform-level create/delete company privileges.
-INSERT INTO "role_permissions" ("roleId", "permissionId")
-SELECT r."id", p."id"
+WITH role_permission_source AS (
+SELECT r."id" AS role_id, p."id" AS permission_id
 FROM "roles" r CROSS JOIN "permissions" p
 WHERE r."companyId" IS NULL AND r."isSystem" = true AND r."name" = 'COMPANY_ADMIN'
   AND p."isActive" = true AND p."module" <> 'system'
   AND NOT (p."module" = 'company' AND p."resource" = 'company' AND p."action" IN ('CREATE'::"PermissionAction", 'DELETE'::"PermissionAction"))
+)
+INSERT INTO "role_permissions" ("roleId", "permissionId")
+SELECT role_id, permission_id FROM role_permission_source
 ON CONFLICT ("roleId", "permissionId") DO NOTHING;
 
 -- HR administration covers HR operations, scheduling, holidays, reporting and the dashboard.
-INSERT INTO "role_permissions" ("roleId", "permissionId")
-SELECT r."id", p."id"
+WITH role_permission_source AS (
+SELECT r."id" AS role_id, p."id" AS permission_id
 FROM "roles" r CROSS JOIN "permissions" p
 WHERE r."companyId" IS NULL AND r."isSystem" = true AND r."name" = 'HR_ADMIN'
   AND p."isActive" = true
   AND p."module" IN ('users','departments','designations','employees','attendance','leave','audit','dashboard','scheduling','schedules','shifts','holidays','reports')
+)
+INSERT INTO "role_permissions" ("roleId", "permissionId")
+SELECT role_id, permission_id FROM role_permission_source
 ON CONFLICT ("roleId", "permissionId") DO NOTHING;
 
 -- Finance role gets finance operations plus dashboard/report/audit visibility.
-INSERT INTO "role_permissions" ("roleId", "permissionId")
-SELECT r."id", p."id"
+WITH role_permission_source AS (
+SELECT r."id" AS role_id, p."id" AS permission_id
 FROM "roles" r CROSS JOIN "permissions" p
 WHERE r."companyId" IS NULL AND r."isSystem" = true AND r."name" = 'FINANCE_ADMIN'
   AND p."isActive" = true AND p."module" IN ('payroll','wallet','payments','dashboard','reports','audit')
+)
+INSERT INTO "role_permissions" ("roleId", "permissionId")
+SELECT role_id, permission_id FROM role_permission_source
 ON CONFLICT ("roleId", "permissionId") DO NOTHING;
 
 -- Employee access is read-only except the inventory transaction confirmation permission
 -- used by the employee-confirmation workflow.
-INSERT INTO "role_permissions" ("roleId", "permissionId")
-SELECT r."id", p."id"
+WITH role_permission_source AS (
+SELECT r."id" AS role_id, p."id" AS permission_id
 FROM "roles" r CROSS JOIN "permissions" p
 WHERE r."companyId" IS NULL AND r."isSystem" = true AND r."name" = 'EMPLOYEE'
   AND p."isActive" = true
   AND ((p."action" = 'READ'::"PermissionAction" AND p."module" IN ('dashboard','employees','attendance','leave','payroll','wallet','inventory'))
     OR (p."module" = 'inventory' AND p."resource" = 'transactions' AND p."action" = 'APPROVE'::"PermissionAction"))
+)
+INSERT INTO "role_permissions" ("roleId", "permissionId")
+SELECT role_id, permission_id FROM role_permission_source
 ON CONFLICT ("roleId", "permissionId") DO NOTHING;
 
 -- Store keepers manage inventory but only receive the read dashboard permission outside inventory.
-INSERT INTO "role_permissions" ("roleId", "permissionId")
-SELECT r."id", p."id"
+WITH role_permission_source AS (
+SELECT r."id" AS role_id, p."id" AS permission_id
 FROM "roles" r CROSS JOIN "permissions" p
 WHERE r."companyId" IS NULL AND r."isSystem" = true AND r."name" = 'STORE_KEEPER'
   AND p."isActive" = true
   AND (p."module" = 'inventory' OR (p."module" = 'dashboard' AND p."resource" = 'dashboard' AND p."action" = 'READ'::"PermissionAction))
+)
+INSERT INTO "role_permissions" ("roleId", "permissionId")
+SELECT role_id, permission_id FROM role_permission_source
 ON CONFLICT ("roleId", "permissionId") DO NOTHING;

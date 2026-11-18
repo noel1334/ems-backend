@@ -18,7 +18,6 @@ const expectAppError = (callback, statusCode, code) => {
 const makeTx = ({
   period = { id: "period-1", payoutFundingRoute: null, payoutProvider: null },
   walletBatch = null,
-  walletReservation = null,
   paystackBatch = null,
   monnifyBatch = null,
   directDisbursement = null,
@@ -52,7 +51,7 @@ const makeTx = ({
         return walletDisbursement;
       }),
     },
-    walletLedgerEntry: { findUnique: vi.fn(async () => walletReservation) },
+    walletLedgerEntry: { findUnique: vi.fn(async () => null) },
   };
   return { tx, calls };
 };
@@ -144,54 +143,13 @@ describe("payroll funding route lock", () => {
     })).rejects.toMatchObject({ statusCode: 409, code: "PAYROLL_FUNDING_ROUTE_CONFLICT" });
   });
 
-  it("allows Monnify Direct Provider Payroll after an unexecuted, unfunded legacy preview", async () => {
+  it("treats an existing prepared legacy EMS wallet batch as route evidence", async () => {
     const { tx } = makeTx({ walletBatch: {
       id: "wallet-batch-1",
       provider: "FLUTTERWAVE",
       fundingRoute: "EMS_WALLET",
       status: "PREPARED",
-      reservedAmount: "0.00",
-      executedAt: null,
     } });
-    await expect(claimPayrollFundingRoute(tx, {
-      companyId: "company-A",
-      periodId: "period-1",
-      fundingRoute: "DIRECT_PROVIDER",
-      provider: "MONNIFY",
-    })).resolves.toMatchObject({ fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" });
-  });
-
-  it.each(["PREPARED", "APPROVED"])("keeps a %s wallet batch locked when its reservation exists", async (status) => {
-    const { tx } = makeTx({
-      walletBatch: {
-        id: "wallet-batch-1",
-        provider: "FLUTTERWAVE",
-        fundingRoute: "EMS_WALLET",
-        status,
-        reservedAmount: "0.00",
-        executedAt: null,
-      },
-      walletReservation: { id: "ledger-reservation-1" },
-    });
-    await expect(claimPayrollFundingRoute(tx, {
-      companyId: "company-A",
-      periodId: "period-1",
-      fundingRoute: "DIRECT_PROVIDER",
-      provider: "MONNIFY",
-    })).rejects.toMatchObject({ statusCode: 409, code: "PAYROLL_FUNDING_ROUTE_CONFLICT" });
-  });
-
-  it("keeps a wallet batch locked when it has a non-zero reserved amount", async () => {
-    const { tx } = makeTx({
-      walletBatch: {
-        id: "wallet-batch-1",
-        provider: "FLUTTERWAVE",
-        fundingRoute: "EMS_WALLET",
-        status: "PREPARED",
-        reservedAmount: "25000.00",
-        executedAt: null,
-      },
-    });
     await expect(claimPayrollFundingRoute(tx, {
       companyId: "company-A",
       periodId: "period-1",

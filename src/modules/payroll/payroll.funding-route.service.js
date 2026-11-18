@@ -45,10 +45,7 @@ export const assertPayrollFundingRouteCompatible = ({
 
 const inferExistingRoute = async (tx, companyId, periodId) => {
   const [walletBatch, paystackBatch, monnifyBatch, directDisbursement, walletDisbursement] = await Promise.all([
-    tx.payrollPayoutBatch.findUnique({
-      where: { companyId_periodId: { companyId, periodId } },
-      select: { id: true, provider: true, fundingRoute: true, status: true, reservedAmount: true, executedAt: true },
-    }),
+    tx.payrollPayoutBatch.findUnique({ where: { companyId_periodId: { companyId, periodId } }, select: { id: true, provider: true, fundingRoute: true, status: true } }),
     tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
     tx.companyMonnifyBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true } }),
     tx.payrollDisbursement.findFirst({ where: { companyId, periodId, fundingRoute: PAYROLL_FUNDING_ROUTE.DIRECT_PROVIDER, provider: { in: ["PAYSTACK_COMPANY", "MONNIFY", "FLUTTERWAVE"] }, status: { not: "PENDING" } }, select: { provider: true } }),
@@ -64,30 +61,14 @@ const inferExistingRoute = async (tx, companyId, periodId) => {
     source: "direct_provider_disbursement",
   });
   if (walletBatch) {
-    const legacyStatus = String(walletBatch.status || "").trim().toUpperCase();
-    const hasReservedAmount = Number(walletBatch.reservedAmount || 0) > 0;
-    const reservation = ["PREPARED", "APPROVED"].includes(legacyStatus) && !walletBatch.executedAt && !hasReservedAmount
-      ? await tx.walletLedgerEntry.findUnique({
-          where: { reference: `PAYROLL-BATCH-${walletBatch.id}` },
-          select: { id: true },
-        })
-      : null;
-    const isUncommittedPreview = ["PREPARED", "APPROVED"].includes(legacyStatus)
-      && !walletBatch.executedAt
-      && !hasReservedAmount
-      && !reservation;
-
-    // A preview/approval alone has not moved money or submitted a provider request.
-    // It must not permanently prevent an administrator from choosing the company's
-    // Monnify direct-provider route. Once a reservation, execution timestamp, or any
-    // in-flight/terminal batch status exists, keep the route evidence and block switches.
-    if (!isUncommittedPreview) {
-      evidence.push({
-        fundingRoute: normalizeRoute(walletBatch.fundingRoute || PAYROLL_FUNDING_ROUTE.EMS_WALLET),
-        provider: normalizeProvider(walletBatch.provider),
-        source: "ems_wallet_payout_batch",
-      });
-    }
+    // A persisted legacy EMS-wallet batch is already a route selection, even before
+    // reservation. Being conservative prevents a prepared batch and a direct-provider
+    // batch from racing to pay the same period through different funding paths.
+    evidence.push({
+      fundingRoute: normalizeRoute(walletBatch.fundingRoute || PAYROLL_FUNDING_ROUTE.EMS_WALLET),
+      provider: normalizeProvider(walletBatch.provider),
+      source: "ems_wallet_payout_batch",
+    });
   }
   if (walletDisbursement) evidence.push({ fundingRoute: PAYROLL_FUNDING_ROUTE.EMS_WALLET, provider: normalizeProvider(walletDisbursement.provider), source: "ems_wallet_disbursement" });
 
