@@ -101,4 +101,4 @@ SELECT r."id" AS role_id, p."id" AS permission_id
 FROM "roles" r CROSS JOIN "permissions" p
 WHERE r."companyId" IS NULL AND r."isSystem" = true AND r."name" = 'STORE_KEEPER'
   AND p."isActive" = true
-  AND (p."module" = 'inventory' OR (p."module" = 'dashboard' AND p."resource" = 'dashboard' AND p."action" = 'READ'::"PermissionAction));
+  AND (p."module" = 'inventory' OR (p."module" = 'dashboard' AND p."resource" = 'dashboard' AND p."action" = 'READ'::"PermissionAction"));
