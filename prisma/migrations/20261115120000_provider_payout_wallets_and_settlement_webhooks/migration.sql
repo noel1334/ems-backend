@@ -1,5 +1,5 @@
 -- Keep Flutterwave collection split accounts (RS_) separate from payout wallets (PSA...).
-ALTER TABLE "Company"
+ALTER TABLE "companies"
   ADD COLUMN IF NOT EXISTS "flutterwavePayoutAccountReference" TEXT,
   ADD COLUMN IF NOT EXISTS "flutterwavePayoutBarterId" TEXT,
   ADD COLUMN IF NOT EXISTS "flutterwavePayoutNuban" TEXT,
