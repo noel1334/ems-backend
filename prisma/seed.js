@@ -729,7 +729,7 @@ const seed = async () => {
     let template = await prisma.roleTemplate.findUnique({ where: { key: roleName }, include: { versions: true } });
     if (!template) {
       const role = roleMap.get(roleName);
-      const permissionIds = rolePermissionKeys[roleName] ?? [];
+      const permissionIds = [...new Set(rolePermissionKeys[roleName] ?? [])];
       template = await prisma.roleTemplate.create({
         data: {
           key: roleName,
@@ -768,9 +768,11 @@ const seed = async () => {
   // Existing published versions are preserved: re-running seed never overwrites platform changes.
   for (const definition of INDUSTRY_ROLE_TEMPLATES) {
     const key = String(definition.key).trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "_");
-    const definitionPermissionIds = Array.from(permissionMap.values())
-      .filter((permission) => isTenantPermission(permission) && permissionMatchesRules(permission, definition.rules))
-      .map((permission) => permission.id);
+    const definitionPermissionIds = [...new Set(
+      Array.from(permissionMap.values())
+        .filter((permission) => isTenantPermission(permission) && permissionMatchesRules(permission, definition.rules))
+        .map((permission) => permission.id),
+    )];
     let template = await prisma.roleTemplate.findUnique({ where: { key }, include: { versions: true } });
     if (!template) {
       await prisma.roleTemplate.create({
