@@ -787,11 +787,30 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
       note: "Only employees who passed server-side Monnify validation were submitted. Blocked employees remain pending in the payroll register.",
     };
   } catch (error) {
-    await prisma.companyMonnifyBatch.update({
-      where: { id: savedBatch.id },
-      data: { providerStatus: "SUBMISSION_UNKNOWN", providerResponse: { errorCode: error.code || "UPSTREAM_ERROR", message: error.message, _emsTransactionMap: transactionMap } },
+    // The request may have reached Monnify even when EMS did not receive a usable
+    // response. Preserve only safe provider diagnostics; never store credentials,
+    // authorization headers, OTPs, or beneficiary account numbers here.
+    const diagnostic = {
+      errorCode: String(error?.code || error?.details?.providerCode || "UPSTREAM_ERROR").slice(0, 100),
+      message: String(error?.details?.providerMessage || error?.message || "Monnify submission failed").slice(0, 400),
+      providerHttpStatus: Number.isInteger(error?.statusCode) ? error.statusCode : null,
+      request: error?.details?.request ? {
+        method: String(error.details.request.method || "POST").slice(0, 10),
+        path: String(error.details.request.path || "/api/v2/disbursements/batch").slice(0, 180),
+      } : { method: "POST", path: "/api/v2/disbursements/batch" },
+    };
+    try {
+      await prisma.companyMonnifyBatch.update({
+        where: { id: savedBatch.id },
+        data: { providerStatus: "SUBMISSION_UNKNOWN", providerResponse: { ...diagnostic, _emsTransactionMap: transactionMap } },
+      });
+    } catch (recordError) {
+      console.error("EMS could not persist uncertain Monnify batch diagnostics:", recordError?.message || recordError);
+    }
+    throw new AppError("Monnify submission outcome is uncertain. Do not submit this payroll again. Refresh/reconcile the saved batch reference first.", 502, {
+      code: "MONNIFY_SUBMISSION_UNKNOWN",
+      details: { batchReference, providerCode: diagnostic.errorCode, providerMessage: diagnostic.message, providerHttpStatus: diagnostic.providerHttpStatus, request: diagnostic.request },
     });
-    throw new AppError("Monnify submission outcome is uncertain. EMS saved the batch reference; refresh/reconcile this batch before attempting another submission.", 502, { code: "MONNIFY_SUBMISSION_UNKNOWN", details: { batchReference } });
   }
 }
 
@@ -1050,14 +1069,10 @@ export async function authorizeBatch(companyId, batchId, otp) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
   if (!batch) throw new AppError("Monnify batch not found.", 404);
   if (!["PENDING_AUTHORIZATION", "PENDING_BATCH_AUTHORIZATION"].includes(batch.providerStatus)) throw new AppError(`This batch is not awaiting OTP authorization (status: ${batch.providerStatus}).`, 409);
-  const authorizationCode = String(otp ?? "").trim();
-  if (!/^\d{4,10}$/.test(authorizationCode)) throw new AppError("Enter a valid OTP.", 400);
+  if (!/^\d{4,10}$/.test(String(otp || ""))) throw new AppError("Enter a valid OTP.", 400);
   const connection = await requiredConnection(companyId);
   assertBatchEnvironment(connection, batch);
-  // Monnify bulk MFA endpoint: POST /api/v2/disbursements/batch/validate-otp
-  // Body uses the saved provider batchReference as `reference` and OTP as
-  // `authorizationCode`; never send a new batch or transfer reference here.
-  const result = await monnifyEndpoints.authorizeBatch(connection, batch.batchReference, authorizationCode);
+  const result = await monnifyEndpoints.authorizeBatch(connection, batch.batchReference, otp);
   const status = result.batchStatus || "AWAITING_PROCESSING";
   const transactionMap = batch.providerResponse?._emsTransactionMap || {};
   await prisma.$transaction(async (tx) => {
@@ -1074,11 +1089,9 @@ export async function authorizeBatch(companyId, batchId, otp) {
 export async function resendBatchOtp(companyId, batchId) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
   if (!batch) throw new AppError("Monnify batch not found.", 404);
-  // Monnify's bulk-transfer guide says to resend when the OTP was not received
-  // or expired. This can happen while the batch remains PENDING_AUTHORIZATION,
-  // not only when the provider reports OTP_EMAIL_DISPATCH_FAILED.
-  if (!["PENDING_AUTHORIZATION", "PENDING_BATCH_AUTHORIZATION", "OTP_EMAIL_DISPATCH_FAILED"].includes(batch.providerStatus)) {
-    throw new AppError(`OTP resend is available only while this batch awaits authorization or Monnify reports an OTP email dispatch failure (current status: ${batch.providerStatus}).`, 409, { code: "MONNIFY_OTP_RESEND_NOT_AVAILABLE" });
+  const resendableStatuses = new Set(["PENDING_AUTHORIZATION", "PENDING_BATCH_AUTHORIZATION", "OTP_EMAIL_DISPATCH_FAILED"]);
+  if (!resendableStatuses.has(String(batch.providerStatus || "").toUpperCase())) {
+    throw new AppError(`OTP resend is only available while this batch is awaiting authorization or Monnify reports OTP_EMAIL_DISPATCH_FAILED (current status: ${batch.providerStatus}).`, 409, { code: "MONNIFY_OTP_RESEND_NOT_AVAILABLE", details: { batchReference: batch.batchReference, status: batch.providerStatus } });
   }
   const connection = await requiredConnection(companyId);
   assertBatchEnvironment(connection, batch);

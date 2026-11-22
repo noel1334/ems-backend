@@ -51,7 +51,7 @@ export const monnifyEndpoints = {
   authorizeSingle: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single/validate-otp", { data: { reference, authorizationCode } }),
   singleStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/single/summary", { params: { reference } }),
   authorizeBatch: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch/validate-otp", { data: { reference, authorizationCode } }),
-  resendBatchOtp: (connection, reference) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single/resend-otp", { data: { reference } }),
+  resendBatchOtp: (connection, reference) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch/resend-otp", { data: { reference } }),
   batchStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/summary", { params: { batchReference: reference } }),
   batchTransactions: async (connection, reference, pageNo = 0, pageSize = 100) => {
     const all = [];

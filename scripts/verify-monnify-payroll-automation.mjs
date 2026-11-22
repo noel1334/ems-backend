@@ -13,7 +13,7 @@ for (const name of ["previewPayroll", "submitPayroll", "refreshPayrollBatch"]) {
 for (const text of ["payrollDisbursement.findMany", "bankAccounts", "previewFingerprint", "MONNIFY_PREVIEW_STALE", "disbursementBalance", "MONNIFY_INSUFFICIENT_BALANCE", "destinationAccountName", 'onValidationFailure: "CONTINUE"', "_emsTransactionMap", 'data.status = "PAID"']) {
   assert.ok(service.includes(text), `Missing payroll automation safeguard: ${text}`);
 }
-for (const text of ["/api/v2/disbursements/batch", "/api/v2/disbursements/batch/validate-otp", "/api/v2/disbursements/single/resend-otp", "/api/v2/disbursements/bulk/summary", "resendBatchOtp"]) {
+for (const text of ["/api/v2/disbursements/batch", "/api/v2/disbursements/batch/validate-otp", "/api/v2/disbursements/batch/resend-otp", "/api/v2/disbursements/bulk/summary", "resendBatchOtp"]) {
   assert.ok(client.includes(text), `Missing Monnify endpoint ${text}`);
 }
 assert.match(client, /`\/api\/v2\/disbursements\/bulk\/\$\{encodeURIComponent\(reference\)\}\/transactions`/);
@@ -22,5 +22,7 @@ assert.match(routes, /router\.post\("\/payroll\/:periodId\/preview"/);
 assert.match(routes, /router\.post\("\/payroll\/:periodId\/submit"/);
 assert.match(routes, /router\.post\("\/batches\/:id\/resend-otp"/);
 assert.ok(service.includes("export async function resendBatchOtp("), "Missing OTP resend service");
+assert.match(service, /PENDING_AUTHORIZATION.*PENDING_BATCH_AUTHORIZATION.*OTP_EMAIL_DISPATCH_FAILED/s, "Batch OTP resend must support pending authorization states");
+assert.ok(service.includes("providerMessage: diagnostic.message"), "Uncertain submissions must preserve safe provider diagnostics");
 assert.match(payrollService, /preparePayrollDisbursements/);
 console.log("OK payroll-backed Monnify preview, submission, OTP authorization and transaction reconciliation are wired.");
