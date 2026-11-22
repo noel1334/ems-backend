@@ -1050,10 +1050,14 @@ export async function authorizeBatch(companyId, batchId, otp) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
   if (!batch) throw new AppError("Monnify batch not found.", 404);
   if (!["PENDING_AUTHORIZATION", "PENDING_BATCH_AUTHORIZATION"].includes(batch.providerStatus)) throw new AppError(`This batch is not awaiting OTP authorization (status: ${batch.providerStatus}).`, 409);
-  if (!/^\d{4,10}$/.test(String(otp || ""))) throw new AppError("Enter a valid OTP.", 400);
+  const authorizationCode = String(otp ?? "").trim();
+  if (!/^\d{4,10}$/.test(authorizationCode)) throw new AppError("Enter a valid OTP.", 400);
   const connection = await requiredConnection(companyId);
   assertBatchEnvironment(connection, batch);
-  const result = await monnifyEndpoints.authorizeBatch(connection, batch.batchReference, otp);
+  // Monnify bulk MFA endpoint: POST /api/v2/disbursements/batch/validate-otp
+  // Body uses the saved provider batchReference as `reference` and OTP as
+  // `authorizationCode`; never send a new batch or transfer reference here.
+  const result = await monnifyEndpoints.authorizeBatch(connection, batch.batchReference, authorizationCode);
   const status = result.batchStatus || "AWAITING_PROCESSING";
   const transactionMap = batch.providerResponse?._emsTransactionMap || {};
   await prisma.$transaction(async (tx) => {
@@ -1070,8 +1074,11 @@ export async function authorizeBatch(companyId, batchId, otp) {
 export async function resendBatchOtp(companyId, batchId) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
   if (!batch) throw new AppError("Monnify batch not found.", 404);
-  if (batch.providerStatus !== "OTP_EMAIL_DISPATCH_FAILED") {
-    throw new AppError(`OTP resend is only available when Monnify reports OTP_EMAIL_DISPATCH_FAILED (current status: ${batch.providerStatus}).`, 409, { code: "MONNIFY_OTP_RESEND_NOT_AVAILABLE" });
+  // Monnify's bulk-transfer guide says to resend when the OTP was not received
+  // or expired. This can happen while the batch remains PENDING_AUTHORIZATION,
+  // not only when the provider reports OTP_EMAIL_DISPATCH_FAILED.
+  if (!["PENDING_AUTHORIZATION", "PENDING_BATCH_AUTHORIZATION", "OTP_EMAIL_DISPATCH_FAILED"].includes(batch.providerStatus)) {
+    throw new AppError(`OTP resend is available only while this batch awaits authorization or Monnify reports an OTP email dispatch failure (current status: ${batch.providerStatus}).`, 409, { code: "MONNIFY_OTP_RESEND_NOT_AVAILABLE" });
   }
   const connection = await requiredConnection(companyId);
   assertBatchEnvironment(connection, batch);
