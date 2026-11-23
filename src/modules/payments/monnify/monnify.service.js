@@ -682,11 +682,64 @@ export async function previewPayroll(companyId, periodId) {
   return publicPreview;
 }
 
-export async function submitPayroll(companyId, periodId, userId, previewFingerprint) {
+// Only provider responses that are documented as hard validation/authorization
+// failures unlock a batch-level single-transfer fallback. D05/D07 duplicate
+// references/requests and code 99 remain ambiguous until a status lookup resolves them.
+const DEFINITIVE_MONNIFY_REJECTION_CODES = new Set(["D03", "D04", "D06"]);
+const SINGLE_FALLBACK_REJECTION_CODES = new Set(["D03", "D04"]);
+const isDefinitiveMonnifyRejection = (error) => {
+  const details = error?.details || {};
+  const code = String(details.providerCode || error?.code || "").toUpperCase();
+  return details.provider === "MONNIFY"
+    && details.providerResponse?.requestSuccessful === false
+    && DEFINITIVE_MONNIFY_REJECTION_CODES.has(code);
+};
+
+const monnifyFailureDiagnostic = (error) => {
+  const details = error?.details && typeof error.details === "object" ? error.details : {};
+  const providerCode = String(details.providerCode || error?.code || "MONNIFY_UPSTREAM_ERROR").slice(0, 80);
+  const providerMessage = String(details.providerMessage || error?.message || "Monnify request failed").slice(0, 400);
+  return {
+    providerCode,
+    providerMessage,
+    httpStatus: Number.isInteger(error?.statusCode) ? error.statusCode : null,
+    request: details.request && typeof details.request === "object"
+      ? { method: String(details.request.method || "").slice(0, 12), path: String(details.request.path || "").slice(0, 180) }
+      : null,
+    providerResponse: details.providerResponse && typeof details.providerResponse === "object"
+      ? {
+          requestSuccessful: details.providerResponse.requestSuccessful ?? null,
+          responseCode: details.providerResponse.responseCode ? String(details.providerResponse.responseCode).slice(0, 80) : null,
+          responseMessage: details.providerResponse.responseMessage ? String(details.providerResponse.responseMessage).slice(0, 400) : null,
+        }
+      : null,
+  };
+};
+
+const logMonnifyEvent = (event, fields = {}) => {
+  // Provider credentials, full payloads, source account numbers and beneficiary data
+  // must never be written to application logs.
+  console.error(JSON.stringify({ event, ...fields }));
+};
+
+export async function submitPayroll(companyId, periodId, userId, previewFingerprint, requestId = null) {
   const fingerprint = String(previewFingerprint || "").trim();
   if (!/^[a-f0-9]{64}$/i.test(fingerprint)) throw new AppError("Run a fresh Monnify payroll preview before submitting.", 400, { code: "MONNIFY_PREVIEW_REQUIRED" });
 
-  const preview = await buildPayrollPreview(companyId, periodId);
+  console.info(JSON.stringify({ event: "monnify_payroll_batch_submit_started", requestId, periodId }));
+  let preview;
+  try {
+    preview = await buildPayrollPreview(companyId, periodId);
+  } catch (error) {
+    logMonnifyEvent("monnify_payroll_batch_pre_submit_failed", {
+      requestId,
+      periodId,
+      errorName: String(error?.name || "Error").slice(0, 80),
+      errorCode: String(error?.code || error?.details?.providerCode || "PRE_SUBMIT_ERROR").slice(0, 80),
+      errorMessage: String(error?.message || "Pre-submit validation failed").slice(0, 400),
+    });
+    throw error;
+  }
   if (preview.previewFingerprint !== fingerprint) {
     throw new AppError("Payroll or employee bank details changed after preview. Run Preview & validate again before submitting.", 409, { code: "MONNIFY_PREVIEW_STALE" });
   }
@@ -696,20 +749,22 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   if (transactions.length > 5000) throw new AppError("Monnify bulk payroll batches support a maximum of 5,000 employees. Split this payroll into separate approved batches.", 400, { code: "MONNIFY_BATCH_LIMIT_EXCEEDED" });
   if (!transactions.length) throw new AppError("No employees passed Monnify validation. Nothing was submitted.", 422, { code: "MONNIFY_NO_VALID_BENEFICIARIES", details: { employees: preview.employees } });
 
-  const connection = await requiredConnection(companyId);
-  const otherProviderBatch = await prisma.companyPaystackBatch.findFirst({
-    where: { companyId, payrollPeriodId },
-    select: { batchReference: true, providerStatus: true },
-  });
-  if (otherProviderBatch) throw new AppError(`This payroll period already has a Paystack batch (${otherProviderBatch.batchReference}, ${otherProviderBatch.providerStatus}). Reconcile that batch before switching providers. Only one provider route may pay a payroll period.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT", details: { provider: "PAYSTACK_COMPANY", batchReference: otherProviderBatch.batchReference, status: otherProviderBatch.providerStatus } });
+  let connection;
+  let otherProviderBatch;
   const batchReference = `EMS-${crypto.randomUUID()}`;
   const transactionMap = Object.fromEntries(transactions.map((transaction) => [transaction.reference, transaction.disbursementId]));
   const totalAmount = transactions.reduce((sum, transaction) => sum + transaction.amount, 0);
-  // Serialize company-specific provider batches. The connected Monnify disbursement
-  // account is the source of funds; do not reserve/debit the separate EMS wallet.
-  const savedBatch = await prisma.$transaction(async (tx) => {
+  let savedBatch;
+  try {
+    connection = await requiredConnection(companyId);
+    otherProviderBatch = await prisma.companyPaystackBatch.findFirst({
+      where: { companyId, payrollPeriodId: periodId },
+      select: { batchReference: true, providerStatus: true },
+    });
+    if (otherProviderBatch) throw new AppError(`This payroll period already has a Paystack batch (${otherProviderBatch.batchReference}, ${otherProviderBatch.providerStatus}). Reconcile that batch before switching providers. Only one provider route may pay a payroll period.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT", details: { provider: "PAYSTACK_COMPANY", batchReference: otherProviderBatch.batchReference, status: otherProviderBatch.providerStatus } });
+    savedBatch = await prisma.$transaction(async (tx) => {
     await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" });
-    const paystackBatch = await tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId }, select: { batchReference: true, providerStatus: true } });
+    const paystackBatch = await tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true, providerStatus: true } });
     if (paystackBatch) throw new AppError(`This payroll period already has a Paystack batch (${paystackBatch.batchReference}, ${paystackBatch.providerStatus}). Reconcile it before switching providers.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT" });
     const openBatch = await tx.companyMonnifyBatch.findFirst({
       where: { companyId, providerStatus: { in: OPEN_BATCH_STATUSES } },
@@ -729,16 +784,28 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
         providerResponse: { _emsTransactionMap: transactionMap },
       },
     });
-  }, { isolationLevel: "Serializable" });
+    }, { isolationLevel: "Serializable" });
+  } catch (error) {
+    if (!(error instanceof AppError)) {
+      logMonnifyEvent("monnify_payroll_batch_setup_failed", {
+        requestId, periodId, batchReference,
+        errorName: String(error?.name || "Error").slice(0, 80),
+        errorCode: String(error?.code || "DATABASE_OR_SETUP_ERROR").slice(0, 80),
+        errorMessage: String(error?.message || "Could not reserve the payroll funding route").slice(0, 400),
+      });
+    }
+    throw error;
+  }
 
+  // Keep the provider call separate from EMS persistence. A failure in Monnify's
+  // response is not the same as a database failure after Monnify accepted the batch.
+  let response;
   try {
-    const response = await monnifyEndpoints.submitBatch(connection, {
+    response = await monnifyEndpoints.submitBatch(connection, {
       title: `EMS Salary - ${preview.period.name}`.slice(0, 80),
       batchReference,
       narration: `EMS payroll ${preview.period.name}`.slice(0, 80),
       sourceAccountNumber: connection.sourceAccountNumber,
-      // Only Name-Enquiry-verified records are sent. CONTINUE lets good employees proceed
-      // if one beneficiary becomes unavailable between Name Enquiry and provider processing.
       onValidationFailure: "CONTINUE",
       notificationInterval: 25,
       transactionList: transactions.map((transaction) => ({
@@ -751,7 +818,55 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
         currency: "NGN",
       })),
     });
-    const status = String(response.batchStatus || "PENDING_AUTHORIZATION");
+  } catch (error) {
+    const diagnostic = monnifyFailureDiagnostic(error);
+    const explicitMonnifyRejection = isDefinitiveMonnifyRejection(error);
+    const failedStatus = explicitMonnifyRejection ? "SUBMISSION_REJECTED" : "SUBMISSION_UNKNOWN";
+    logMonnifyEvent("monnify_payroll_batch_provider_submission_failed", {
+      requestId,
+      periodId,
+      batchReference,
+      environment: connection.environment,
+      providerStatus: failedStatus,
+      ...diagnostic,
+    });
+    try {
+      await prisma.companyMonnifyBatch.update({
+        where: { id: savedBatch.id },
+        data: {
+          providerStatus: failedStatus,
+          providerResponse: {
+            error: diagnostic,
+            _emsTransactionMap: transactionMap,
+            singleFallbackAllowed: explicitMonnifyRejection && SINGLE_FALLBACK_REJECTION_CODES.has(diagnostic.providerCode),
+          },
+        },
+      });
+    } catch (saveError) {
+      logMonnifyEvent("monnify_payroll_batch_failure_state_persist_failed", {
+        requestId,
+        batchReference,
+        errorName: String(saveError?.name || "Error").slice(0, 80),
+        errorCode: String(saveError?.code || "DATABASE_ERROR").slice(0, 80),
+        errorMessage: String(saveError?.message || "Could not save batch failure state").slice(0, 350),
+      });
+    }
+    if (explicitMonnifyRejection) {
+      throw new AppError(
+        `Monnify rejected the salary batch (${diagnostic.providerCode}): ${diagnostic.providerMessage}. No OTP can be issued for a batch Monnify did not accept. The batch is marked as rejected; use the individual Monnify transfer action for each pending employee after confirming this batch is absent from the Monnify portal.`,
+        422,
+        { code: "MONNIFY_BATCH_REJECTED", details: { batchReference, providerCode: diagnostic.providerCode, providerMessage: diagnostic.providerMessage, request: diagnostic.request } },
+      );
+    }
+    throw new AppError(
+      `EMS could not confirm whether Monnify accepted batch ${batchReference}. Do not retry or pay these salaries individually yet. Check this exact reference in Monnify and use Refresh & reconcile first. Provider response: ${diagnostic.providerMessage}`,
+      502,
+      { code: "MONNIFY_SUBMISSION_UNKNOWN", details: { batchReference, providerCode: diagnostic.providerCode, providerMessage: diagnostic.providerMessage, request: diagnostic.request } },
+    );
+  }
+
+  const status = String(response.batchStatus || "PENDING_AUTHORIZATION").toUpperCase();
+  try {
     await prisma.$transaction(async (tx) => {
       await tx.companyMonnifyBatch.update({
         where: { id: savedBatch.id },
@@ -776,42 +891,39 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
         data: { monnifyBankCode: transaction.bankCode, monnifyVerifiedAt: new Date(), accountName: transaction.accountName },
       })));
     });
-    return {
-      id: savedBatch.id,
-      batchReference,
-      status,
-      environment: connection.environment,
-      totalAmount: Number(totalAmount.toFixed(2)),
-      totalTransactions: transactions.length,
-      requiresOtp: status === "PENDING_AUTHORIZATION",
-      note: "Only employees who passed server-side Monnify validation were submitted. Blocked employees remain pending in the payroll register.",
-    };
   } catch (error) {
-    // The request may have reached Monnify even when EMS did not receive a usable
-    // response. Preserve only safe provider diagnostics; never store credentials,
-    // authorization headers, OTPs, or beneficiary account numbers here.
-    const diagnostic = {
-      errorCode: String(error?.code || error?.details?.providerCode || "UPSTREAM_ERROR").slice(0, 100),
-      message: String(error?.details?.providerMessage || error?.message || "Monnify submission failed").slice(0, 400),
-      providerHttpStatus: Number.isInteger(error?.statusCode) ? error.statusCode : null,
-      request: error?.details?.request ? {
-        method: String(error.details.request.method || "POST").slice(0, 10),
-        path: String(error.details.request.path || "/api/v2/disbursements/batch").slice(0, 180),
-      } : { method: "POST", path: "/api/v2/disbursements/batch" },
+    const databaseDiagnostic = {
+      errorName: String(error?.name || "Error").slice(0, 80),
+      errorCode: String(error?.code || "DATABASE_ERROR").slice(0, 80),
+      errorMessage: String(error?.message || "EMS failed to save the accepted Monnify batch").slice(0, 400),
     };
-    try {
-      await prisma.companyMonnifyBatch.update({
-        where: { id: savedBatch.id },
-        data: { providerStatus: "SUBMISSION_UNKNOWN", providerResponse: { ...diagnostic, _emsTransactionMap: transactionMap } },
-      });
-    } catch (recordError) {
-      console.error("EMS could not persist uncertain Monnify batch diagnostics:", recordError?.message || recordError);
-    }
-    throw new AppError("Monnify submission outcome is uncertain. Do not submit this payroll again. Refresh/reconcile the saved batch reference first.", 502, {
-      code: "MONNIFY_SUBMISSION_UNKNOWN",
-      details: { batchReference, providerCode: diagnostic.errorCode, providerMessage: diagnostic.message, providerHttpStatus: diagnostic.providerHttpStatus, request: diagnostic.request },
+    logMonnifyEvent("monnify_batch_accepted_ems_persistence_failed", {
+      requestId, periodId, batchReference, environment: connection.environment, providerStatus: status, ...databaseDiagnostic,
     });
+    await prisma.companyMonnifyBatch.update({
+      where: { id: savedBatch.id },
+      data: { providerStatus: "SUBMISSION_UNKNOWN", providerResponse: { response, _emsTransactionMap: transactionMap, _emsPersistenceError: databaseDiagnostic } },
+    }).catch((saveError) => logMonnifyEvent("monnify_batch_accepted_recovery_record_failed", {
+      requestId, batchReference, errorCode: String(saveError?.code || "DATABASE_ERROR").slice(0, 80),
+      errorMessage: String(saveError?.message || "Recovery record could not be saved").slice(0, 300),
+    }));
+    throw new AppError(
+      `Monnify accepted batch ${batchReference}, but EMS could not finish saving its payroll records. Do not submit these salaries again. Refresh & reconcile this batch to recover its status.`,
+      502,
+      { code: "MONNIFY_BATCH_ACCEPTED_PERSISTENCE_FAILED", details: { batchReference, providerStatus: status } },
+    );
   }
+  console.info(JSON.stringify({ event: "monnify_payroll_batch_accepted", requestId, periodId, batchReference, environment: connection.environment, providerStatus: status, transactionCount: transactions.length }));
+  return {
+    id: savedBatch.id,
+    batchReference,
+    status,
+    environment: connection.environment,
+    totalAmount: Number(totalAmount.toFixed(2)),
+    totalTransactions: transactions.length,
+    requiresOtp: ["PENDING_AUTHORIZATION", "PENDING_BATCH_AUTHORIZATION"].includes(status),
+    note: "Only employees who passed server-side Monnify validation were submitted. Blocked employees remain pending in the payroll register.",
+  };
 }
 
 const unwrapMonnifyRows = (payload) => {
@@ -836,14 +948,66 @@ export async function refreshPayrollBatch(companyId, batchId) {
   if (!batch) throw new AppError("Monnify payroll batch not found.", 404);
   const connection = await requiredConnection(companyId);
   assertBatchEnvironment(connection, batch);
-  const [summary, transactionPayload] = await Promise.all([
-    monnifyEndpoints.batchStatus(connection, batch.batchReference),
-    monnifyEndpoints.batchTransactions(connection, batch.batchReference),
-  ]);
-  const transactionRows = unwrapMonnifyRows(transactionPayload);
+  let summary;
+  try {
+    summary = await monnifyEndpoints.batchStatus(connection, batch.batchReference);
+  } catch (error) {
+    const providerCode = String(error?.details?.providerCode || error?.code || "");
+    // Monnify D02 means the supplied bulk transfer reference does not exist.
+    // Only this definitive provider response safely unlocks one-by-one fallback.
+    if (providerCode === "D02" && error?.details?.provider === "MONNIFY") {
+      const message = String(error?.details?.providerMessage || error?.message || "Monnify did not find this batch reference.").slice(0, 400);
+      const originalProviderCode = String(batch.providerResponse?.error?.providerCode || "").toUpperCase();
+      const singleFallbackAllowed = originalProviderCode !== "D06";
+      await prisma.companyMonnifyBatch.update({
+        where: { id: batch.id },
+        data: { providerStatus: "SUBMISSION_REJECTED", providerResponse: { error: { providerCode, providerMessage: message, request: error?.details?.request || null, originalProviderCode: originalProviderCode || null }, _emsTransactionMap: batch.providerResponse?._emsTransactionMap || {}, singleFallbackAllowed }, lastCheckedAt: new Date() },
+      });
+      return { batchReference: batch.batchReference, environment: batch.environment, status: "SUBMISSION_REJECTED", rejected: true, providerCode, message, reconciledTransactions: 0 };
+    }
+    throw error;
+  }
   const storedMap = batch.providerResponse?._emsTransactionMap || batch.providerResponse?.providerResponse?._emsTransactionMap || {};
   const summaryStatus = String(summary.batchStatus || summary.status || batch.providerStatus).toUpperCase();
   const updates = [];
+
+  // Persist the accepted provider state and expose OTP authorization before making
+  // the separate transaction-history request. A history endpoint failure must not
+  // hide a valid PENDING_AUTHORIZATION state or make the batch appear unsubmitted.
+  const mappedRows = Object.entries(storedMap).filter(([reference, disbursementId]) => typeof reference === "string" && typeof disbursementId === "string");
+  await prisma.$transaction(async (tx) => {
+    await tx.companyMonnifyBatch.update({
+      where: { id: batch.id },
+      data: { providerStatus: summaryStatus, providerResponse: { summary, _emsTransactionMap: storedMap }, lastCheckedAt: new Date() },
+    });
+    for (const [reference, disbursementId] of mappedRows) {
+      await tx.payrollDisbursement.updateMany({
+        where: { id: disbursementId, companyId, periodId: batch.payrollPeriodId, status: "PENDING", provider: null },
+        data: {
+          status: "PROCESSING", fundingRoute: "DIRECT_PROVIDER", method: "MONNIFY_BULK_TRANSFER", provider: "MONNIFY",
+          providerTransferId: batch.batchReference, providerStatus: summaryStatus, externalReference: reference,
+          providerResponse: { batchReference: batch.batchReference, status: summaryStatus, environment: batch.environment, recoveredByReconciliation: true },
+          failureReason: null,
+        },
+      });
+    }
+  });
+
+  let transactionPayload = null;
+  let transactionHistoryWarning = null;
+  try {
+    transactionPayload = await monnifyEndpoints.batchTransactions(connection, batch.batchReference);
+  } catch (error) {
+    transactionHistoryWarning = String(error?.details?.providerMessage || error?.message || "Could not retrieve batch transaction history.").slice(0, 350);
+    logMonnifyEvent("monnify_batch_status_confirmed_transaction_history_failed", {
+      batchId: batch.id, batchReference: batch.batchReference, environment: batch.environment,
+      providerCode: String(error?.details?.providerCode || error?.code || "MONNIFY_HISTORY_LOOKUP_FAILED").slice(0, 80),
+      providerMessage: transactionHistoryWarning,
+      request: error?.details?.request || null,
+    });
+  }
+  const transactionRows = unwrapMonnifyRows(transactionPayload);
+
   if (!transactionRows.length && ["FAILED", "FAILED_ON_ACCOUNTS_VALIDATION"].includes(summaryStatus)) {
     for (const disbursementId of Object.values(storedMap)) {
       if (typeof disbursementId !== "string") continue;
@@ -895,7 +1059,7 @@ export async function refreshPayrollBatch(companyId, batchId) {
       where: { id: batch.id },
       data: {
         providerStatus: summaryStatus,
-        providerResponse: { summary, transactions: transactionPayload, _emsTransactionMap: storedMap },
+        providerResponse: { summary, transactions: transactionPayload, transactionHistoryWarning, _emsTransactionMap: storedMap },
         lastCheckedAt: new Date(),
       },
     });
@@ -911,6 +1075,8 @@ export async function refreshPayrollBatch(companyId, batchId) {
     environment: batch.environment,
     summary,
     transactions: transactionPayload,
+    transactionHistoryWarning,
+    status: summaryStatus,
     reconciledTransactions: updates.length,
   };
 }
@@ -937,15 +1103,41 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
     include: { employee: { select: { id: true, firstName: true, middleName: true, lastName: true, employeeNumber: true, bankAccounts: { where: { isActive: true }, orderBy: [{ isPrimary: "desc" }, { updatedAt: "desc" }], take: 1 } } } },
   });
   if (!row) throw new AppError("Payroll disbursement was not found.", 404);
-  if (row.status !== "FAILED" || row.provider !== "MONNIFY") {
-    throw new AppError("Single-transfer retry is available only for a Monnify payroll transfer confirmed as FAILED. Reconcile processing transfers before retrying.", 409, { code: "MONNIFY_SINGLE_RETRY_NOT_ALLOWED" });
+  const isConfirmedFailedRetry = row.status === "FAILED" && row.provider === "MONNIFY"
+    && finalFailedStatuses.has(String(row.providerStatus || "").toUpperCase());
+  let isRejectedBatchFallback = false;
+  if (row.status === "PENDING" && !row.provider && !row.externalReference) {
+    const periodBatches = await prisma.companyMonnifyBatch.findMany({
+      where: { companyId, payrollPeriodId: periodId },
+      select: { providerStatus: true, providerResponse: true },
+    });
+    // All prior Monnify bulk attempts for this period must be explicitly rejected.
+    // SUBMISSION_UNKNOWN, SUBMITTING or any accepted/in-flight batch blocks fallback.
+    isRejectedBatchFallback = periodBatches.length > 0
+      && periodBatches.every((batch) => String(batch.providerStatus || "").toUpperCase() === "SUBMISSION_REJECTED"
+        && batch.providerResponse?.singleFallbackAllowed === true);
   }
-  if (!finalFailedStatuses.has(String(row.providerStatus || "").toUpperCase())) {
+  if (!isConfirmedFailedRetry && !isRejectedBatchFallback) {
+    throw new AppError(
+      "Individual Monnify payment is allowed only for a confirmed failed Monnify transfer or after every Monnify bulk attempt for this payroll period has been confirmed rejected. Refresh any uncertain batch first.",
+      409,
+      { code: "MONNIFY_SINGLE_RETRY_NOT_ALLOWED" },
+    );
+  }
+  if (row.status === "FAILED" && row.provider === "MONNIFY" && !finalFailedStatuses.has(String(row.providerStatus || "").toUpperCase())) {
     throw new AppError("Monnify has not confirmed a final failure for this transfer. Refresh its original reference before retrying.", 409, { code: "MONNIFY_SINGLE_RETRY_UNVERIFIED" });
   }
   const account = row.employee?.bankAccounts?.[0];
   if (!account) throw new AppError("This employee has no active bank account. Update the employee bank details first.", 422);
-  const banks = normalizeMonnifyBanks(await monnifyEndpoints.banks(connection));
+  const [banksPayload, walletPayload] = await Promise.all([
+    monnifyEndpoints.banks(connection),
+    monnifyEndpoints.balance(connection, connection.sourceAccountNumber),
+  ]);
+  const availableBalance = Number(walletPayload?.availableBalance ?? walletPayload?.availableBalanceAmount ?? walletPayload?.balance);
+  if (!Number.isFinite(availableBalance) || availableBalance < Number(row.amount)) {
+    throw new AppError("The available Monnify disbursement balance is lower than this employee's salary. Refresh the wallet balance before submitting an individual transfer.", 409, { code: "MONNIFY_SINGLE_INSUFFICIENT_BALANCE", details: { availableBalance: Number.isFinite(availableBalance) ? availableBalance : null, requiredAmount: Number(row.amount) } });
+  }
+  const banks = normalizeMonnifyBanks(banksPayload);
   const bank = resolveBatchBank({ bankName: account.bankName, bankCode: account.monnifyBankCode, employeeName: employeeDisplayName(row.employee) }, banks, 0);
   const verified = await monnifyEndpoints.validateAccount(connection, account.accountNumber, bank.code);
   const verifiedName = String(verified?.accountName ?? verified?.account_name ?? verified?.name ?? "").trim();
@@ -954,8 +1146,6 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
   if (verifiedName.length < 2 || verifiedNumber !== account.accountNumber || verifiedCode !== bank.code || !accountNamesCompatible(account.accountName, verifiedName)) {
     throw new AppError("The employee's saved bank details do not match Monnify's current Name Enquiry result. Update and verify the bank account before retrying.", 422, { code: "MONNIFY_SINGLE_BENEFICIARY_MISMATCH" });
   }
-  // Self-heal legacy records that stored a NIP/other-provider code in the Monnify
-  // field. Persist only the code returned by Monnify's current bank directory.
   if (String(account.monnifyBankCode || "") !== bank.code) {
     await prisma.employeeBankAccount.updateMany({ where: { id: account.id }, data: { monnifyBankCode: bank.code, monnifyVerifiedAt: new Date(), accountName: verifiedName } });
   }
@@ -963,13 +1153,20 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
   const claim = await prisma.$transaction(async (tx) => {
     await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" });
     const updated = await tx.payrollDisbursement.updateMany({
-      where: { id: row.id, companyId, status: "FAILED", provider: "MONNIFY", providerStatus: { in: [...finalFailedStatuses] } },
-      data: { fundingRoute: "DIRECT_PROVIDER", status: "PROCESSING", providerStatus: "SUBMITTING_SINGLE", externalReference: reference, providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING" }, failureReason: null, updatedBy: userId },
+      where: isConfirmedFailedRetry
+        ? { id: row.id, companyId, status: "FAILED", provider: "MONNIFY", providerStatus: { in: [...finalFailedStatuses] } }
+        : { id: row.id, companyId, status: "PENDING", provider: null, externalReference: null },
+      data: {
+        fundingRoute: "DIRECT_PROVIDER", method: "MONNIFY_SINGLE_TRANSFER", status: "PROCESSING", provider: "MONNIFY",
+        providerStatus: "SUBMITTING_SINGLE", providerTransferId: reference, externalReference: reference,
+        providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING", recoveredFromRejectedBatch: isRejectedBatchFallback },
+        failureReason: null, updatedBy: userId,
+      },
     });
-    if (updated.count !== 1) return updated;
     return updated;
   }, { isolationLevel: "Serializable" });
-  if (claim.count !== 1) throw new AppError("This failed payment is already being retried or its status changed. Refresh the payment before trying again.", 409, { code: "MONNIFY_SINGLE_RETRY_ALREADY_CLAIMED" });
+  if (claim.count !== 1) throw new AppError("This salary is already being submitted or its status changed. Refresh the payroll register before trying again.", 409, { code: "MONNIFY_SINGLE_RETRY_ALREADY_CLAIMED" });
+
   let response;
   try {
     response = await monnifyEndpoints.submitSingle(connection, {
@@ -982,15 +1179,36 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
       sourceAccountNumber: connection.sourceAccountNumber,
     });
   } catch (error) {
-    await prisma.payrollDisbursement.updateMany({ where: { id: row.id, companyId, externalReference: reference }, data: { status: "REQUIRES_REVIEW", providerStatus: "SUBMISSION_UNKNOWN", failureReason: "Monnify submission outcome is uncertain. Check this exact reference in Monnify before attempting another transfer.", providerResponse: { _emsSingleTransfer: true, error: String(error?.message || "Unknown provider error") } } });
-    throw new AppError("Monnify's response was not conclusive. Do not retry this salary until you check the saved reference in Monnify.", 502, { code: "MONNIFY_SINGLE_SUBMISSION_UNKNOWN", details: { reference } });
+    const diagnostic = monnifyFailureDiagnostic(error);
+    const explicitRejection = isDefinitiveMonnifyRejection(error);
+    const status = explicitRejection ? "FAILED" : "REQUIRES_REVIEW";
+    const providerStatus = explicitRejection ? "FAILED" : "SUBMISSION_UNKNOWN";
+    logMonnifyEvent("monnify_single_payroll_submission_failed", {
+      periodId, disbursementId: row.id, reference, environment: connection.environment,
+      providerStatus, ...diagnostic,
+    });
+    await prisma.payrollDisbursement.updateMany({
+      where: { id: row.id, companyId, externalReference: reference },
+      data: {
+        status,
+        providerStatus,
+        failureReason: explicitRejection
+          ? `Monnify rejected this individual transfer (${diagnostic.providerCode}): ${diagnostic.providerMessage}`.slice(0, 500)
+          : "Monnify submission outcome is uncertain. Check this exact reference in Monnify before attempting another transfer.",
+        providerResponse: { _emsSingleTransfer: true, status: providerStatus, error: diagnostic },
+      },
+    });
+    if (explicitRejection) {
+      throw new AppError(`Monnify rejected this individual salary transfer (${diagnostic.providerCode}): ${diagnostic.providerMessage}. The transfer is marked FAILED; review the reason before trying again.`, 422, { code: "MONNIFY_SINGLE_SUBMISSION_REJECTED", details: { reference, providerCode: diagnostic.providerCode, providerMessage: diagnostic.providerMessage } });
+    }
+    throw new AppError(`Monnify's response for reference ${reference} is uncertain. Do not retry this salary until you check this exact reference in Monnify. ${diagnostic.providerMessage}`, 502, { code: "MONNIFY_SINGLE_SUBMISSION_UNKNOWN", details: { reference, providerCode: diagnostic.providerCode, providerMessage: diagnostic.providerMessage } });
   }
   const result = normalizeSingleTransferResult(response);
   await prisma.$transaction(async (tx) => {
     await tx.payrollDisbursement.update({ where: { id: row.id }, data: {
-      ...result, provider: "MONNIFY", providerResponse: { ...response, _emsSingleTransfer: true },
-      externalReference: reference, updatedBy: userId,
-      failureReason: result.failureReason,
+      ...result, provider: "MONNIFY", providerTransferId: result.providerTransferId || reference,
+      providerResponse: { ...response, _emsSingleTransfer: true, recoveredFromRejectedBatch: isRejectedBatchFallback },
+      externalReference: reference, updatedBy: userId, failureReason: result.failureReason,
     } });
     const legacyReservation = await tx.walletLedgerEntry.findUnique({ where: { reference: `MONNIFY-SINGLE-RETRY-RESERVE-${row.id}-${reference}` }, select: { id: true } });
     if (legacyReservation && result.status === "FAILED") await creditWalletInTransaction(tx, companyId, {
@@ -1009,6 +1227,7 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
   }
   return { disbursementId: row.id, reference, ...result, requiresOtp: result.providerStatus === "PENDING_AUTHORIZATION" };
 }
+
 
 export async function authorizeSinglePayrollTransfer(companyId, disbursementId, otp) {
   const row = await prisma.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId, provider: "MONNIFY" } });
@@ -1042,7 +1261,21 @@ export async function refreshSinglePayrollTransfer(companyId, disbursementId) {
   const row = await prisma.payrollDisbursement.findFirst({ where: { id: disbursementId, companyId, provider: "MONNIFY" } });
   if (!row || !row.externalReference) throw new AppError("Monnify single transfer reference was not found.", 404);
   const connection = await requiredConnection(companyId);
-  const response = await monnifyEndpoints.singleStatus(connection, row.externalReference);
+  let response;
+  try {
+    response = await monnifyEndpoints.singleStatus(connection, row.externalReference);
+  } catch (error) {
+    const providerCode = String(error?.details?.providerCode || error?.code || "").toUpperCase();
+    if (providerCode === "D02" && error?.details?.provider === "MONNIFY") {
+      const message = "Monnify confirmed that this individual transfer reference does not exist. It is safe to submit this salary again after reviewing the beneficiary and wallet balance.";
+      await prisma.payrollDisbursement.updateMany({
+        where: { id: row.id, companyId, externalReference: row.externalReference },
+        data: { status: "FAILED", providerStatus: "FAILED", failureReason: message, providerResponse: { _emsSingleTransfer: true, status: "FAILED", notFoundConfirmed: true, providerCode } },
+      });
+      return { disbursementId: row.id, reference: row.externalReference, status: "FAILED", providerStatus: "FAILED", failureReason: message, confirmedNotFound: true };
+    }
+    throw error;
+  }
   const result = normalizeSingleTransferResult(response);
   await prisma.$transaction(async (tx) => {
     await tx.payrollDisbursement.update({ where: { id: row.id }, data: { ...result, providerResponse: { ...response, _emsSingleTransfer: true } } });
@@ -1089,9 +1322,8 @@ export async function authorizeBatch(companyId, batchId, otp) {
 export async function resendBatchOtp(companyId, batchId) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
   if (!batch) throw new AppError("Monnify batch not found.", 404);
-  const resendableStatuses = new Set(["PENDING_AUTHORIZATION", "PENDING_BATCH_AUTHORIZATION", "OTP_EMAIL_DISPATCH_FAILED"]);
-  if (!resendableStatuses.has(String(batch.providerStatus || "").toUpperCase())) {
-    throw new AppError(`OTP resend is only available while this batch is awaiting authorization or Monnify reports OTP_EMAIL_DISPATCH_FAILED (current status: ${batch.providerStatus}).`, 409, { code: "MONNIFY_OTP_RESEND_NOT_AVAILABLE", details: { batchReference: batch.batchReference, status: batch.providerStatus } });
+  if (!["PENDING_AUTHORIZATION", "PENDING_BATCH_AUTHORIZATION", "OTP_EMAIL_DISPATCH_FAILED"].includes(String(batch.providerStatus || "").toUpperCase())) {
+    throw new AppError(`OTP resend is only available while Monnify is awaiting authorization or reports OTP_EMAIL_DISPATCH_FAILED (current status: ${batch.providerStatus}).`, 409, { code: "MONNIFY_OTP_RESEND_NOT_AVAILABLE" });
   }
   const connection = await requiredConnection(companyId);
   assertBatchEnvironment(connection, batch);
@@ -1129,7 +1361,7 @@ export async function refreshBatch(companyId, batchId) {
 }
 
 export async function listBatches(companyId) {
-  return prisma.companyMonnifyBatch.findMany({
+  const batches = await prisma.companyMonnifyBatch.findMany({
     where: { companyId },
     orderBy: { createdAt: "desc" },
     take: 50,
@@ -1144,6 +1376,28 @@ export async function listBatches(companyId) {
       authorizedAt: true,
       lastCheckedAt: true,
       createdAt: true,
+      providerResponse: true,
     },
+  });
+  return batches.map((batch) => {
+    const savedError = batch.providerResponse?.error || batch.providerResponse?._emsPersistenceError || null;
+    const nestedError = savedError?.error || savedError;
+    return {
+      id: batch.id,
+      payrollPeriodId: batch.payrollPeriodId,
+      batchReference: batch.batchReference,
+      providerStatus: batch.providerStatus,
+      singleFallbackAllowed: batch.providerResponse?.singleFallbackAllowed === true,
+      environment: batch.environment,
+      totalAmount: batch.totalAmount,
+      totalTransactions: batch.totalTransactions,
+      authorizedAt: batch.authorizedAt,
+      lastCheckedAt: batch.lastCheckedAt,
+      createdAt: batch.createdAt,
+      providerError: nestedError ? {
+        providerCode: nestedError.providerCode || nestedError.errorCode || null,
+        providerMessage: nestedError.providerMessage || nestedError.message || null,
+      } : null,
+    };
   });
 }
