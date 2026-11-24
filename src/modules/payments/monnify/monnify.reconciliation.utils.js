@@ -134,28 +134,3 @@ export function isMonnifyBatchFullyReconciled(batch, disbursements = []) {
   if (!Number.isInteger(expected) || expected <= 0 || disbursements.length !== expected) return false;
   return disbursements.every((row) => ["PAID", "FAILED"].includes(String(row?.status || "").toUpperCase()));
 }
-
-
-const OPEN_PROVIDER_BATCH_STATUSES = new Set([
-  "SUBMITTING",
-  "SUBMISSION_UNKNOWN",
-  "PENDING",
-  "PENDING_AUTHORIZATION",
-  "PENDING_BATCH_AUTHORIZATION",
-  "OTP_EMAIL_DISPATCH_FAILED",
-  "AWAITING_PROCESSING",
-  "IN_PROGRESS",
-]);
-
-/**
- * Keep polling when the provider batch is still active, or when a terminal
- * batch summary has arrived but one or more mapped payroll rows are not yet
- * in a confirmed PAID/FAILED state. A definitive submission rejection is
- * excluded because it is handled by the explicit fallback/review workflow.
- */
-export function monnifyBatchNeedsReconciliation(batch, disbursements = []) {
-  const providerStatus = String(batch?.providerStatus || "").trim().toUpperCase();
-  if (providerStatus === "SUBMISSION_REJECTED") return false;
-  return OPEN_PROVIDER_BATCH_STATUSES.has(providerStatus)
-    || !isMonnifyBatchFullyReconciled(batch, disbursements);
-}
