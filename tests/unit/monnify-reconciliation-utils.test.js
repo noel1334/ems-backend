@@ -6,6 +6,7 @@ import {
   normalizeMonnifyTransactionMap,
   unwrapMonnifyTransactionRows,
   isMonnifyBatchFullyReconciled,
+  monnifyBatchNeedsReconciliation,
 } from "../../src/modules/payments/monnify/monnify.reconciliation.utils.js";
 
 describe("Monnify payroll reconciliation response mapping", () => {
@@ -66,5 +67,38 @@ describe("Monnify payroll reconciliation response mapping", () => {
   it("supports both current object maps and older reference-map arrays", () => {
     expect(normalizeMonnifyTransactionMap({ _emsTransactionMap: { "EMS-1": "disb-1" } })).toEqual({ "EMS-1": "disb-1" });
     expect(normalizeMonnifyTransactionMap({ response: { _emsTransactionMap: [{ reference: "EMS-2", disbursementId: "disb-2" }] } })).toEqual({ "EMS-2": "disb-2" });
+  });
+});
+
+
+describe("Monnify completed-batch reconciliation polling", () => {
+  const terminalRows = [
+    { status: "PAID" },
+    { status: "PAID" },
+    { status: "FAILED" },
+  ];
+
+  it("continues polling a COMPLETED provider batch until every payroll row is reconciled", () => {
+    const batch = { providerStatus: "COMPLETED", totalTransactions: 3 };
+    expect(monnifyBatchNeedsReconciliation(batch, [
+      { status: "PAID" },
+      { status: "PROCESSING" },
+      { status: "FAILED" },
+    ])).toBe(true);
+    expect(monnifyBatchNeedsReconciliation(batch, terminalRows)).toBe(false);
+  });
+
+  it("continues polling an authorized batch even when the mapped rows already look terminal", () => {
+    expect(monnifyBatchNeedsReconciliation(
+      { providerStatus: "AWAITING_PROCESSING", totalTransactions: 3 },
+      terminalRows,
+    )).toBe(true);
+  });
+
+  it("does not poll a definitively rejected batch", () => {
+    expect(monnifyBatchNeedsReconciliation(
+      { providerStatus: "SUBMISSION_REJECTED", totalTransactions: 3 },
+      [{ status: "PENDING" }, { status: "PENDING" }, { status: "PENDING" }],
+    )).toBe(false);
   });
 });
