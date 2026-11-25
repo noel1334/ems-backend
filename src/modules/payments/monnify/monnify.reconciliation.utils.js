@@ -9,6 +9,9 @@ const ROW_ARRAY_KEYS = [
   "transactionList",
   "transferTransactions",
   "disbursementTransactions",
+  "responseBody",
+  "payload",
+  "result",
 ];
 
 /**
@@ -55,9 +58,23 @@ export function monnifyTransactionReference(row) {
     row?.paymentRef,
     row?.referenceNo,
     row?.transferReference,
+    row?.sourceReference,
+    row?.originalReference,
+    row?.transactionReferenceId,
     nested.reference,
     nested.paymentReference,
     nested.transactionReference,
+    nested.transactionRef,
+    nested.transactionReferenceNo,
+    nested.transferReference,
+    row?.data?.reference,
+    row?.data?.paymentReference,
+    row?.data?.transactionReference,
+    row?.responseBody?.reference,
+    row?.responseBody?.paymentReference,
+    row?.responseBody?.transactionReference,
+    row?.result?.reference,
+    row?.result?.paymentReference,
   ]) {
     const reference = cleanText(value);
     if (reference) return reference;
@@ -65,18 +82,38 @@ export function monnifyTransactionReference(row) {
   return "";
 }
 
+const SUCCESS_STATUS_ALIASES = new Set([
+  "SUCCESS", "SUCCEEDED", "SUCCESSFUL", "COMPLETED", "PAID", "TRANSFER_SUCCESSFUL",
+  "TRANSFER_SUCCEEDED", "TRANSFER_COMPLETED", "TRANSACTION_SUCCESSFUL", "TRANSACTION_SUCCEEDED",
+  "TRANSACTION_COMPLETED", "SUCCESSFUL_TRANSFER", "SUCCESSFUL_TRANSACTION", "SUCCESSFULLY_COMPLETED",
+]);
+const FAILURE_STATUS_ALIASES = new Set([
+  "FAILED", "FAILURE", "REJECTED", "TRANSFER_FAILED", "TRANSACTION_FAILED",
+  "FAILED_TRANSACTION", "CANCELLED", "CANCELED",
+]);
+
+export function normalizeMonnifyTransactionStatus(value) {
+  const status = cleanText(value).toUpperCase().replace(/[\s-]+/g, "_");
+  if (SUCCESS_STATUS_ALIASES.has(status)) return "SUCCESS";
+  if (FAILURE_STATUS_ALIASES.has(status)) return "FAILED";
+  return status;
+}
+
 export function monnifyTransactionStatus(row) {
-  for (const value of [
-    row?.status,
-    row?.transactionStatus,
-    row?.paymentStatus,
-    row?.transferStatus,
-    row?.disbursementStatus,
-    row?.transferState,
-    row?.transaction?.status,
-  ]) {
-    const status = cleanText(value).toUpperCase();
-    if (status) return status;
+  const nestedRows = [row, row?.transaction, row?.data, row?.responseBody, row?.result];
+  for (const source of nestedRows) {
+    if (!source || typeof source !== "object") continue;
+    for (const value of [
+      source?.status,
+      source?.transactionStatus,
+      source?.paymentStatus,
+      source?.transferStatus,
+      source?.disbursementStatus,
+      source?.transferState,
+    ]) {
+      const status = normalizeMonnifyTransactionStatus(value);
+      if (status) return status;
+    }
   }
   return "";
 }

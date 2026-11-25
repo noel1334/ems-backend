@@ -7,6 +7,14 @@ import { monnifyEndpoints } from "./monnify.client.js";
 import { canonicalMonnifyBankName, normalizeMonnifyBanks } from "./monnify.utils.js";
 import { creditWalletInTransaction } from "../../wallet/wallet.service.js";
 import { claimPayrollFundingRoute } from "../../payroll/payroll.funding-route.service.js";
+import {
+  monnifyTransactionFailureReason,
+  monnifyTransactionReference,
+  monnifyTransactionStatus,
+  normalizeMonnifyTransactionMap,
+  unwrapMonnifyTransactionRows,
+  isMonnifyBatchFullyReconciled,
+} from "./monnify.reconciliation.utils.js";
 
 const OPEN_BATCH_STATUSES = [
   "SUBMITTING",
@@ -323,7 +331,8 @@ export async function submitBatch(companyId, payrollPeriodId, userId, input) {
   if (period.status !== "FINALIZED") throw new AppError("Only finalized payroll can be submitted to Monnify.", 409);
 
   const duplicateActiveBatch = await prisma.companyMonnifyBatch.findFirst({
-    where: { companyId, payrollPeriodId, providerStatus: { in: OPEN_BATCH_STATUSES } },
+    where: { companyId, payrollPeriodId, providerStatus: { not: "SUBMISSION_REJECTED" } },
+    orderBy: { createdAt: "desc" },
     select: { id: true, batchReference: true, providerStatus: true },
   });
   if (duplicateActiveBatch) {
@@ -766,11 +775,6 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
     await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" });
     const paystackBatch = await tx.companyPaystackBatch.findFirst({ where: { companyId, payrollPeriodId: periodId }, select: { batchReference: true, providerStatus: true } });
     if (paystackBatch) throw new AppError(`This payroll period already has a Paystack batch (${paystackBatch.batchReference}, ${paystackBatch.providerStatus}). Reconcile it before switching providers.`, 409, { code: "PAYROLL_PROVIDER_ROUTE_CONFLICT" });
-    const openBatch = await tx.companyMonnifyBatch.findFirst({
-      where: { companyId, providerStatus: { in: OPEN_BATCH_STATUSES } },
-      select: { batchReference: true, providerStatus: true },
-    });
-    if (openBatch) throw new AppError(`This company's Monnify wallet already has an open batch (${openBatch.batchReference}, ${openBatch.providerStatus}). Reconcile it before submitting another payroll batch.`, 409, { code: "MONNIFY_DUPLICATE_PAYROLL_BATCH" });
     return tx.companyMonnifyBatch.create({
       data: {
         companyId,
@@ -926,22 +930,9 @@ export async function submitPayroll(companyId, periodId, userId, previewFingerpr
   };
 }
 
-const unwrapMonnifyRows = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  for (const key of ["content", "transactions", "items", "data", "responseBody", "records"]) {
-    if (Array.isArray(payload?.[key])) return payload[key];
-    const nested = payload?.[key];
-    if (nested && typeof nested === "object") {
-      for (const nestedKey of ["content", "transactions", "items", "records"]) if (Array.isArray(nested[nestedKey])) return nested[nestedKey];
-    }
-  }
-  return [];
-};
-
-const transactionReferenceOf = (row) => String(row?.reference ?? row?.transactionReference ?? row?.transactionRef ?? row?.transactionReferenceNo ?? row?.paymentReference ?? "").trim();
-const transactionStatusOf = (row) => String(row?.status ?? row?.transactionStatus ?? row?.paymentStatus ?? "").trim().toUpperCase();
-const finalPaidStatuses = new Set(["SUCCESS", "COMPLETED"]);
-const finalFailedStatuses = new Set(["FAILED", "EXPIRED", "REVERSED"]);
+const unwrapMonnifyRows = (payload) => unwrapMonnifyTransactionRows(payload);
+const transactionReferenceOf = (row) => monnifyTransactionReference(row);
+const transactionStatusOf = (row) => monnifyTransactionStatus(row);
 
 export async function refreshPayrollBatch(companyId, batchId) {
   const batch = await prisma.companyMonnifyBatch.findFirst({ where: { id: batchId, companyId } });
@@ -967,8 +958,8 @@ export async function refreshPayrollBatch(companyId, batchId) {
     }
     throw error;
   }
-  const storedMap = batch.providerResponse?._emsTransactionMap || batch.providerResponse?.providerResponse?._emsTransactionMap || {};
-  const summaryStatus = String(summary.batchStatus || summary.status || batch.providerStatus).toUpperCase();
+  const storedMap = normalizeMonnifyTransactionMap(batch.providerResponse);
+  const summaryStatus = String(summary.batchStatus || summary.status || batch.providerStatus).trim().toUpperCase();
   const updates = [];
 
   // Persist the accepted provider state and expose OTP authorization before making
@@ -1007,35 +998,78 @@ export async function refreshPayrollBatch(companyId, batchId) {
     });
   }
   const transactionRows = unwrapMonnifyRows(transactionPayload);
-
-  if (!transactionRows.length && ["FAILED", "FAILED_ON_ACCOUNTS_VALIDATION"].includes(summaryStatus)) {
-    for (const disbursementId of Object.values(storedMap)) {
-      if (typeof disbursementId !== "string") continue;
-      updates.push({ disbursementId, data: { status: "FAILED", providerStatus: summaryStatus, failureReason: String(summary.responseMessage || `Monnify batch failed: ${summaryStatus}`).slice(0, 500), paidAt: null } });
-    }
-  }
-  for (const transaction of transactionRows) {
-    const reference = transactionReferenceOf(transaction);
-    const disbursementId = storedMap[reference];
-    const status = transactionStatusOf(transaction);
-    if (!disbursementId || !status) continue;
+  const updatesByDisbursement = new Map();
+  const makeTransactionUpdate = (transaction, reference, disbursementId, status) => {
+    if (!disbursementId || !status) return;
+    const failed = finalFailedStatuses.has(status);
+    const paid = finalPaidStatuses.has(status);
     const data = {
       providerStatus: status,
       providerResponse: transaction,
-      failureReason: finalFailedStatuses.has(status) ? String(transaction?.responseMessage || transaction?.narration || `Monnify transfer status: ${status}`).slice(0, 500) : null,
+      failureReason: failed ? (monnifyTransactionFailureReason(transaction, status) || `Monnify transfer status: ${status}`) : null,
     };
-    if (finalPaidStatuses.has(status)) {
+    if (paid) {
       data.status = "PAID";
       data.paidAt = new Date();
       data.verifiedAt = new Date();
-    } else if (finalFailedStatuses.has(status)) {
+    } else if (failed) {
       data.status = "FAILED";
       data.paidAt = null;
     } else {
       data.status = "PROCESSING";
     }
-    updates.push({ disbursementId, data });
+    updatesByDisbursement.set(disbursementId, { disbursementId, reference, data });
+  };
+
+  for (const transaction of transactionRows) {
+    const reference = transactionReferenceOf(transaction);
+    const disbursementId = storedMap[reference];
+    const status = transactionStatusOf(transaction);
+    if (disbursementId && status) makeTransactionUpdate(transaction, reference, disbursementId, status);
   }
+
+  // The bulk history response can omit rows or return a wrapper/status field
+  // different from the batch summary. Verify every unmatched original EMS
+  // transaction reference using Monnify's single-transfer summary endpoint.
+  const providerSummaryIsTerminal = [
+    "COMPLETED", "COMPLETED_WITH_ERRORS", "PARTIALLY_COMPLETED", "SUCCESS", "SUCCESSFUL",
+    "FAILED", "FAILED_ON_ACCOUNTS_VALIDATION", "REJECTED", "CANCELLED", "CANCELED",
+  ].includes(summaryStatus);
+  const unmatched = providerSummaryIsTerminal ? mappedRows.filter(([, disbursementId]) => {
+    const current = updatesByDisbursement.get(disbursementId);
+    return !current || current.data.status === "PROCESSING";
+  }) : [];
+  if (unmatched.length) {
+    const individualResults = await mapWithConcurrency(unmatched, 4, async ([reference, disbursementId]) => {
+      try {
+        const response = await monnifyEndpoints.singleStatus(connection, reference);
+        const status = transactionStatusOf(response);
+        return status ? { reference, disbursementId, response, status } : null;
+      } catch (error) {
+        logMonnifyEvent("monnify_payroll_individual_reference_reconcile_failed", {
+          batchId: batch.id,
+          batchReference: batch.batchReference,
+          reference,
+          providerCode: String(error?.details?.providerCode || error?.code || "STATUS_LOOKUP_FAILED").slice(0, 80),
+          providerMessage: String(error?.details?.providerMessage || error?.message || "Could not verify original transfer reference").slice(0, 250),
+        });
+        return null;
+      }
+    });
+    for (const result of individualResults) {
+      if (result) makeTransactionUpdate(result.response, result.reference, result.disbursementId, result.status);
+    }
+  }
+
+  // A batch-level failure can mark all mapped rows failed only when no individual
+  // transaction record or single-reference status was returned. Do not overwrite
+  // any per-transfer success/failure with an aggregate batch result.
+  if (!updatesByDisbursement.size && !transactionHistoryWarning && ["FAILED", "FAILED_ON_ACCOUNTS_VALIDATION"].includes(summaryStatus)) {
+    for (const [reference, disbursementId] of mappedRows) {
+      updatesByDisbursement.set(disbursementId, { disbursementId, reference, data: { status: "FAILED", providerStatus: summaryStatus, failureReason: String(summary.responseMessage || `Monnify batch failed: ${summaryStatus}`).slice(0, 500), paidAt: null } });
+    }
+  }
+  updates.push(...updatesByDisbursement.values());
 
   await prisma.$transaction(async (tx) => {
     for (const update of updates) {
@@ -1055,11 +1089,21 @@ export async function refreshPayrollBatch(companyId, batchId) {
         });
       }
     }
+    const batchDisbursements = mappedRows.length
+      ? await tx.payrollDisbursement.findMany({
+          where: { companyId, provider: "MONNIFY", id: { in: mappedRows.map(([, disbursementId]) => disbursementId) } },
+          select: { status: true },
+        })
+      : [];
+    const batchFullyReconciled = isMonnifyBatchFullyReconciled(batch, batchDisbursements);
+    const persistedBatchStatus = batchFullyReconciled && !["COMPLETED", "FAILED", "FAILED_ON_ACCOUNTS_VALIDATION"].includes(summaryStatus)
+      ? "COMPLETED"
+      : summaryStatus;
     await tx.companyMonnifyBatch.update({
       where: { id: batch.id },
       data: {
-        providerStatus: summaryStatus,
-        providerResponse: { summary, transactions: transactionPayload, transactionHistoryWarning, _emsTransactionMap: storedMap },
+        providerStatus: persistedBatchStatus,
+        providerResponse: { summary, transactions: transactionPayload, transactionHistoryWarning, _emsTransactionMap: storedMap, reconciliation: { expectedTransactions: Number(batch.totalTransactions || 0), reconciledTransactions: batchDisbursements.length, fullyReconciled: batchFullyReconciled, providerSummaryStatus: summaryStatus } },
         lastCheckedAt: new Date(),
       },
     });
@@ -1083,7 +1127,7 @@ export async function refreshPayrollBatch(companyId, batchId) {
 
 
 const normalizeSingleTransferResult = (response) => {
-  const status = String(response?.status ?? response?.transactionStatus ?? "PROCESSING").toUpperCase();
+  const status = transactionStatusOf(response) || "PROCESSING";
   const paid = finalPaidStatuses.has(status);
   const failed = finalFailedStatuses.has(status);
   return {
@@ -1379,14 +1423,31 @@ export async function listBatches(companyId) {
       providerResponse: true,
     },
   });
+  const batchReferences = batches.map((batch) => batch.batchReference).filter(Boolean);
+  const mappedRows = batchReferences.length ? await prisma.payrollDisbursement.findMany({
+    where: { companyId, provider: "MONNIFY", providerTransferId: { in: batchReferences } },
+    select: { providerTransferId: true, status: true },
+  }) : [];
+  const rowsByBatchReference = new Map();
+  for (const row of mappedRows) {
+    const rows = rowsByBatchReference.get(row.providerTransferId) || [];
+    rows.push(row);
+    rowsByBatchReference.set(row.providerTransferId, rows);
+  }
   return batches.map((batch) => {
     const savedError = batch.providerResponse?.error || batch.providerResponse?._emsPersistenceError || null;
     const nestedError = savedError?.error || savedError;
+    const rows = rowsByBatchReference.get(batch.batchReference) || [];
+    const reconciliationPending = Number(batch.totalTransactions || 0) > 0
+      && (rows.length !== Number(batch.totalTransactions || 0)
+        || rows.some((row) => !["PAID", "FAILED"].includes(String(row.status || "").toUpperCase())));
     return {
       id: batch.id,
       payrollPeriodId: batch.payrollPeriodId,
       batchReference: batch.batchReference,
       providerStatus: batch.providerStatus,
+      reconciliationPending,
+      reconciledTransactions: rows.filter((row) => ["PAID", "FAILED"].includes(String(row.status || "").toUpperCase())).length,
       singleFallbackAllowed: batch.providerResponse?.singleFallbackAllowed === true,
       environment: batch.environment,
       totalAmount: batch.totalAmount,

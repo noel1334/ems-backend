@@ -2,6 +2,7 @@ import axios from "axios";
 import AppError from "../../../common/errors/AppError.js";
 import { decryptMonnifySecret } from "./monnify.crypto.js";
 import { monnifyFailureMessage } from "./monnify.utils.js";
+import { unwrapMonnifyTransactionRows } from "./monnify.reconciliation.utils.js";
 
 const baseUrl = (environment) => environment === "live" ? "https://api.monnify.com" : "https://sandbox.monnify.com";
 const unwrap = (response) => {
@@ -125,9 +126,9 @@ export const monnifyEndpoints = {
       // Monnify's Get Bulk Transfer Transactions endpoint places the batch reference
       // in the URL path: /bulk/{batchReference}/transactions?pageNo=0&pageSize=100.
       const payload = await monnifyRequest(connection, "GET", `/api/v2/disbursements/bulk/${encodeURIComponent(reference)}/transactions`, { params: { pageNo: page, pageSize } });
-      const rows = Array.isArray(payload) ? payload : (payload?.content || payload?.transactions || payload?.items || payload?.data?.content || []);
+      const rows = unwrapMonnifyTransactionRows(payload);
       if (Array.isArray(rows)) all.push(...rows);
-      const pages = Number(payload?.totalPages ?? payload?.data?.totalPages ?? payload?.page?.totalPages);
+      const pages = Number(payload?.totalPages ?? payload?.data?.totalPages ?? payload?.page?.totalPages ?? payload?.pagination?.totalPages ?? payload?.data?.page?.totalPages);
       if (Number.isFinite(pages) && pages > 0) totalPages = pages;
       if (totalPages !== null) {
         page += 1;

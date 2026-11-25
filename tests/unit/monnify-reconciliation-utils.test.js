@@ -3,6 +3,7 @@ import {
   monnifyTransactionFailureReason,
   monnifyTransactionReference,
   monnifyTransactionStatus,
+  normalizeMonnifyTransactionStatus,
   normalizeMonnifyTransactionMap,
   unwrapMonnifyTransactionRows,
   isMonnifyBatchFullyReconciled,
@@ -19,6 +20,19 @@ describe("Monnify payroll reconciliation response mapping", () => {
     expect(monnifyTransactionReference({ transaction: { reference: "EMS-PAY-2" } })).toBe("EMS-PAY-2");
     expect(monnifyTransactionStatus({ transactionStatus: "success" })).toBe("SUCCESS");
     expect(monnifyTransactionStatus({ paymentStatus: "failed" })).toBe("FAILED");
+  });
+
+
+  it("normalizes provider success labels to a final paid status", () => {
+    for (const value of ["SUCCESS", "successful", "Completed", "TRANSFER_SUCCESSFUL", "successful transaction"]) {
+      expect(normalizeMonnifyTransactionStatus(value)).toBe("SUCCESS");
+    }
+    expect(monnifyTransactionStatus({ responseBody: { transactionStatus: "SUCCESSFUL" } })).toBe("SUCCESS");
+  });
+
+  it("reads nested transaction references and transfer status fields", () => {
+    expect(monnifyTransactionReference({ transaction: { transactionReferenceNo: "EMS-NESTED" } })).toBe("EMS-NESTED");
+    expect(monnifyTransactionStatus({ transferStatus: "successful" })).toBe("SUCCESS");
   });
 
   it("preserves the actual provider failure comment for employee payroll rows", () => {
