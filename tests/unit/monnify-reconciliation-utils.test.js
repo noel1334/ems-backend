@@ -7,9 +7,18 @@ import {
   normalizeMonnifyTransactionMap,
   unwrapMonnifyTransactionRows,
   isMonnifyBatchFullyReconciled,
+  MONNIFY_FINAL_PAID_STATUSES,
+  MONNIFY_FINAL_FAILED_STATUSES,
 } from "../../src/modules/payments/monnify/monnify.reconciliation.utils.js";
 
 describe("Monnify payroll reconciliation response mapping", () => {
+  it("defines final provider statuses used by reconciliation and retry protection", () => {
+    expect(MONNIFY_FINAL_PAID_STATUSES.has("SUCCESS")).toBe(true);
+    expect(MONNIFY_FINAL_FAILED_STATUSES.has("FAILED")).toBe(true);
+    expect(MONNIFY_FINAL_FAILED_STATUSES.has("REVERSED")).toBe(true);
+    expect(MONNIFY_FINAL_FAILED_STATUSES.has("EXPIRED")).toBe(true);
+  });
+
   it("unwraps the content wrapper returned by the bulk transaction endpoint", () => {
     const rows = [{ reference: "EMS-ONE", status: "SUCCESS" }];
     expect(unwrapMonnifyTransactionRows({ responseBody: { data: { content: rows } } })).toEqual(rows);

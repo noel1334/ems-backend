@@ -14,6 +14,8 @@ import {
   normalizeMonnifyTransactionMap,
   unwrapMonnifyTransactionRows,
   isMonnifyBatchFullyReconciled,
+  MONNIFY_FINAL_PAID_STATUSES as finalPaidStatuses,
+  MONNIFY_FINAL_FAILED_STATUSES as finalFailedStatuses,
 } from "./monnify.reconciliation.utils.js";
 
 const OPEN_BATCH_STATUSES = [
@@ -1028,17 +1030,15 @@ export async function refreshPayrollBatch(companyId, batchId) {
     if (disbursementId && status) makeTransactionUpdate(transaction, reference, disbursementId, status);
   }
 
-  // The bulk history response can omit rows or return a wrapper/status field
-  // different from the batch summary. Verify every unmatched original EMS
-  // transaction reference using Monnify's single-transfer summary endpoint.
-  const providerSummaryIsTerminal = [
-    "COMPLETED", "COMPLETED_WITH_ERRORS", "PARTIALLY_COMPLETED", "SUCCESS", "SUCCESSFUL",
-    "FAILED", "FAILED_ON_ACCOUNTS_VALIDATION", "REJECTED", "CANCELLED", "CANCELED",
-  ].includes(summaryStatus);
-  const unmatched = providerSummaryIsTerminal ? mappedRows.filter(([, disbursementId]) => {
+  // Monnify's batch summary can remain AWAITING_PROCESSING even after an
+  // individual beneficiary transfer has reached SUCCESS. The bulk-history API
+  // can also omit a row. Therefore verify every unresolved original EMS
+  // reference independently; never gate this recovery on the batch summary.
+  // This is a read-only status query and does not initiate or retry a transfer.
+  const unmatched = mappedRows.filter(([, disbursementId]) => {
     const current = updatesByDisbursement.get(disbursementId);
     return !current || current.data.status === "PROCESSING";
-  }) : [];
+  });
   if (unmatched.length) {
     const individualResults = await mapWithConcurrency(unmatched, 4, async ([reference, disbursementId]) => {
       try {
@@ -1121,7 +1121,8 @@ export async function refreshPayrollBatch(companyId, batchId) {
     transactions: transactionPayload,
     transactionHistoryWarning,
     status: summaryStatus,
-    reconciledTransactions: updates.length,
+    reconciledTransactions: updates.filter((update) => ["PAID", "FAILED"].includes(update.data.status)).length,
+    pendingTransactions: updates.filter((update) => update.data.status === "PROCESSING").length,
   };
 }
 

@@ -47,6 +47,11 @@ const cleanText = (value) => (typeof value === "string" || typeof value === "num
   ? String(value).trim()
   : "";
 
+// Provider final states used by payroll reconciliation and safe retry guards.
+// normalizeMonnifyTransactionStatus maps success/failure aliases into these values.
+export const MONNIFY_FINAL_PAID_STATUSES = new Set(["SUCCESS"]);
+export const MONNIFY_FINAL_FAILED_STATUSES = new Set(["FAILED", "REVERSED", "EXPIRED"]);
+
 export function monnifyTransactionReference(row) {
   const nested = row?.transaction && typeof row.transaction === "object" ? row.transaction : {};
   for (const value of [
