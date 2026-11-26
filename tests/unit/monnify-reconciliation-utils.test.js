@@ -9,6 +9,8 @@ import {
   isMonnifyBatchFullyReconciled,
   MONNIFY_FINAL_PAID_STATUSES,
   MONNIFY_FINAL_FAILED_STATUSES,
+  getUnresolvedMonnifyReferences,
+  areMonnifyBatchTransfersFinal,
 } from "../../src/modules/payments/monnify/monnify.reconciliation.utils.js";
 
 describe("Monnify payroll reconciliation response mapping", () => {
@@ -17,6 +19,28 @@ describe("Monnify payroll reconciliation response mapping", () => {
     expect(MONNIFY_FINAL_FAILED_STATUSES.has("FAILED")).toBe(true);
     expect(MONNIFY_FINAL_FAILED_STATUSES.has("REVERSED")).toBe(true);
     expect(MONNIFY_FINAL_FAILED_STATUSES.has("EXPIRED")).toBe(true);
+  });
+
+  it("checks unresolved employee references without waiting for a terminal batch status", () => {
+    const mappedRows = [["EMS-PAID", "disb-1"], ["EMS-FAILED", "disb-2"], ["EMS-PENDING", "disb-3"]];
+    const updates = new Map([
+      ["disb-1", { data: { status: "PAID" } }],
+      ["disb-2", { data: { status: "FAILED" } }],
+    ]);
+
+    expect(getUnresolvedMonnifyReferences(mappedRows, updates)).toEqual([["EMS-PENDING", "disb-3"]]);
+  });
+
+  it("keeps a payroll batch locked if any submitted beneficiary reference is missing", () => {
+    expect(areMonnifyBatchTransfersFinal(3, ["one", "two", "three"], [
+      { status: "PAID" }, { status: "FAILED" }, { status: "PAID" },
+    ])).toBe(true);
+    expect(areMonnifyBatchTransfersFinal(3, ["one", "two"], [
+      { status: "PAID" }, { status: "FAILED" },
+    ])).toBe(false);
+    expect(areMonnifyBatchTransfersFinal(3, ["one", "two", "three"], [
+      { status: "PAID" }, { status: "FAILED" }, { status: "PROCESSING" },
+    ])).toBe(false);
   });
 
   it("unwraps the content wrapper returned by the bulk transaction endpoint", () => {

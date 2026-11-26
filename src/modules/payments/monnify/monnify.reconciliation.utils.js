@@ -176,3 +176,29 @@ export function isMonnifyBatchFullyReconciled(batch, disbursements = []) {
   if (!Number.isInteger(expected) || expected <= 0 || disbursements.length !== expected) return false;
   return disbursements.every((row) => ["PAID", "FAILED"].includes(String(row?.status || "").toUpperCase()));
 }
+
+/**
+ * Select references whose employee payouts still need a provider status query.
+ * This intentionally does not accept or inspect the aggregate batch status:
+ * Monnify can leave a batch at AWAITING_PROCESSING after OTP while individual
+ * transfers have already reached SUCCESS or FAILED.
+ */
+export function getUnresolvedMonnifyReferences(mappedRows, updatesByDisbursement) {
+  return mappedRows.filter(([, disbursementId]) => {
+    const update = updatesByDisbursement.get(disbursementId);
+    return !update || !["PAID", "FAILED"].includes(String(update?.data?.status || "").toUpperCase());
+  });
+}
+
+/**
+ * A previous batch is safe to release for another submission only when every
+ * transaction expected by Monnify is mapped to an EMS payout and that payout
+ * has a final local status. Missing reference-map entries must fail closed.
+ */
+export function areMonnifyBatchTransfersFinal(totalTransactions, mappedIds = [], disbursements = []) {
+  const expected = Number(totalTransactions);
+  if (!Number.isInteger(expected) || expected <= 0) return false;
+  if (!Array.isArray(mappedIds) || mappedIds.length !== expected) return false;
+  if (!Array.isArray(disbursements) || disbursements.length !== expected) return false;
+  return disbursements.every((row) => ["PAID", "FAILED"].includes(String(row?.status || "").toUpperCase()));
+}

@@ -5,6 +5,11 @@ import { monnifyFailureMessage } from "./monnify.utils.js";
 import { unwrapMonnifyTransactionRows } from "./monnify.reconciliation.utils.js";
 
 const baseUrl = (environment) => environment === "live" ? "https://api.monnify.com" : "https://sandbox.monnify.com";
+const shouldTryLegacyDisbursementPath = (error) => {
+  const status = Number(error?.statusCode || 0);
+  const providerCode = String(error?.details?.providerCode || error?.code || "").toUpperCase();
+  return status === 404 || status === 405 || providerCode === "D02";
+};
 const unwrap = (response) => {
   const body = response?.data;
   if (!body?.requestSuccessful) {
@@ -115,7 +120,16 @@ export const monnifyEndpoints = {
   singleStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/single/summary", { params: { reference } }),
   authorizeBatch: (connection, reference, authorizationCode) => monnifyRequest(connection, "POST", "/api/v2/disbursements/batch/validate-otp", { data: { reference, authorizationCode } }),
   resendBatchOtp: (connection, reference) => monnifyRequest(connection, "POST", "/api/v2/disbursements/single/resend-otp", { data: { reference } }),
-  batchStatus: (connection, reference) => monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/summary", { params: { batchReference: reference } }),
+  batchStatus: async (connection, reference) => {
+    try {
+      // Current Monnify documentation: GET /disbursements/bulk/summary?batchReference=...
+      return await monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/summary", { params: { batchReference: reference } });
+    } catch (error) {
+      if (!shouldTryLegacyDisbursementPath(error)) throw error;
+      // Compatibility with Monnify's older documented batch-summary route.
+      return monnifyRequest(connection, "GET", "/api/v2/disbursements/batch/summary", { params: { reference } });
+    }
+  },
   batchTransactions: async (connection, reference, pageNo = 0, pageSize = 100) => {
     const all = [];
     let page = pageNo;
@@ -124,9 +138,20 @@ export const monnifyEndpoints = {
     // /api/v2/disbursements/bulk/ (not /bulk/{batchReference}/transactions).
     // Restrict the collection query to this batch and fetch every page.
     do {
-      const payload = await monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/", {
-        params: { batchReference: reference, pageNo: page, pageSize },
-      });
+      let payload;
+      try {
+        // Current Monnify documentation uses the bulk collection endpoint.
+        payload = await monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/", {
+          params: { batchReference: reference, pageNo: page, pageSize },
+        });
+      } catch (error) {
+        if (!shouldTryLegacyDisbursementPath(error)) throw error;
+        // Older Monnify API reference specifies this per-batch route. It is a
+        // read-only compatibility fallback for accounts still on that route.
+        payload = await monnifyRequest(connection, "GET", `/api/v2/disbursements/bulk/${encodeURIComponent(reference)}/transactions`, {
+          params: { pageNo: page, pageSize },
+        });
+      }
       const rows = unwrapMonnifyTransactionRows(payload);
       if (Array.isArray(rows)) all.push(...rows);
       const pages = Number(payload?.totalPages ?? payload?.data?.totalPages ?? payload?.page?.totalPages ?? payload?.pagination?.totalPages ?? payload?.data?.page?.totalPages);
