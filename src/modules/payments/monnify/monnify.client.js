@@ -120,12 +120,13 @@ export const monnifyEndpoints = {
     const all = [];
     let page = pageNo;
     let totalPages = null;
-    // Bulk transaction history is paginated. Reconcile every page so a large payroll
-    // does not leave employees beyond the first 100 stuck in PROCESSING.
+    // Monnify documents Get Bulk Transfer Transactions at the collection URL
+    // /api/v2/disbursements/bulk/ (not /bulk/{batchReference}/transactions).
+    // Restrict the collection query to this batch and fetch every page.
     do {
-      // Monnify's Get Bulk Transfer Transactions endpoint places the batch reference
-      // in the URL path: /bulk/{batchReference}/transactions?pageNo=0&pageSize=100.
-      const payload = await monnifyRequest(connection, "GET", `/api/v2/disbursements/bulk/${encodeURIComponent(reference)}/transactions`, { params: { pageNo: page, pageSize } });
+      const payload = await monnifyRequest(connection, "GET", "/api/v2/disbursements/bulk/", {
+        params: { batchReference: reference, pageNo: page, pageSize },
+      });
       const rows = unwrapMonnifyTransactionRows(payload);
       if (Array.isArray(rows)) all.push(...rows);
       const pages = Number(payload?.totalPages ?? payload?.data?.totalPages ?? payload?.page?.totalPages ?? payload?.pagination?.totalPages ?? payload?.data?.page?.totalPages);
@@ -138,6 +139,12 @@ export const monnifyEndpoints = {
       }
       if (page - pageNo >= 50) break;
     } while (totalPages === null || page < totalPages);
-    return { content: all, totalElements: all.length, totalPages: totalPages ?? (all.length ? Math.ceil(all.length / pageSize) : 0) };
+    // Defensively retain only rows belonging to the requested batch if the
+    // provider returns a wider transaction collection despite the filter.
+    const matchingRows = all.filter((row) => {
+      const rowBatchReference = String(row?.batchReference ?? row?.batch?.batchReference ?? row?.batch?.reference ?? "").trim();
+      return !rowBatchReference || rowBatchReference === String(reference).trim();
+    });
+    return { content: matchingRows, totalElements: matchingRows.length, totalPages: totalPages ?? (matchingRows.length ? Math.ceil(matchingRows.length / pageSize) : 0) };
   },
 };
