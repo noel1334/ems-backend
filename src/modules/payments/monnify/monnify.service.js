@@ -16,6 +16,7 @@ import {
   isMonnifyBatchFullyReconciled,
   getUnresolvedMonnifyReferences,
   areMonnifyBatchTransfersFinal,
+  isMonnifySinglePaymentSafeForPendingDisbursement,
   MONNIFY_FINAL_PAID_STATUSES as finalPaidStatuses,
   MONNIFY_FINAL_FAILED_STATUSES as finalFailedStatuses,
 } from "./monnify.reconciliation.utils.js";
@@ -1283,24 +1284,32 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
   if (!row) throw new AppError("Payroll disbursement was not found.", 404);
   const isConfirmedFailedRetry = row.status === "FAILED" && row.provider === "MONNIFY"
     && finalFailedStatuses.has(String(row.providerStatus || "").toUpperCase());
+  const isUnsubmittedPendingRow = row.status === "PENDING" && !row.provider && !row.externalReference;
   let isRejectedBatchFallback = false;
-  if (row.status === "PENDING" && !row.provider && !row.externalReference) {
+  let isEligibleUnsubmittedSinglePayment = false;
+  if (isUnsubmittedPendingRow) {
     const periodBatches = await prisma.companyMonnifyBatch.findMany({
       where: { companyId, payrollPeriodId: periodId },
       select: { providerStatus: true, providerResponse: true },
     });
-    // All prior Monnify bulk attempts for this period must be explicitly rejected.
-    // SUBMISSION_UNKNOWN, SUBMITTING or any accepted/in-flight batch blocks fallback.
     isRejectedBatchFallback = periodBatches.length > 0
       && periodBatches.every((batch) => String(batch.providerStatus || "").toUpperCase() === "SUBMISSION_REJECTED"
         && batch.providerResponse?.singleFallbackAllowed === true);
+    isEligibleUnsubmittedSinglePayment = isMonnifySinglePaymentSafeForPendingDisbursement(row.id, periodBatches);
   }
-  if (!isConfirmedFailedRetry && !isRejectedBatchFallback) {
+  if (!isConfirmedFailedRetry && !isEligibleUnsubmittedSinglePayment) {
     throw new AppError(
-      "Individual Monnify payment is allowed only for a confirmed failed Monnify transfer or after every Monnify bulk attempt for this payroll period has been confirmed rejected. Refresh any uncertain batch first.",
+      "This employee cannot be paid individually yet. The employee must still be pending without a transfer reference, and no accepted or uncertain Monnify batch may contain this employee. Reconcile any batch with an unknown or existing employee reference first.",
       409,
       { code: "MONNIFY_SINGLE_RETRY_NOT_ALLOWED" },
     );
+  }
+  const payrollPeriod = await prisma.payrollPeriod.findFirst({
+    where: { id: periodId, companyId, deletedAt: null },
+    select: { status: true, isActive: true },
+  });
+  if (!payrollPeriod || payrollPeriod.status !== "FINALIZED" || payrollPeriod.isActive === false) {
+    throw new AppError("Individual salary transfers are available only for an active, finalized payroll period.", 409, { code: "MONNIFY_SINGLE_PAYROLL_NOT_FINALIZED" });
   }
   if (row.status === "FAILED" && row.provider === "MONNIFY" && !finalFailedStatuses.has(String(row.providerStatus || "").toUpperCase())) {
     throw new AppError("Monnify has not confirmed a final failure for this transfer. Refresh its original reference before retrying.", 409, { code: "MONNIFY_SINGLE_RETRY_UNVERIFIED" });
@@ -1330,6 +1339,17 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
   const reference = `EMS-SINGLE-${crypto.randomUUID()}`;
   const claim = await prisma.$transaction(async (tx) => {
     await claimPayrollFundingRoute(tx, { companyId, periodId, fundingRoute: "DIRECT_PROVIDER", provider: "MONNIFY" });
+    if (isUnsubmittedPendingRow) {
+      // Recheck the batch map inside the serializable claim transaction so a
+      // concurrent batch submission cannot race this individual transfer.
+      const latestBatches = await tx.companyMonnifyBatch.findMany({
+        where: { companyId, payrollPeriodId: periodId },
+        select: { providerStatus: true, providerResponse: true },
+      });
+      if (!isMonnifySinglePaymentSafeForPendingDisbursement(row.id, latestBatches)) {
+        throw new AppError("A Monnify batch now contains this employee or has an uncertain reference map. Refresh and reconcile that batch before paying individually.", 409, { code: "MONNIFY_SINGLE_BATCH_RACE_BLOCKED" });
+      }
+    }
     const updated = await tx.payrollDisbursement.updateMany({
       where: isConfirmedFailedRetry
         ? { id: row.id, companyId, status: "FAILED", provider: "MONNIFY", providerStatus: { in: [...finalFailedStatuses] } }
@@ -1337,7 +1357,7 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
       data: {
         fundingRoute: "DIRECT_PROVIDER", method: "MONNIFY_SINGLE_TRANSFER", status: "PROCESSING", provider: "MONNIFY",
         providerStatus: "SUBMITTING_SINGLE", providerTransferId: reference, externalReference: reference,
-        providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING", recoveredFromRejectedBatch: isRejectedBatchFallback },
+        providerResponse: { _emsSingleTransfer: true, status: "SUBMITTING", recoveredFromRejectedBatch: isRejectedBatchFallback, paidFromUnsubmittedPendingRow: isEligibleUnsubmittedSinglePayment },
         failureReason: null, updatedBy: userId,
       },
     });
@@ -1385,7 +1405,7 @@ export async function submitSinglePayrollTransfer(companyId, periodId, disbursem
   await prisma.$transaction(async (tx) => {
     await tx.payrollDisbursement.update({ where: { id: row.id }, data: {
       ...result, provider: "MONNIFY", providerTransferId: result.providerTransferId || reference,
-      providerResponse: { ...response, _emsSingleTransfer: true, recoveredFromRejectedBatch: isRejectedBatchFallback },
+      providerResponse: { ...response, _emsSingleTransfer: true, recoveredFromRejectedBatch: isRejectedBatchFallback, paidFromUnsubmittedPendingRow: isEligibleUnsubmittedSinglePayment },
       externalReference: reference, updatedBy: userId, failureReason: result.failureReason,
     } });
     const legacyReservation = await tx.walletLedgerEntry.findUnique({ where: { reference: `MONNIFY-SINGLE-RETRY-RESERVE-${row.id}-${reference}` }, select: { id: true } });

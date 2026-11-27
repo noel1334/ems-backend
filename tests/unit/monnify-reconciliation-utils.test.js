@@ -11,6 +11,7 @@ import {
   MONNIFY_FINAL_FAILED_STATUSES,
   getUnresolvedMonnifyReferences,
   areMonnifyBatchTransfersFinal,
+  isMonnifySinglePaymentSafeForPendingDisbursement,
 } from "../../src/modules/payments/monnify/monnify.reconciliation.utils.js";
 
 describe("Monnify payroll reconciliation response mapping", () => {
@@ -40,6 +41,34 @@ describe("Monnify payroll reconciliation response mapping", () => {
     ])).toBe(false);
     expect(areMonnifyBatchTransfersFinal(3, ["one", "two", "three"], [
       { status: "PAID" }, { status: "FAILED" }, { status: "PROCESSING" },
+    ])).toBe(false);
+  });
+
+  it("allows a pending employee to be paid singly when no Monnify batch has been created", () => {
+    expect(isMonnifySinglePaymentSafeForPendingDisbursement("disb-pending", [])).toBe(true);
+  });
+
+  it("allows an excluded pending employee to be paid singly while the batch contains other employees", () => {
+    expect(isMonnifySinglePaymentSafeForPendingDisbursement("disb-skipped", [
+      { providerStatus: "AWAITING_PROCESSING", providerResponse: { _emsTransactionMap: { "EMS-valid-1": "disb-valid-1", "EMS-valid-2": "disb-valid-2" } } },
+    ])).toBe(true);
+  });
+
+  it("blocks individual payment when the employee is mapped to an accepted batch or the batch map is unknown", () => {
+    expect(isMonnifySinglePaymentSafeForPendingDisbursement("disb-1", [
+      { providerStatus: "IN_PROGRESS", providerResponse: { _emsTransactionMap: { "EMS-1": "disb-1" } } },
+    ])).toBe(false);
+    expect(isMonnifySinglePaymentSafeForPendingDisbursement("disb-1", [
+      { providerStatus: "SUBMISSION_UNKNOWN", providerResponse: { message: "timeout" } },
+    ])).toBe(false);
+  });
+
+  it("allows a mapped row only when the whole batch was explicitly rejected for safe fallback", () => {
+    expect(isMonnifySinglePaymentSafeForPendingDisbursement("disb-1", [
+      { providerStatus: "SUBMISSION_REJECTED", providerResponse: { singleFallbackAllowed: true, _emsTransactionMap: { "EMS-1": "disb-1" } } },
+    ])).toBe(true);
+    expect(isMonnifySinglePaymentSafeForPendingDisbursement("disb-1", [
+      { providerStatus: "SUBMISSION_REJECTED", providerResponse: { singleFallbackAllowed: false, _emsTransactionMap: { "EMS-1": "disb-1" } } },
     ])).toBe(false);
   });
 

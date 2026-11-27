@@ -171,6 +171,33 @@ export function normalizeMonnifyTransactionMap(providerResponse) {
     .filter(([reference, disbursementId]) => reference && disbursementId));
 }
 
+/**
+ * A pending employee may be paid as a single transfer only when no accepted or
+ * uncertain Monnify batch contains that employee. Batches with a missing map
+ * fail closed unless Monnify explicitly rejected the whole batch and EMS marked
+ * that rejection as safe for individual fallback.
+ */
+export function isMonnifySinglePaymentSafeForPendingDisbursement(disbursementId, batches = []) {
+  const id = cleanText(disbursementId);
+  if (!id || !Array.isArray(batches)) return false;
+
+  for (const batch of batches) {
+    const status = cleanText(batch?.providerStatus).toUpperCase();
+    const explicitlyRejected = status === "SUBMISSION_REJECTED"
+      && batch?.providerResponse?.singleFallbackAllowed === true;
+    if (status === "SUBMISSION_REJECTED") {
+      if (!explicitlyRejected) return false;
+      continue;
+    }
+
+    const transactionMap = normalizeMonnifyTransactionMap(batch?.providerResponse);
+    if (!Object.keys(transactionMap).length) return false;
+    if (Object.values(transactionMap).includes(id)) return false;
+  }
+
+  return true;
+}
+
 export function isMonnifyBatchFullyReconciled(batch, disbursements = []) {
   const expected = Number(batch?.totalTransactions || 0);
   if (!Number.isInteger(expected) || expected <= 0 || disbursements.length !== expected) return false;
